@@ -22,11 +22,11 @@ class BasePromptBuilder:
     def _demand_block(self, agent: "Agent") -> str:
         d = agent.demand
         n = agent.need
-        th = agent.demand_threshold
+        t = agent.demand_threshold
         lines = ["- 需求状态（当前属性=客观拥有量 0→1，急迫度=主观急迫度 1→0，当前属性超过阈值表示已满足）："]
         for k, urgency in d.items():
             need_val = n.get(k, 0.0)
-            th = th.get(k, "?")
+            th = t.get(k, "?")
             status = "已满足" if isinstance(th, float) and need_val > th else "未满足"
             lines.append(
                 f"  {k}：当前属性 {need_val:.2f} | 急迫度 {urgency:.2f}"

@@ -64,16 +64,43 @@ World.step()
         │     ├── policy.decide(...)     → LLMPolicy builds prompt, calls OpenAI
         │     └── parser.parse_action()  → extracts <Action>JSON</Action>
         ├── world.execute(agent, action) → dispatches to Tool.run(),
-        │                                  broadcasts Event to nearby agents
+        │                                  broadcasts Event to nearby agents,
+        │                                  computes reward = Σ(Δneed[k] × old_demand[k])
         ├── agent.append_trajectory()
-        └── agent.get_reflect()          → Reflect.step():
-                                              progress check → micro-reflect if stuck
-                                              task completion check
-                                              trajectory flush to memory if done
+        ├── agent.get_reflect()          → Reflect.step():
+        │                                    progress check → micro-reflect if stuck
+        │                                    task completion check (need > threshold)
+        │                                    trajectory flush to memory if done
+        └── agent.tick_needs()           → natural need decays every tick
   └── opinion_updater.online_update()    → opinion shift from browsed posts
   └── opinion_updater.offline_update()  → (every m ticks) conformity with friends
   └── optional: _conversation_phase()   → multi-turn agent.conversation_step()
 ```
+
+### Need / demand design
+
+Each agent has two distinct attribute dicts:
+
+| Field | Direction | Initial | Semantics | Who can change it |
+|-------|-----------|---------|-----------|------------------|
+| `agent.need` | 0=lacking → 1=full | 0.0 | Objective physical state | Real actions + natural decay |
+| `agent.demand` | 1=urgent → 0=satisfied | 1.0 | Subjective urgency | Real actions + offline social conformity |
+
+Keys for both dicts: `"satiety"`, `"relax"`.
+
+**Reward formula**: `Σ(Δneed[k] × old_demand[k])` — need increase × urgency at time of action.
+
+**Task completion**: `need[k] > threshold` (objective state must exceed threshold, not demand).
+
+**Stuck detection** (`Reflect.step()`): tracks whether `need` is *increasing* each tick. If not, `agent.stuck_ticks` increments; at `micro_reflect_interval` ticks micro-reflection fires.
+
+**Natural per-tick decays** (`agent.tick_needs()`, called after `get_reflect()`):
+- `satiety` need decreases by `satiety_decay_rate` every tick
+- `relax` need decreases by `relax_decay_rate` every tick
+- `relax` need increases by `relax_increase_rate` when `task == "none"` (recovery)
+- `demand` does **not** change naturally — only through actions or offline social conformity
+
+**Movement cost**: `move()` in `operator_tools.py` deducts `relax_moving_usage × steps` from `relax` need.
 
 ### Module responsibilities
 
@@ -81,13 +108,13 @@ World.step()
 |--------|---------------|
 | `persona/runtime.py` | Composition root — `build()` wires every service; `create_agent()` registers agents; `reset()` rebuilds world/platform |
 | `persona/config.py` | `AgentConfig` dataclass — single source of truth for all parameters |
-| `world/world.py` | Tick loop, parallel execution, action dispatch, event broadcast, opinion update hooks, conversation phase |
-| `persona/agents/agent.py` | Agent state: position, demand, task, `current_focus`, `stuck_ticks`, history, opinion, trust dicts; drives `step()`, `social_step()`, `conversation_step()` |
+| `world/world.py` | Tick loop, parallel execution, action dispatch, event broadcast, reward computation, opinion update hooks, conversation phase |
+| `persona/agents/agent.py` | Agent state: `need`, `demand`, task, `current_focus`, `stuck_ticks`, history, opinion, trust dicts; drives `step()`, `social_step()`, `conversation_step()`, `tick_needs()` |
 | `persona/agents/policy.py` | `LLMPolicy`: builds prompt, calls LLM, returns parsed action string |
 | `persona/agents/prompt.py` | 4 prompt builders (`WorldPromptBuilder`, `SocialPromptBuilder`, `ConversationPromptBuilder`, `ReflectPromptBuilder`). All prompts are Chinese, use `<Think>` + `<Action>JSON</Action>` format |
 | `persona/agents/parser.py` | `ActionParser`: extracts `<Action>` block, validates JSON; returns `""` on failure |
 | `persona/agent_memory/mem.py` | `MultiAgentMemoryManager`: one ChromaDB collection per agent; `smart_retrieve()` asks LLM for keywords then vector-searches |
-| `persona/reflect/reflect.py` | Task lifecycle: progress tracking, micro-reflection trigger, task completion, trajectory flush |
+| `persona/reflect/reflect.py` | Task lifecycle: progress tracking (need-based), micro-reflection trigger, task completion, trajectory flush |
 | `persona/opinion/updater.py` | `OpinionUpdater`: online update (per tick, post-browsing) and offline update (every m ticks, friend conformity) |
 | `persona/opinion/scorer.py` | `evaluate_opinion(content) -> float` — stub for LLM-based stance extraction (returns 0.5) |
 | `tools/operator_tools.py` | `Operator` (move/eat/speak) and `SocialOperator` (send_post/comment/like/dislike) |
@@ -104,20 +131,20 @@ Agents communicate with the world via a text protocol:
 ### Task and micro-reflection system
 
 Tasks are managed in `persona/reflect/reflect.py`:
-- **`_TASK_DEMAND_MAP`**: maps task name → demand key (e.g. `"eat something"` → `"hunger"`)
+- **`_TASK_DEMAND_MAP`**: maps task name → need/demand key (e.g. `"eat something"` → `"satiety"`)
 - **`_TASK_INITIAL_FOCUS`**: maps task name → default `current_focus` string injected when a task is assigned
 - **Adding a new task**: add entries to both dicts; `_TASK_EXTRA_DESC` is optional
 
-Each tick, `Reflect.step()` checks whether the task's demand is decreasing. If not, `agent.stuck_ticks` increments. When `stuck_ticks >= config.micro_reflect_interval` (default 3), a lightweight LLM call generates `<Insight>` (stored as memory) and `<Focus>` (updates `agent.current_focus`). The focus string appears in the next tick's action prompt.
+Each tick, `Reflect.step()` checks whether the task's `need` is increasing. If not, `agent.stuck_ticks` increments. When `stuck_ticks >= config.micro_reflect_interval` (default 3), a lightweight LLM call generates `<Insight>` (stored as memory) and `<Focus>` (updates `agent.current_focus`). The focus string appears in the next tick's action prompt.
 
-`agent.update_demand(demand_key: str, demand_delta: float)` is the generic demand modifier — do not use keyword args.
+`agent.update_demand(demand_key, demand_delta)` and `agent.update_need(need_key, need_delta)` are the generic modifiers — do not use keyword args.
 
 ### Opinion propagation system
 
 Configured via `AgentConfig` fields (`initial_opinion`, `online_opinion_lr`, `self_confidence`, `offline_opinion_lr`, `offline_update_interval`, `default_online_trust`, `default_offline_trust`, `friend_trust_threshold`).
 
 - **Online**: after each tick, `OpinionUpdater.online_update()` shifts opinion toward the trust-weighted average of seen posts: `Δ = α × (social_avg − opinion) × (1 − σ)`
-- **Offline**: every m ticks, `offline_update()` applies conformity with agents whose `offline_trust >= friend_trust_threshold`; also applies conformity to demand values
+- **Offline**: every m ticks, `offline_update()` applies conformity with agents whose `offline_trust >= friend_trust_threshold`; also applies conformity to `demand` values (not `need`)
 - `like_post` / `dislike_post` adjust `online_trust` ±0.05
 - `send_post` records `evaluate_opinion(content)` as the post's `opinion_index`
 
