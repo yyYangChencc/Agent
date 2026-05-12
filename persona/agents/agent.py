@@ -40,7 +40,7 @@ class Agent:
         self.trajectory_buffer: list[dict] = []  # (obs, action, reward) per step within current task
 
         self.need: dict[str, float] = {"satiety": 0.0, "relax": 0.0}
-        self.demand: dict[str, float] = {"satiety": 1, "relax": 1}
+        self.demand: dict[str, float] = {"satiety": 1.0, "relax": 1.0}
         self.demand_threshold: dict[str, float] = {
             "satiety": config.satiety_threshold,
             "relax": config.relax_threshold
@@ -275,6 +275,12 @@ class Agent:
 
     def update_emotion(self, new_emotion: str) -> None:
         self.emotion = new_emotion
+
+    def tick_needs(self) -> None:
+        self.update_need("satiety", -self.config.satiety_decay_rate)
+        self.update_need("relax", -self.config.relax_decay_rate)
+        if self.task == "none":
+            self.update_need("relax", self.config.relax_increase_rate)
 
     def get_reflect(self) -> None:
         self.reflect.step(self)

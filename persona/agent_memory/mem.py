@@ -77,8 +77,8 @@ class MultiAgentMemoryManager:
         )
         user = (
             f"任务：{task}\n"
-            f"需求：hunger={demand.get('hunger', 0):.2f}  relax={demand.get('relax', 0):.2f}\n"
-            f"阈值：hunger<{demand_threshold.get('hunger', 0):.2f}  relax<{demand_threshold.get('relax', 0):.2f}\n"
+            f"需求：satiety={demand.get('satiety', 0):.2f}  relax={demand.get('relax', 0):.2f}\n"
+            f"阈值：satiety<{demand_threshold.get('satiety', 0):.2f}  relax<{demand_threshold.get('relax', 0):.2f}\n"
             f"观测：{observation}"
         )
         try:

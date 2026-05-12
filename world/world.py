@@ -43,7 +43,8 @@ class World:
                 action = agent.step(obs)
                 reward = self.execute(agent, action)
                 agent.append_trajectory(obs, action, reward)
-                agent.get_reflect()
+                agent.get_reflect()     #反思总结
+                agent.tick_needs()      #需求的自然衰减
             except Exception as e:
                 logger.error("[World] agent %s 本轮执行失败: %s", agent.id, e, exc_info=True)
 
@@ -179,7 +180,7 @@ class World:
                         )
         reward = sum(
             (agent.need.get(k, 0.0) - old_need.get(k, 0.0)) * old_demand.get(k, 0.0)
-            for k in self.need
+            for k in agent.need
         )
         agent.add_history("reward: ", reward)
         return reward

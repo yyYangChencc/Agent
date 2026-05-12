@@ -138,6 +138,8 @@ class Operator:
                 return f"{operator_ID}原地不动{interact_msg}"
             return f"无法移动，[{old_x},{old_y}]周围路径被阻挡"
 
+        agent.update_need("relax", -agent.config.relax_moving_usage * steps)
+
         with self.world._world_lock:
             if not self.world.map.is_empty(cur_x, cur_y):
                 return f"移动失败，[{cur_x},{cur_y}]已被占用，请下轮重试"
@@ -175,8 +177,8 @@ class Operator:
                 logger.warning("[%s] 距离食物 %s 过远", operator_ID, ID)
                 return "距离过远吃不到"
             operated.eaten()
-            agent.update_demand("hunger", -operated.provide)
-            agent.update_need("hunger", operated.provide)
+            agent.update_demand("satiety", -operated.provide)
+            agent.update_need("satiety", operated.provide)
         logger.info("[%s] 成功吃到 %s", operator_ID, ID)
         return f"{operator_ID}成功吃到{ID}"
 

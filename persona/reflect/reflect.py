@@ -40,8 +40,6 @@ class Reflect:
         if agent.task == "done":
             return
         if agent.task == "none":
-            agent.update_demand("relax", -self.config.relax_decay_rate)
-            agent.update_need("relax", self.config.relax_decay_rate)
             agent._prev_task_need = None
             agent.stuck_ticks = 0
             self._decide_next_task(agent)
