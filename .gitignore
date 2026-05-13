@@ -7,4 +7,6 @@ chroma_agents/
 .vscode/
 docs/
 venv/
+logs/
+CLAUDE.md
 frontend/node_modules/
