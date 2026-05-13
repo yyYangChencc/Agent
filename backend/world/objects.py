@@ -5,7 +5,7 @@ class objects:
         self.position = position
         self.world = world
         self.world.add_object(self)
-
+        self.kind = "objects"
     def show_num(self):
         return self.num
 
@@ -27,6 +27,7 @@ class food(Interactable):
     def __init__(self, id: str, num: int, provide: int, position: list, world):
         super().__init__(id, num, position, world)
         self.provide = provide
+        self.kind = "food"
 
     def interact(self, agent) -> str:
         agent.update_need("satiety", self.provide)

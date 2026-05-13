@@ -246,5 +246,4 @@ async def _handle_cmd(msg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # 生产模式关闭 reload；开发时建议用 uvicorn server:app --reload --port 8000
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=False)

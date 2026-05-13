@@ -29,7 +29,9 @@ export function WorldCanvas() {
 
   const worldState = useSimStore((s) => s.worldState)
   const selectedAgentId = useSimStore((s) => s.selectedAgentId)
+  const selectedObjectId = useSimStore((s) => s.selectedObjectId)
   const selectAgent = useSimStore((s) => s.selectAgent)
+  const selectObject = useSimStore((s) => s.selectObject)
 
   // 仅在组件挂载时初始化 Pixi，销毁时清理，不依赖任何状态
   useEffect(() => {
@@ -106,6 +108,13 @@ export function WorldCanvas() {
       // 首次出现时创建 Graphics，后续只重绘
       if (!objectGfx.has(obj.id)) {
         const g = new PIXI.Graphics()
+        // 物品支持点击选中，与智能体圆圈行为一致
+        g.eventMode = 'static'
+        g.cursor = 'pointer'
+        g.on('pointerdown', () => {
+          const { selectedObjectId: curId, selectObject: sel } = useSimStore.getState()
+          sel(obj.id === curId ? null : obj.id)
+        })
         stage.addChild(g)
         objectGfx.set(obj.id, g)
       }
@@ -176,21 +185,31 @@ export function WorldCanvas() {
     if (!selGfx || !worldState) return
 
     selGfx.clear()
-    if (!selectedAgentId) return
 
-    const agent = worldState.agents.find((a) => a.id === selectedAgentId)
-    if (!agent) return
+    // 智能体选中：半透明观测范围圆 + 黄色描边
+    if (selectedAgentId) {
+      const agent = worldState.agents.find((a) => a.id === selectedAgentId)
+      if (agent) {
+        const sx = agent.pos[0] * CELL + CELL / 2
+        const sy = agent.pos[1] * CELL + CELL / 2
+        const r = OBSERVATION_RADIUS * CELL
 
-    const sx = agent.pos[0] * CELL + CELL / 2
-    const sy = agent.pos[1] * CELL + CELL / 2
-    const r = OBSERVATION_RADIUS * CELL
+        selGfx.circle(sx, sy, r).fill({ color: 0xffffff, alpha: 0.05 })
+        selGfx.circle(sx, sy, r).stroke({ color: 0xffff00, width: 1, alpha: 0.4 })
+        selGfx.circle(sx, sy, 9).stroke({ color: 0xffff00, width: 2 })
+      }
+    }
 
-    // 半透明填充表示观测范围，描边加强轮廓
-    selGfx.circle(sx, sy, r).fill({ color: 0xffffff, alpha: 0.05 })
-    selGfx.circle(sx, sy, r).stroke({ color: 0xffff00, width: 1, alpha: 0.4 })
-    // 对智能体圆圈本身加黄色描边，明确当前选中对象
-    selGfx.circle(sx, sy, 9).stroke({ color: 0xffff00, width: 2 })
-  }, [worldState, selectedAgentId])
+    // 物品选中：黄色描边矩形，比物品方块略大以便视觉区分
+    if (selectedObjectId) {
+      const obj = worldState.objects.find((o) => o.id === selectedObjectId)
+      if (obj) {
+        const sx = obj.pos[0] * CELL
+        const sy = obj.pos[1] * CELL
+        selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
+      }
+    }
+  }, [worldState, selectedAgentId, selectedObjectId])
 
   return (
     <div

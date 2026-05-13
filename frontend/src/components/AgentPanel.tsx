@@ -1,5 +1,19 @@
 import { useState } from 'react'
-import { useSimStore, AgentState } from '../store/simStore'
+import { useSimStore, AgentState, ObjectState } from '../store/simStore'
+
+// 物品种类元数据：按 objects.py 中 self.kind 值为键，提供前端展示信息
+const OBJECT_META: Record<string, { label: string; desc: string; func: string }> = {
+  food: {
+    label: '食物',
+    desc: '地图上可供采集的食物资源，智能体移动至相邻格后可执行 eat 动作消耗。',
+    func: '每次 eat 动作使智能体 satiety（饱腹度）need 值增加；num 降至 0 时资源耗尽，方块隐藏。',
+  },
+  objects: {
+    label: '通用物品',
+    desc: '场景中的基础物品。',
+    func: '具体功能由子类型决定。',
+  },
+}
 
 // need 值进度条：显示当前值、满足阈值线、急迫度
 // threshold 用白色竖线标注，未达标时进度条变红，提供直观警示
@@ -39,6 +53,44 @@ function NeedBar({
       </div>
       {/* demand 为主观急迫度（1=极度渴望，0=已满足），与 need 方向相反 */}
       <div className="text-xs text-gray-500 mt-0.5">urgency {(demand * 100).toFixed(0)}%</div>
+    </div>
+  )
+}
+
+// 点击物品后展开的详情面板，显示种类、描述、功能、位置、数量
+function ObjectDetail({ object }: { object: ObjectState }) {
+  const meta = OBJECT_META[object.kind] ?? { label: object.kind, desc: '', func: '' }
+  const numText =
+    object.num === null
+      ? '无限'
+      : object.num <= 0
+      ? '已耗尽'
+      : String(object.num)
+  const numColor =
+    object.num === null
+      ? 'text-gray-400'
+      : object.num <= 0
+      ? 'text-red-400'
+      : 'text-green-400'
+
+  return (
+    <div className="p-3 space-y-2">
+      <div className="text-sm font-semibold text-gray-200">{object.id}</div>
+      <div className="text-xs text-gray-400">
+        种类：<span className="text-yellow-300">{meta.label}</span>
+      </div>
+      {meta.desc && (
+        <div className="text-xs text-gray-400 leading-relaxed">{meta.desc}</div>
+      )}
+      {meta.func && (
+        <div className="text-xs text-blue-300 leading-relaxed">{meta.func}</div>
+      )}
+      <div className="text-xs text-gray-400">
+        位置：<span className="text-gray-200 font-mono">({object.pos[0]}, {object.pos[1]})</span>
+      </div>
+      <div className="text-xs text-gray-400">
+        剩余数量：<span className={`font-semibold ${numColor}`}>{numText}</span>
+      </div>
     </div>
   )
 }
@@ -129,14 +181,17 @@ function AgentRow({ agent, selected, onClick }: { agent: AgentState; selected: b
   )
 }
 
-// 右侧智能体面板：上半部分为列表，下半部分为选中智能体详情
+// 右侧智能体面板：上半部分为列表，下半部分为选中智能体或物品详情
 export function AgentPanel() {
   const worldState = useSimStore((s) => s.worldState)
   const selectedAgentId = useSimStore((s) => s.selectedAgentId)
+  const selectedObjectId = useSimStore((s) => s.selectedObjectId)
   const selectAgent = useSimStore((s) => s.selectAgent)
 
   const agents = worldState?.agents ?? []
   const selected = agents.find((a) => a.id === selectedAgentId) ?? null
+  // 物品选中：从世界状态中找到对应物品
+  const selectedObject = worldState?.objects.find((o) => o.id === selectedObjectId) ?? null
 
   return (
     <div className="flex flex-col w-64 flex-shrink-0 bg-gray-800 border-l border-gray-700 overflow-hidden">
@@ -155,10 +210,15 @@ export function AgentPanel() {
           />
         ))}
       </div>
-      {/* 详情区域固定在面板底部，最大高度限制防止撑满屏幕 */}
+      {/* 详情区域固定在面板底部，智能体和物品互斥显示 */}
       {selected && (
         <div className="border-t border-gray-700 overflow-y-auto max-h-80">
           <AgentDetail agent={selected} />
+        </div>
+      )}
+      {!selected && selectedObject && (
+        <div className="border-t border-gray-700 overflow-y-auto max-h-80">
+          <ObjectDetail object={selectedObject} />
         </div>
       )}
     </div>

@@ -46,6 +46,7 @@ def snapshot(world: "World") -> dict:
             "id": o.id,
             "pos": o.position,
             "type": type(o).__name__,
+            "kind": getattr(o, "kind", "objects"),  # 物品种类标识，前端用于查找描述元数据
             # num 为 None 表示对象无数量属性；num <= 0 时前端隐藏图形
             "num": getattr(o, "num", None),
         }

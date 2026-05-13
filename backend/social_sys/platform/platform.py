@@ -34,6 +34,7 @@ class SocialPlatform:
         return res
 
     def execute(self, Operator_id, action_str):
+        #执行智能体调用的函数，具体逻辑在 tools/operator_tools.py 中定义，action_str 是一个 JSON 字符串，包含工具名称和参数
         if not action_str:
             return ""
         try:

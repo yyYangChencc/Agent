@@ -19,6 +19,7 @@ export interface ObjectState {
   id: string
   pos: [number, number]
   type: string
+  kind: string                // 物品种类标识，与 objects.py 中 self.kind 一致
   num: number | null          // null 表示无数量属性；<=0 时隐藏渲染
 }
 
@@ -34,11 +35,13 @@ interface SimStore {
   running: boolean
   speed: number
   selectedAgentId: string | null
+  selectedObjectId: string | null   // 当前选中的场景物品 ID
   ws: WebSocket | null
   connected: boolean
   setWorldState: (state: WorldState) => void
   setStatus: (running: boolean, speed: number) => void
   selectAgent: (id: string | null) => void
+  selectObject: (id: string | null) => void  // 选中物品，同时取消智能体选中
   setWs: (ws: WebSocket | null) => void
   setConnected: (connected: boolean) => void
   sendCmd: (cmd: object) => void
@@ -49,12 +52,16 @@ export const useSimStore = create<SimStore>((set, get) => ({
   running: false,
   speed: 1.0,
   selectedAgentId: null,
+  selectedObjectId: null,
   ws: null,
   connected: false,
 
   setWorldState: (worldState) => set({ worldState }),
   setStatus: (running, speed) => set({ running, speed }),
-  selectAgent: (id) => set({ selectedAgentId: id }),
+  // 选中智能体时清除物品选中，保持互斥
+  selectAgent: (id) => set({ selectedAgentId: id, selectedObjectId: null }),
+  // 选中物品时清除智能体选中，保持互斥
+  selectObject: (id) => set({ selectedObjectId: id, selectedAgentId: null }),
   setWs: (ws) => set({ ws }),
   setConnected: (connected) => set({ connected }),
 
