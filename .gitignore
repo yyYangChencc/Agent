@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 chroma_agents/
+.claude/
+.vscode/
+docs/
+venv/
