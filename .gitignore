@@ -7,3 +7,4 @@ chroma_agents/
 .vscode/
 docs/
 venv/
+frontend/node_modules/
