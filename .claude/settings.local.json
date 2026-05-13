@@ -8,7 +8,9 @@
       "Bash(D:\\\\anaconda\\\\envs\\\\py311\\\\python.exe -c \"import chromadb; print\\('chromadb OK', chromadb.__version__\\)\")",
       "Bash(D:\\\\anaconda\\\\envs\\\\py311\\\\python.exe -m pip install chromadb -q)",
       "Bash(C:/Users/chen/AppData/Local/Programs/Python/Python311/python.exe -m pip install chromadb openai python-dotenv -q)",
-      "Bash(C:/Users/chen/AppData/Local/Programs/Python/Python311/python.exe *)"
+      "Bash(C:/Users/chen/AppData/Local/Programs/Python/Python311/python.exe *)",
+      "Bash(git mv *)",
+      "Bash(git add *)"
     ]
   }
 }

@@ -112,11 +112,20 @@ class MultiAgentMemoryManager:
             logger.warning("[%s] 获取查询 embedding 失败，返回空记忆", agent_id)
             return []
 
-        results = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=n_results,
-            **kwargs,
-        )
+        try:
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results,
+                **kwargs,
+            )
+        except Exception as e:
+            if "Nothing found on disk" in str(e):
+                logger.warning("[%s] HNSW 索引损坏，重建 collection", agent_id)
+                self.client.delete_collection(self._get_collection_name(agent_id))
+                self.agent_collections.pop(agent_id, None)
+            else:
+                logger.error("[%s] 记忆查询失败: %s", agent_id, e, exc_info=True)
+            return []
         docs = results.get("documents", [[]])
         return docs[0] if docs else []
 

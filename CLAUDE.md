@@ -5,20 +5,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Running the Project
 
 ```bash
-# Install dependencies
+# Install dependencies (from project root)
 pip install -r requirements.txt
 
 # Copy and configure environment variables
 cp .env.example .env  # then fill in OPENAI_API_KEY and OPENAI_BASE_URL
 
 # Run the multi-agent simulation (5 agents, 10 ticks, opinion tracking)
-python main.py
+python backend/main.py
 
 # Run the social subsystem demo
-python test.py
+python backend/test.py
 ```
 
-All scripts must be run from the repository root — there are no `__init__.py` files, so relative imports depend on the working directory.
+All scripts are run from the **project root** (`E:\agent`). Python automatically adds `backend/` to `sys.path` when running `python backend/<script>.py`, so all package imports (`persona.*`, `world.*`, `tools.*`, `social_sys.*`) resolve without any path manipulation.
+
+## Project Layout
+
+```
+E:\agent/
+├── backend/          ← all Python simulation code
+│   ├── main.py
+│   ├── persona/
+│   ├── world/
+│   ├── tools/
+│   └── social_sys/
+├── frontend/         ← web UI (React + Pixi.js, to be built)
+├── docs/
+├── .env              ← read by load_dotenv() from project root
+├── requirements.txt
+└── CLAUDE.md
+```
+
+Runtime artifacts (`chroma_agents/`, `logs/`) are created relative to the working directory (project root) and are not committed.
 
 ## Environment Variables
 
@@ -35,7 +54,7 @@ This is a **LLM-driven multi-agent grid simulation** with a separate social medi
 
 ### Starting a simulation
 
-Use `SimulationRuntime` (`persona/runtime.py`) as the single entry point:
+Use `SimulationRuntime` (`backend/persona/runtime.py`) as the single entry point:
 
 ```python
 from persona.runtime import SimulationRuntime
@@ -49,7 +68,7 @@ for _ in range(10):
     rt.world.step()
 ```
 
-Pass a configured `AgentConfig` to `SimulationRuntime.build(config=...)` to override defaults. All tunable parameters live in `persona/config.py`.
+Pass a configured `AgentConfig` to `SimulationRuntime.build(config=...)` to override defaults. All tunable parameters live in `backend/persona/config.py`.
 
 `create_agent(agent_id, position, role="", speaking_style="")` — `role` and `speaking_style` are injected into every LLM system prompt. Each agent also carries `emotion: str` (default `"平静"`).
 
@@ -106,20 +125,20 @@ Keys for both dicts: `"satiety"`, `"relax"`.
 
 | Module | Responsibility |
 |--------|---------------|
-| `persona/runtime.py` | Composition root — `build()` wires every service; `create_agent()` registers agents; `reset()` rebuilds world/platform |
-| `persona/config.py` | `AgentConfig` dataclass — single source of truth for all parameters |
-| `world/world.py` | Tick loop, parallel execution, action dispatch, event broadcast, reward computation, opinion update hooks, conversation phase |
-| `persona/agents/agent.py` | Agent state: `need`, `demand`, task, `current_focus`, `stuck_ticks`, history, opinion, trust dicts; drives `step()`, `social_step()`, `conversation_step()`, `tick_needs()` |
-| `persona/agents/policy.py` | `LLMPolicy`: builds prompt, calls LLM, returns parsed action string |
-| `persona/agents/prompt.py` | 4 prompt builders (`WorldPromptBuilder`, `SocialPromptBuilder`, `ConversationPromptBuilder`, `ReflectPromptBuilder`). All prompts are Chinese, use `<Think>` + `<Action>JSON</Action>` format |
-| `persona/agents/parser.py` | `ActionParser`: extracts `<Action>` block, validates JSON; returns `""` on failure |
-| `persona/agent_memory/mem.py` | `MultiAgentMemoryManager`: one ChromaDB collection per agent; `smart_retrieve()` asks LLM for keywords then vector-searches |
-| `persona/reflect/reflect.py` | Task lifecycle: progress tracking (need-based), micro-reflection trigger, task completion, trajectory flush |
-| `persona/opinion/updater.py` | `OpinionUpdater`: online update (per tick, post-browsing) and offline update (every m ticks, friend conformity) |
-| `persona/opinion/scorer.py` | `evaluate_opinion(content) -> float` — stub for LLM-based stance extraction (returns 0.5) |
-| `tools/operator_tools.py` | `Operator` (move/eat/speak) and `SocialOperator` (send_post/comment/like/dislike) |
-| `world/observer.py` | Scans grid for nearby entities, reads `agent.observed_events`, returns text |
-| `social_sys/platform/platform.py` | Social feed: posts, follower-based distribution, social action dispatch |
+| `backend/persona/runtime.py` | Composition root — `build()` wires every service; `create_agent()` registers agents; `reset()` rebuilds world/platform |
+| `backend/persona/config.py` | `AgentConfig` dataclass — single source of truth for all parameters |
+| `backend/world/world.py` | Tick loop, parallel execution, action dispatch, event broadcast, reward computation, opinion update hooks, conversation phase |
+| `backend/persona/agents/agent.py` | Agent state: `need`, `demand`, task, `current_focus`, `stuck_ticks`, history, opinion, trust dicts; drives `step()`, `social_step()`, `conversation_step()`, `tick_needs()` |
+| `backend/persona/agents/policy.py` | `LLMPolicy`: builds prompt, calls LLM, returns parsed action string |
+| `backend/persona/agents/prompt.py` | 4 prompt builders (`WorldPromptBuilder`, `SocialPromptBuilder`, `ConversationPromptBuilder`, `ReflectPromptBuilder`). All prompts are Chinese, use `<Think>` + `<Action>JSON</Action>` format |
+| `backend/persona/agents/parser.py` | `ActionParser`: extracts `<Action>` block, validates JSON; returns `""` on failure |
+| `backend/persona/agent_memory/mem.py` | `MultiAgentMemoryManager`: one ChromaDB collection per agent; `smart_retrieve()` asks LLM for keywords then vector-searches |
+| `backend/persona/reflect/reflect.py` | Task lifecycle: progress tracking (need-based), micro-reflection trigger, task completion, trajectory flush |
+| `backend/persona/opinion/updater.py` | `OpinionUpdater`: online update (per tick, post-browsing) and offline update (every m ticks, friend conformity) |
+| `backend/persona/opinion/scorer.py` | `evaluate_opinion(content) -> float` — stub for LLM-based stance extraction (returns 0.5) |
+| `backend/tools/operator_tools.py` | `Operator` (move/eat/speak) and `SocialOperator` (send_post/comment/like/dislike) |
+| `backend/world/observer.py` | Scans grid for nearby entities, reads `agent.observed_events`, returns text |
+| `backend/social_sys/platform/platform.py` | Social feed: posts, follower-based distribution, social action dispatch |
 
 ### Action protocol
 
@@ -130,7 +149,7 @@ Agents communicate with the world via a text protocol:
 
 ### Task and micro-reflection system
 
-Tasks are managed in `persona/reflect/reflect.py`:
+Tasks are managed in `backend/persona/reflect/reflect.py`:
 - **`_TASK_DEMAND_MAP`**: maps task name → need/demand key (e.g. `"eat something"` → `"satiety"`)
 - **`_TASK_INITIAL_FOCUS`**: maps task name → default `current_focus` string injected when a task is assigned
 - **Adding a new task**: add entries to both dicts; `_TASK_EXTRA_DESC` is optional
@@ -157,9 +176,9 @@ Configured via `AgentConfig` fields (`initial_opinion`, `online_opinion_lr`, `se
 
 ## Known Issues (fix before extending)
 
-- **`social_sys/agent/social_agent.py`**: calls `self.platform.excute(...)` — typo, method is `execute`. File is broken.
-- **`persona/agent_memory/mem_operate_tools.py`**: references `agent.mem.agent_profile` which does not exist. Dead code.
-- **`social_sys/post/post.py`**: imports `numpy` (unused) — not in `requirements.txt`.
-- **`persona/opinion/scorer.py`**: `evaluate_opinion()` always returns 0.5; LLM-based implementation is a TODO.
+- **`backend/social_sys/agent/social_agent.py`**: calls `self.platform.excute(...)` — typo, method is `execute`. File is broken.
+- **`backend/persona/agent_memory/mem_operate_tools.py`**: references `agent.mem.agent_profile` which does not exist. Dead code.
+- **`backend/social_sys/post/post.py`**: imports `numpy` (unused) — not in `requirements.txt`.
+- **`backend/persona/opinion/scorer.py`**: `evaluate_opinion()` always returns 0.5; LLM-based implementation is a TODO.
 - **Observer boundary**: `range(x, x+r)` is exclusive — the outermost ring of the observation radius is never scanned.
 - **`logs/` not in `.gitignore`**: runtime log files can be accidentally committed.
