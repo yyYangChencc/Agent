@@ -136,11 +136,6 @@ agent/
 | `self_confidence` | `0.5` | 自我立场坚守度（越高越不易被影响） |
 | `offline_update_interval` | `3` | 每隔 N tick 触发一次离线意见同化 |
 
-## 已知问题
-
-- `social_sys/agent/social_agent.py`：调用 `self.platform.excute(...)` 存在拼写错误（应为 `execute`），该文件目前无法正常使用
-- `persona/opinion/scorer.py`：`evaluate_opinion()` 始终返回 0.5，LLM 实现为 TODO
-- Observer 边界：扫描范围使用 `range(x, x+r)` 为左闭右开，最外圈永远不会被扫描到
 
 ## 技术栈
 
