@@ -19,7 +19,11 @@ def observe(agent,r:int) -> list:
                     res.append(f"ID:{id} 位置:({i},{j}) 类别:{kind}")
                 else:
                     obj = agent.world.objects[id]
-                    res.append(f"ID:{id} 位置:({i},{j}) 类别:{kind} 剩余数量:{obj.show_num() }")
+                    desc = obj.get_desc() if hasattr(obj, "get_desc") else ""
+                    line = f"位置:({i},{j})"
+                    if desc:
+                        line += f" 描述:{desc}"
+                    res.append(line)
     if len(res) == 1:
         res.append("无可见物体或人物")
 

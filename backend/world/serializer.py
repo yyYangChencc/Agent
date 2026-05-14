@@ -33,6 +33,7 @@ def snapshot(world: "World") -> dict:
             "emotion": a.emotion,
             "task": a.task,
             "current_focus": a.current_focus,
+            "salary": a.salary,                # 工资：参与 work 动作时获得的 money 增量
             "need": dict(a.need),               # 客观需求值，0→1
             "demand": dict(a.demand),           # 主观急迫度，1→0
             "demand_threshold": dict(a.demand_threshold),  # 任务完成判定线
@@ -47,6 +48,7 @@ def snapshot(world: "World") -> dict:
             "pos": o.position,
             "type": type(o).__name__,
             "kind": getattr(o, "kind", "objects"),  # 物品种类标识，前端用于查找描述元数据
+            "description": o.get_desc() if hasattr(o, "get_desc") else "",  # 由 objects.get_desc() 动态生成
             # num 为 None 表示对象无数量属性；num <= 0 时前端隐藏图形
             "num": getattr(o, "num", None),
         }

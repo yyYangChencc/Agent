@@ -27,6 +27,7 @@ class Agent:
         config: "AgentConfig",
         role: str = "",
         speaking_style: str = "",
+        salary: float = 0.0,
     ):
         self.id = agent_id
         self.position = position
@@ -39,11 +40,12 @@ class Agent:
         self.history: list[str] = []
         self.trajectory_buffer: list[dict] = []  # (obs, action, reward) per step within current task
 
-        self.need: dict[str, float] = {"satiety": 0.0, "relax": 0.0}
-        self.demand: dict[str, float] = {"satiety": 1.0, "relax": 1.0}
+        self.need: dict[str, float] = {"satiety": 0.0, "relax": 0.0, "money": 0.0}
+        self.demand: dict[str, float] = {"satiety": 1.0, "relax": 1.0, "money": 1.0}
         self.demand_threshold: dict[str, float] = {
             "satiety": config.satiety_threshold,
-            "relax": config.relax_threshold
+            "relax": config.relax_threshold,
+            "money": config.money_threshold,
         }
         self.state: dict = {}
         self.task: str = "none"
@@ -59,6 +61,8 @@ class Agent:
         self.role: str = role
         self.speaking_style: str = speaking_style
         self.emotion: str = "平静"
+        # 工资：参与 work 动作时每次获得的 money need 增量（>=0）
+        self.salary: float = salary
 
         self.opinion: float = config.initial_opinion
         self.online_trust: dict[str, float] = {}   # {agent_id: τ}
@@ -239,7 +243,12 @@ class Agent:
 
     def update_need(self, need_key: str, need_delta: float) -> None:
         if need_key in self.need:
-            self.need[need_key] = max(0.0, min(1.0, self.need[need_key] + need_delta))
+            new_val = self.need[need_key] + need_delta
+            # money 无上限（累计金额）；satiety / relax 范围 [0, 100]
+            if need_key == "money":
+                self.need[need_key] = max(0.0, new_val)
+            else:
+                self.need[need_key] = max(0.0, min(100.0, new_val))
 
     def update_opinion(self, delta: float) -> None:
         self.opinion = max(0.0, min(1.0, self.opinion + delta))

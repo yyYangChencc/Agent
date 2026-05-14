@@ -99,7 +99,7 @@ class WorldPromptBuilder(BasePromptBuilder):
             "</Action>\n\n"
             "示例：\n"
             "<Think>\n"
-            "任务 eat something，satiety=0.85 未满足。观测到 food_1 在 (7,5)，当前位置 (3,5)，需移动靠近。move 工具满足前提。\n"
+            "任务 eat something，satiety=85 未满足。观测到 food_1 在 (7,5)，当前位置 (3,5)，需移动靠近。move 工具满足前提。\n"
             "</Think>\n"
             "<Action>\n"
             '{"tool": "move", "args": {"x": 7, "y": 5}}\n'

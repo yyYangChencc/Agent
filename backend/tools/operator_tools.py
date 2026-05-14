@@ -63,6 +63,18 @@ class Operator:
                 "description": "查看社交平台上的帖子，并可选择进行发帖、评论、点赞或点踩等社交行为。社交平台上可能会获得物理世界中无法获得的信息，社交行为也会影响其他智能体的态度和行为",
                 "args": {},
                 "returns": str,
+            },
+            "sleep": {
+                "description": "在指定ID的床上休息（暂未实现具体效果）",
+                "args": {"ID": str},
+                "returns": str,
+                "constraint": "目标必须是床(bed)，且在欧氏距离√2范围内（即相邻格子）"
+            },
+            "buy": {
+                "description": "在指定ID的食品店购买食物（暂未实现具体效果）",
+                "args": {"ID": str},
+                "returns": str,
+                "constraint": "目标必须是食品店(food_shop)，且在欧氏距离√2范围内（即相邻格子）"
             }
         }
 
@@ -188,6 +200,48 @@ class Operator:
             msg += f"  回复：{response_to}"
         logger.info("[%s] 说话 → %s | 内容: %s", operator_ID, ID, content)
         return msg
+
+    def sleep(self, operator_ID: str, ID: str):
+        # 占位实现：仅做存在性/种类/距离校验，实际 need/demand 效果待 sleep 系统接入
+        if ID == '0':
+            return "此处为空"
+        if operator_ID not in self.world.agents:
+            return "智能体不存在"
+        agent = self.world.agents[operator_ID]
+        with self.world._world_lock:
+            if ID not in self.world.objects:
+                return "物品不存在"
+            target = self.world.objects[ID]
+            if getattr(target, "kind", None) != "bed":
+                return "目标不是床，不可以睡觉"
+            t_pos = target.get_position()
+            a_pos = agent.get_position()
+            if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
+                return "距离过远无法休息"
+            result = target.interact(agent)
+        logger.info("[%s] sleep 占位调用 → %s", operator_ID, ID)
+        return f"{operator_ID}{result}"
+
+    def buy(self, operator_ID: str, ID: str):
+        # 占位实现：仅做存在性/种类/距离校验，实际购买/扣费/satiety 效果待购买系统接入
+        if ID == '0':
+            return "此处为空"
+        if operator_ID not in self.world.agents:
+            return "智能体不存在"
+        agent = self.world.agents[operator_ID]
+        with self.world._world_lock:
+            if ID not in self.world.objects:
+                return "物品不存在"
+            target = self.world.objects[ID]
+            if getattr(target, "kind", None) != "food_shop":
+                return "目标不是食品店，不可以购买"
+            t_pos = target.get_position()
+            a_pos = agent.get_position()
+            if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
+                return "距离过远无法购买"
+            result = target.interact(agent)
+        logger.info("[%s] buy 占位调用 → %s", operator_ID, ID)
+        return f"{operator_ID}{result}"
 
 
 class SocialOperator:

@@ -77,7 +77,8 @@ class SimulationRuntime:
         )
 
     def create_agent(self, agent_id: str, position: list[int],
-                     role: str = "", speaking_style: str = "") -> Agent:
+                     role: str = "", speaking_style: str = "",
+                     salary: float = 0.0) -> Agent:
         """Create an agent wired to all runtime services and register it on the platform."""
         agent = Agent(
             agent_id=agent_id,
@@ -91,6 +92,7 @@ class SimulationRuntime:
             config=self.config,
             role=role,
             speaking_style=speaking_style,
+            salary=salary,
         )
         self.platform.add_agent(agent)
         return agent

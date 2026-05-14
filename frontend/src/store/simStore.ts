@@ -8,6 +8,7 @@ export interface AgentState {
   emotion: string
   task: string
   current_focus: string       // micro-reflect 更新的当前策略焦点
+  salary: number              // 工资：参与 work 动作时获得的 money 增量
   need: Record<string, number>            // 客观需求，0→1
   demand: Record<string, number>          // 主观急迫度，1→0
   demand_threshold: Record<string, number> // 任务完成阈值
@@ -20,6 +21,7 @@ export interface ObjectState {
   pos: [number, number]
   type: string
   kind: string                // 物品种类标识，与 objects.py 中 self.kind 一致
+  description: string         // 物品的人类可读描述，由后端 objects.get_desc() 动态生成
   num: number | null          // null 表示无数量属性；<=0 时隐藏渲染
 }
 

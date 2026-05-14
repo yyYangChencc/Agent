@@ -120,10 +120,16 @@ export function WorldCanvas() {
       }
       const g = objectGfx.get(obj.id)!
       g.clear()
-      // num <= 0 表示食物已耗尽，隐藏方块而非移除，保留对象引用
+      // num <= 0 表示物品已耗尽，隐藏方块而非移除，保留对象引用
       const hidden = obj.num !== null && obj.num <= 0
       if (!hidden) {
-        g.rect(sx + 6, sy + 6, 12, 12).fill(0x2ecc71)
+        if (obj.kind === 'building') {
+          // 建筑：灰色填充整格，区别于食物的小方块
+          g.rect(sx, sy, CELL, CELL).fill(0x6b7280)
+        } else {
+          // 默认（含 food）：绿色小方块
+          g.rect(sx + 6, sy + 6, 12, 12).fill(0x2ecc71)
+        }
       }
     }
     // 清除服务端已不存在的物体
