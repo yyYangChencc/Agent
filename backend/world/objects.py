@@ -61,15 +61,31 @@ class building(Interactable):
 
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}"
+    
+    
+class company(building):
+    """公司：建筑子类，供智能体工作赚钱。具体交互效果待 work 动作接入后实现。"""
 
+    def __init__(self, id: str, position: list, world, salary=10):
+        super().__init__(id, position, world)
+        self.kind = "company"
+        self.salary = salary  # 工作获得的工资
+
+    def interact(self, agent) -> str:
+        # 占位实现：等待 work 动作系统接入后再扩展
+        return f"在公司 {self.id} 工作（暂未实现具体效果）"
+    
+    def get_desc(self) -> str:
+        return f"ID: {self.id}，类别: {self.kind}，功能：工作赚钱，每次工作获得 {self.salary} 元工资"
 
 class bed(building):
     """床：建筑子类，供智能体休息恢复 relax。具体交互效果待 sleep 动作接入后实现。"""
 
-    def __init__(self, id: str, position: list, world):
+    def __init__(self, id: str, position: list, world,free_num=1,provide_per_tick=10):
         super().__init__(id, position, world)
         self.kind = "bed"
-        self.free_num = 1  # 床位数量
+        self.free_num = free_num  # 床位数量
+        self.provide_per_tick = provide_per_tick  # 每步提供的放松度
 
     def interact(self, agent) -> str:
         # 占位实现：等待 sleep 动作系统接入后再扩展
@@ -99,7 +115,7 @@ class food_shop(building):
 class playground(building):
     """游乐场：建筑子类，供智能体放松恢复 relax。具体交互效果待娱乐动作接入后实现。"""
 
-    def __init__(self, id: str, position: list, world,provide=0.2,price=3):
+    def __init__(self, id: str, position: list, world,provide=10,price=3):
         super().__init__(id, position, world)
         self.kind = "playground"
         self.provide = provide  # 提供的放松度
