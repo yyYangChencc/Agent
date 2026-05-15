@@ -24,6 +24,8 @@ class AgentConfig:
     relax_decay_rate: float = 5.0       # relax 需求的自然衰减速率（每 tick 减少的量）
     relax_moving_usage: float = 2.0     # agent 移动一步消耗的 relax 量
     satiety_decay_rate: float = 1.0     # 饱腹度的自然降低速率（每 tick 饱腹度降低的量）
+    sleep_time: int = 8                 # 睡觉恢复的时间（单位：tick），睡觉时 agent 不会移动，休息时间结束后恢复 relax
+    sleep_relax_recover: float = 50.0   # 每次睡觉结束后恢复的 relax 量
 
     # Social platform
     popularity_like_weight: float = 1.0

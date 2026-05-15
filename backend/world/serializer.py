@@ -39,6 +39,9 @@ def snapshot(world: "World") -> dict:
             "demand_threshold": dict(a.demand_threshold),  # 任务完成判定线
             "opinion": round(a.opinion, 3),
             "last_think": _extract_last_think(a.history),
+            "sleeping": a.sleeping,
+            "sleep_ticks_remaining": a.sleep_ticks_remaining,
+            "inside_building_id": a.inside_building_id,
         }
         for a in world.agents.values()
     ]
@@ -51,6 +54,7 @@ def snapshot(world: "World") -> dict:
             "description": o.get_desc() if hasattr(o, "get_desc") else "",  # 由 objects.get_desc() 动态生成
             # num 为 None 表示对象无数量属性；num <= 0 时前端隐藏图形
             "num": getattr(o, "num", None),
+            "occupant_count": len(getattr(o, "occupants", [])),
         }
         for o in world.objects.values()
     ]

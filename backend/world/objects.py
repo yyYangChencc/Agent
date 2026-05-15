@@ -54,10 +54,23 @@ class building(Interactable):
         # 建筑无数量属性，num 固定为 None（前端按"无限"渲染，不会因 num<=0 而隐藏）
         super().__init__(id, None, position, world)
         self.kind = "building"
+        self.occupants: list[str] = []
 
     def interact(self, agent) -> str:
         # 占位实现：等待 work 动作系统接入后再扩展
         return f"与建筑 {self.id} 互动（暂未实现具体效果）"
+
+    def enter(self, agent) -> str:
+        if agent.id not in self.occupants:
+            self.occupants.append(agent.id)
+        agent.inside_building_id = self.id
+        return f"{agent.id} 进入了 {self.id}"
+
+    def exit(self, agent) -> str:
+        if agent.id in self.occupants:
+            self.occupants.remove(agent.id)
+        agent.inside_building_id = None
+        return f"{agent.id} 离开了 {self.id}"
 
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}"
@@ -78,21 +91,32 @@ class company(building):
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}，功能：工作赚钱，每次工作获得 {self.salary} 元工资"
 
-class bed(building):
-    """床：建筑子类，供智能体休息恢复 relax。具体交互效果待 sleep 动作接入后实现。"""
+class bed(Interactable):
+    """床：可交互物品，供智能体休息恢复 relax。"""
 
-    def __init__(self, id: str, position: list, world,free_num=1,provide_per_tick=10):
-        super().__init__(id, position, world)
+    def __init__(self, id: str, position: list, world, free_num=1):
+        super().__init__(id,None, position, world)
         self.kind = "bed"
-        self.free_num = free_num  # 床位数量
-        self.provide_per_tick = provide_per_tick  # 每步提供的放松度
+        self.free_num = free_num
+        self.occupant_id = None  # 当前占用者的 agent ID，None 表示无人占用
 
     def interact(self, agent) -> str:
-        # 占位实现：等待 sleep 动作系统接入后再扩展
-        return f"在床 {self.id} 上休息（暂未实现具体效果）"
+        if self.free_num <= 0:
+            return f"床 {self.id} 已满，无法休息"
+        self.occupant_id = agent.id
+        self.free_num -= 1
+        agent.sleep_status(self.id)
+        return f"开始在床 {self.id} 上休息，已恢复 {agent.config.sleep_relax_recover} relax，将休息 {agent.sleep_ticks_remaining} 步"
+
+    def exit_bed(self, agent) -> str:
+        if self.occupant_id == agent.id:
+            self.occupant_id = None
+            self.free_num += 1
+            return f"{agent.id} 从床 {self.id} 上醒来，休息结束"
+        return f"{agent.id} 不在床 {self.id} 上，无需离开"
 
     def get_desc(self) -> str:
-        return f"ID: {self.id}，类别: {self.kind}，功能：休息恢复，剩余床位 {self.free_num}"
+        return f"ID: {self.id}，类别: {self.kind}，功能：休息恢复，每张床只能同时供 1 个智能体使用，当前空闲床位 {self.free_num}"
 
 class food_shop(building):
     """食品店：建筑子类，供智能体购买食物补充 satiety。具体交互效果待购买动作接入后实现。"""
@@ -105,8 +129,12 @@ class food_shop(building):
         self.price = price  # 价格
 
     def interact(self, agent) -> str:
-        # 占位实现：等待购买动作系统接入后再扩展
-        return f"在食品店 {self.id} 购买食物（暂未实现具体效果）"
+        if self.food_num <= 0:
+            return f"食品店 {self.id} 已售罄"
+        self.food_num -= 1
+        agent.update_need("satiety", self.provide)
+        agent.update_need("money", -self.price)
+        return f"在食品店 {self.id}"
 
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}，功能：购买食物，每次购买花费 {self.price} 元，提供 {self.provide} 饱腹感，剩余商品 {self.food_num}"

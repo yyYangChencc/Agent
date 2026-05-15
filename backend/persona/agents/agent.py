@@ -73,6 +73,13 @@ class Agent:
         self.stuck_ticks: int = 0
         self._prev_task_need: float | None = None
 
+        self.sleeping: bool = False
+        self.sleep_ticks_remaining: int = 0
+        self.sleeping_on_bed_id: str | None = None
+        self._sleep_start_need: dict[str, float] = {}
+        self._sleep_start_time: int = 0
+        self.inside_building_id: str | None = None
+
         self.world.add_agent(self)
 
     # ------------------------------------------------------------------
@@ -291,5 +298,31 @@ class Agent:
         if self.task == "none":
             self.update_need("relax", self.config.relax_increase_rate)
 
+    def wakeup(self, bed) -> None:
+        elapsed = self.world.time - self._sleep_start_time
+        changes = {
+            k: round(self.need.get(k, 0) - self._sleep_start_need.get(k, 0), 2)
+            for k in self.need
+        }
+        change_str = "，".join(f"{k} {'+' if v >= 0 else ''}{v}" for k, v in changes.items())
+        self.sleeping = False
+        self.sleeping_on_bed_id = None
+        self.task = "none"
+        if bed is not None:
+            bed.exit_bed(self)
+        self.add_history("sleep_summary", f"睡眠结束，共经过 {elapsed} 步，期间需求变化：{change_str}")
+        logger.info("[%s] 睡眠结束，经过 %d 步，需求变化 %s", self.id, elapsed, changes)
+
     def get_reflect(self) -> None:
         self.reflect.step(self)
+
+    def sleep_status(self, bed_id: str) -> None:
+        self.update_need("relax", self.config.sleep_relax_recover)
+        self.sleep_ticks_remaining = self.config.sleep_time
+        self.sleeping = True
+        self.sleeping_on_bed_id = bed_id
+        self._sleep_start_need = dict(self.need)
+        self._sleep_start_time = self.world.time
+        self.sleeping_on_bed_id = bed_id
+        logger.info("[%s] 开始睡觉，预计睡眠 %d tick", self.id, self.config.sleep_time)
+    

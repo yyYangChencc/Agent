@@ -134,6 +134,12 @@ function AgentDetail({ agent }: { agent: AgentState }) {
         task: <span className="text-yellow-400">{agent.task}</span>
         &nbsp;|&nbsp;salary: <span className="text-green-400">{agent.salary.toFixed(2)}</span>
       </div>
+      {agent.sleeping && (
+        <div className="text-xs text-blue-400 font-semibold">💤 睡眠中（剩余 {agent.sleep_ticks_remaining ?? '?'} 步）</div>
+      )}
+      {agent.inside_building_id && (
+        <div className="text-xs text-gray-400">在建筑内：<span className="text-yellow-300">{agent.inside_building_id}</span></div>
+      )}
       {/* current_focus 由 micro-reflect 动态更新，反映智能体当前卡顿后的策略调整 */}
       {agent.current_focus && (
         <div className="text-xs text-blue-300 italic">{agent.current_focus}</div>

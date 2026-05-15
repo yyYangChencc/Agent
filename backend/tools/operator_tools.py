@@ -65,16 +65,28 @@ class Operator:
                 "returns": str,
             },
             "sleep": {
-                "description": "在指定ID的床上休息（暂未实现具体效果）",
+                "description": "在指定ID的床上休息，进入睡眠状态，经过 sleep_time 步后恢复 50 relax",
                 "args": {"ID": str},
                 "returns": str,
                 "constraint": "目标必须是床(bed)，且在欧氏距离√2范围内（即相邻格子）"
             },
             "buy": {
-                "description": "在指定ID的食品店购买食物（暂未实现具体效果）",
+                "description": "在指定ID的商店里进行购买",
                 "args": {"ID": str},
                 "returns": str,
                 "constraint": "目标必须是食品店(food_shop)，且在欧氏距离√2范围内（即相邻格子）"
+            },
+            "enter_building": {
+                "description": "进入指定ID的建筑内部，进入后智能体位置与建筑重合，前端不单独显示智能体",
+                "args": {"ID": str},
+                "returns": str,
+                "constraint": "目标必须是建筑(building/bed/food_shop/playground/company)，且在欧氏距离√2范围内"
+            },
+            "exit_building": {
+                "description": "离开当前所在建筑，回到建筑外部",
+                "args": {},
+                "returns": str,
+                "constraint": "必须当前处于某建筑内部"
             }
         }
 
@@ -188,9 +200,7 @@ class Operator:
             if (f_pos[0] - A_pos[0])**2 + (f_pos[1] - A_pos[1])**2 > agent.config.eat_distance_sq:
                 logger.warning("[%s] 距离食物 %s 过远", operator_ID, ID)
                 return "距离过远吃不到"
-            operated.eaten()
-            agent.update_demand("satiety", -operated.provide)
-            agent.update_need("satiety", operated.provide)
+            operated.interact(agent)
         logger.info("[%s] 成功吃到 %s", operator_ID, ID)
         return f"{operator_ID}成功吃到{ID}"
 
@@ -219,7 +229,7 @@ class Operator:
             if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
                 return "距离过远无法休息"
             result = target.interact(agent)
-        logger.info("[%s] sleep 占位调用 → %s", operator_ID, ID)
+        logger.info("[%s] 开始睡觉 → %s", operator_ID, ID)
         return f"{operator_ID}{result}"
 
     def buy(self, operator_ID: str, ID: str):
@@ -242,6 +252,43 @@ class Operator:
             result = target.interact(agent)
         logger.info("[%s] buy 占位调用 → %s", operator_ID, ID)
         return f"{operator_ID}{result}"
+
+    def enter_building(self, operator_ID: str, ID: str):
+        if ID == '0':
+            return "此处为空"
+        if operator_ID not in self.world.agents:
+            return "智能体不存在"
+        agent = self.world.agents[operator_ID]
+        with self.world._world_lock:
+            if ID not in self.world.objects:
+                return "物品不存在"
+            target = self.world.objects[ID]
+            from world.objects import building
+            if not isinstance(target, building):
+                return "目标不是建筑，无法进入"
+            t_pos = target.get_position()
+            a_pos = agent.get_position()
+            if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
+                return "距离过远无法进入"
+            result = target.enter(agent)
+        logger.info("[%s] 进入建筑 %s", operator_ID, ID)
+        return result
+
+    def exit_building(self, operator_ID: str):
+        if operator_ID not in self.world.agents:
+            return "智能体不存在"
+        agent = self.world.agents[operator_ID]
+        building_id = agent.inside_building_id
+        if not building_id:
+            return "当前不在任何建筑内"
+        with self.world._world_lock:
+            if building_id not in self.world.objects:
+                agent.inside_building_id = None
+                return "建筑不存在，已强制退出"
+            target = self.world.objects[building_id]
+            result = target.exit(agent)
+        logger.info("[%s] 离开建筑 %s", operator_ID, building_id)
+        return result
 
 
 class SocialOperator:

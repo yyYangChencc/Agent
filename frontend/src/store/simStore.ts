@@ -14,6 +14,9 @@ export interface AgentState {
   demand_threshold: Record<string, number> // 任务完成阈值
   opinion: number             // 意见倾向，0~1
   last_think: string          // 最近一次 <Think> 内容
+  sleeping: boolean           // 是否处于睡眠状态
+  sleep_ticks_remaining: number  // 剩余睡眠步数
+  inside_building_id: string | null  // 当前所在建筑 ID，null 表示在室外
 }
 
 export interface ObjectState {
@@ -23,6 +26,7 @@ export interface ObjectState {
   kind: string                // 物品种类标识，与 objects.py 中 self.kind 一致
   description: string         // 物品的人类可读描述，由后端 objects.get_desc() 动态生成
   num: number | null          // null 表示无数量属性；<=0 时隐藏渲染
+  occupant_count: number      // 当前在建筑内的智能体数量
 }
 
 export interface WorldState {

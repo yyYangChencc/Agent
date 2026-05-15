@@ -39,6 +39,13 @@ class World:
 
         def _agent_full_step(agent):
             try:
+                if agent.sleeping:
+                    agent.sleep_ticks_remaining -= 1
+                    agent.tick_needs()
+                    if agent.sleep_ticks_remaining <= 0:
+                        bed = self.objects.get(agent.sleeping_on_bed_id)
+                        agent.wakeup(bed)
+                    return
                 obs    = observe(agent, agent.config.observation_radius)
                 action = agent.step(obs)
                 reward = self.execute(agent, action)

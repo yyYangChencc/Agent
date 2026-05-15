@@ -22,8 +22,8 @@ export function WorldCanvas() {
   const appRef = useRef<PIXI.Application | null>(null)
   // 按智能体 ID 缓存 Graphics/Text 对象，tick 时只更新坐标，不重建
   const agentGfxRef = useRef<Map<string, { body: PIXI.Graphics; label: PIXI.Text }>>(new Map())
-  // 按对象 ID 缓存食物等场景物体的 Graphics
-  const objectGfxRef = useRef<Map<string, PIXI.Graphics>>(new Map())
+  // 按对象 ID 缓存场景物体的 Graphics 和可选的占用数量标签
+  const objectGfxRef = useRef<Map<string, { g: PIXI.Graphics; badge: PIXI.Text | null }>>(new Map())
   // 选中高亮层（观测范围圆 + 黄色描边），独立于智能体图层便于整体清除
   const selectionGfxRef = useRef<PIXI.Graphics | null>(null)
 
@@ -98,6 +98,9 @@ export function WorldCanvas() {
     const agentGfx = agentGfxRef.current
     const objectGfx = objectGfxRef.current
 
+    // 建筑类 kind 集合，用于统一渲染为灰色整格
+    const BUILDING_KINDS = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
+
     // 更新场景物体（食物等）
     const seenObjects = new Set<string>()
     for (const obj of worldState.objects) {
@@ -105,7 +108,7 @@ export function WorldCanvas() {
       const sx = obj.pos[0] * CELL
       const sy = obj.pos[1] * CELL
 
-      // 首次出现时创建 Graphics，后续只重绘
+      // 首次出现时创建 Graphics（和可选的占用数量标签），后续只重绘
       if (!objectGfx.has(obj.id)) {
         const g = new PIXI.Graphics()
         // 物品支持点击选中，与智能体圆圈行为一致
@@ -116,14 +119,21 @@ export function WorldCanvas() {
           sel(obj.id === curId ? null : obj.id)
         })
         stage.addChild(g)
-        objectGfx.set(obj.id, g)
+        // 建筑才需要占用数量标签
+        let badge: PIXI.Text | null = null
+        if (BUILDING_KINDS.has(obj.kind)) {
+          badge = new PIXI.Text({ text: '', style: { fontSize: 8, fill: 0xffffff } })
+          badge.anchor.set(1, 0)
+          stage.addChild(badge)
+        }
+        objectGfx.set(obj.id, { g, badge })
       }
-      const g = objectGfx.get(obj.id)!
+      const { g, badge } = objectGfx.get(obj.id)!
       g.clear()
       // num <= 0 表示物品已耗尽，隐藏方块而非移除，保留对象引用
       const hidden = obj.num !== null && obj.num <= 0
       if (!hidden) {
-        if (obj.kind === 'building') {
+        if (BUILDING_KINDS.has(obj.kind)) {
           // 建筑：灰色填充整格，区别于食物的小方块
           g.rect(sx, sy, CELL, CELL).fill(0x6b7280)
         } else {
@@ -131,12 +141,27 @@ export function WorldCanvas() {
           g.rect(sx + 6, sy + 6, 12, 12).fill(0x2ecc71)
         }
       }
+      // 更新占用数量标签（右上角）
+      if (badge) {
+        const count = obj.occupant_count ?? 0
+        if (count > 0 && !hidden) {
+          badge.text = String(count)
+          badge.position.set(sx + CELL - 1, sy + 1)
+          badge.visible = true
+        } else {
+          badge.visible = false
+        }
+      }
     }
     // 清除服务端已不存在的物体
-    for (const [id, g] of objectGfx) {
+    for (const [id, { g, badge }] of objectGfx) {
       if (!seenObjects.has(id)) {
         stage.removeChild(g)
         g.destroy()
+        if (badge) {
+          stage.removeChild(badge)
+          badge.destroy()
+        }
         objectGfx.delete(id)
       }
     }
@@ -168,10 +193,16 @@ export function WorldCanvas() {
       }
 
       const { body, label } = agentGfx.get(agent.id)!
-      body.clear()
-      body.circle(sx, sy, 9).fill(color)
-      // 标签放在圆圈上方 11px，留出圆形半径 + 2px 间距
-      label.position.set(sx, sy - 11)
+      // 在建筑内的智能体不在画布上单独渲染
+      const insideBuilding = !!agent.inside_building_id
+      body.visible = !insideBuilding
+      label.visible = !insideBuilding
+      if (!insideBuilding) {
+        body.clear()
+        body.circle(sx, sy, 9).fill(color)
+        // 标签放在圆圈上方 11px，留出圆形半径 + 2px 间距
+        label.position.set(sx, sy - 11)
+      }
     }
     // 清除服务端已不存在的智能体
     for (const [id, { body, label }] of agentGfx) {
