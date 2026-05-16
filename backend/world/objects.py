@@ -106,6 +106,11 @@ class bed(Interactable):
         self.occupant_id = agent.id
         self.free_num -= 1
         agent.sleep_status(self.id)
+        # 将智能体移到床的坐标（与床重叠，地图上只显示床）
+        # 注意：此处已在 operator_tools.sleep() 的 _world_lock 内，不能重复加锁
+        old_x, old_y = agent.position
+        agent.world.map.remove(old_x, old_y)
+        agent.position = list(self.position)
         return f"开始在床 {self.id} 上休息，已恢复 {agent.config.sleep_relax_recover} relax，将休息 {agent.sleep_ticks_remaining} 步"
 
     def exit_bed(self, agent) -> str:

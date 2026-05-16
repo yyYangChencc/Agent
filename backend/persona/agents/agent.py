@@ -310,6 +310,20 @@ class Agent:
         self.task = "none"
         if bed is not None:
             bed.exit_bed(self)
+        # 在床周围找空格放置智能体
+        bx, by = self.position  # 当前位置 = 床的位置
+        placed = False
+        with self.world._world_lock:
+            for dx, dy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]:
+                nx, ny = bx + dx, by + dy
+                if 0 <= nx < self.world.map.height and 0 <= ny < self.world.map.width:
+                    if self.world.map.is_empty(nx, ny):
+                        self.world.map.place(nx, ny, self.id)
+                        self.position = [nx, ny]
+                        placed = True
+                        break
+            if not placed:
+                self.world.map.place(bx, by, self.id)
         self.add_history("sleep_summary", f"睡眠结束，共经过 {elapsed} 步，期间需求变化：{change_str}")
         logger.info("[%s] 睡眠结束，经过 %d 步，需求变化 %s", self.id, elapsed, changes)
 

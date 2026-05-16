@@ -193,11 +193,11 @@ export function WorldCanvas() {
       }
 
       const { body, label } = agentGfx.get(agent.id)!
-      // 在建筑内的智能体不在画布上单独渲染
-      const insideBuilding = !!agent.inside_building_id
-      body.visible = !insideBuilding
-      label.visible = !insideBuilding
-      if (!insideBuilding) {
+      // 在建筑内或睡觉中的智能体不在画布上单独渲染
+      const hidden = !!agent.inside_building_id || agent.sleeping
+      body.visible = !hidden
+      label.visible = !hidden
+      if (!hidden) {
         body.clear()
         body.circle(sx, sy, 9).fill(color)
         // 标签放在圆圈上方 11px，留出圆形半径 + 2px 间距
