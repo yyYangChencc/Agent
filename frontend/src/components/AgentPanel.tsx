@@ -114,7 +114,18 @@ function ObjectDetail({ object }: { object: ObjectState }) {
       <div className="text-xs text-gray-400">
         剩余数量：<span className={`font-semibold ${numColor}`}>{numText}</span>
       </div>
+      {object.occupants && object.occupants.length > 0 && (
+        <div className="text-xs text-gray-400">
+          占用者：
+          <div className="mt-0.5 flex flex-wrap gap-1">
+            {object.occupants.map((id) => (
+              <span key={id} className="font-mono text-yellow-300 bg-gray-700 rounded px-1">{id}</span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
+  )
   )
 }
 

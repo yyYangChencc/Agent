@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from persona.logger import setup_logging
 from persona.runtime import SimulationRuntime
-from world.objects import food
+from world.objects import food, bed, company, food_shop, playground
 from world.serializer import snapshot
 
 # ---------------------------------------------------------------------------
@@ -78,17 +78,51 @@ def _build_runtime() -> SimulationRuntime:
     d.add_follower("agent_5"); d.add_follower("agent_3")
     e.add_follower("agent_4"); e.add_follower("agent_3"); e.add_follower("agent_2")
 
-    # 3处食物分散在地图不同角落，初始记忆让部分智能体有线索可循
-    food("food_1", 1, 2, [10, 10], r.world)
-    food("food_2", 1, 2, [5, 15], r.world)
-    food("food_3", 1, 2, [18, 5], r.world)
+    # ------------------------------------------------------------------
+    # 场景布置（25×25 地图，按功能分区）
+    #
+    #  住宅区（左上，x=1-4, y=1-12）：5 张床，智能体初始在各自床旁
+    #  工作区（右上，x=18-22, y=2-6）：2 家公司
+    #  商业区（中左，x=1-4, y=16-22）：2 家食品店
+    #  娱乐区（右下，x=18-22, y=18-22）：1 个游乐场
+    #  散落食物：地图中部
+    # ------------------------------------------------------------------
 
-    r.mem.store_agent_memory("agent_1", "在（10，10）附近可能存在食物",
-        memory_type="system", importance=0.9)
-    r.mem.store_agent_memory("agent_4", "在（5，15）附近可能存在食物",
-        memory_type="system", importance=0.9)
-    r.mem.store_agent_memory("agent_5", "在（18，5）附近可能存在食物",
-        memory_type="system", importance=0.9)
+    # 住宅区：5 张床（x=2，y 间距 2）
+    bed("bed_1", [2,  2], r.world)
+    bed("bed_2", [2,  4], r.world)
+    bed("bed_3", [2,  6], r.world)
+    bed("bed_4", [2,  8], r.world)
+    bed("bed_5", [2, 10], r.world)
+
+    # 工作区：2 家公司
+    company("company_1", [20, 3], r.world, salary=10)
+    company("company_2", [22, 6], r.world, salary=15)
+
+    # 商业区：2 家食品店
+    food_shop("shop_1", [2, 18], r.world, food_num=20, provide=30, price=5)
+    food_shop("shop_2", [4, 21], r.world, food_num=15, provide=20, price=3)
+
+    # 娱乐区：游乐场
+    playground("playground_1", [20, 20], r.world, provide=20, price=3)
+
+    # 散落食物（中部区域，数量充足供多轮消耗）
+    food("food_1", 3, 20, [10,  8], r.world)
+    food("food_2", 3, 20, [12, 14], r.world)
+    food("food_3", 3, 20, [ 8, 18], r.world)
+    food("food_4", 3, 20, [15,  5], r.world)
+    food("food_5", 3, 20, [16, 20], r.world)
+
+    # 初始记忆：告知所有智能体各区域位置
+    map_info = (
+        "地图信息：住宅区在左上角，床(bed_1~bed_5)位于x=2,y=2/4/6/8/10；"
+        "工作区在右上角，company_1在(20,3)、company_2在(22,6)，工作可赚钱；"
+        "商业区在左下角，shop_1在(2,18)、shop_2在(4,21)，可购买食物；"
+        "娱乐区在右下角，playground_1在(20,20)，可放松；"
+        "地图中部(10,8)(12,14)(8,18)(15,5)(16,20)附近有散落食物"
+    )
+    for aid in ["agent_1", "agent_2", "agent_3", "agent_4", "agent_5"]:
+        r.mem.store_agent_memory(aid, map_info, memory_type="system", importance=0.9)
 
     return r
 

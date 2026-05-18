@@ -27,6 +27,7 @@ export interface ObjectState {
   description: string         // 物品的人类可读描述，由后端 objects.get_desc() 动态生成
   num: number | null          // null 表示无数量属性；<=0 时隐藏渲染
   occupant_count: number      // 当前在建筑内的智能体数量
+  occupants: string[]         // 当前占用者的智能体 ID 列表
 }
 
 export interface WorldState {

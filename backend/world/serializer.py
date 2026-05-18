@@ -28,7 +28,7 @@ def snapshot(world: "World") -> dict:
     agents = [
         {
             "id": a.id,
-            "pos": a.position,          # [col, row]，对应画布像素 = pos * CELL
+            "pos": a.position,          # [row, col]，前端 pos[0]→sy（垂直），pos[1]→sx（水平）
             "role": a.role,
             "emotion": a.emotion,
             "task": a.task,
@@ -54,7 +54,13 @@ def snapshot(world: "World") -> dict:
             "description": o.get_desc() if hasattr(o, "get_desc") else "",  # 由 objects.get_desc() 动态生成
             # num 为 None 表示对象无数量属性；num <= 0 时前端隐藏图形
             "num": getattr(o, "num", None),
-            "occupant_count": len(getattr(o, "occupants", [])),
+            # occupants: bed 用 occupant_id（单人），building 子类用 occupants 列表
+            "occupant_count": len(getattr(o, "occupants", [])) or (1 if getattr(o, "occupant_id", None) else 0),
+            "occupants": (
+                list(getattr(o, "occupants", None) or [])
+                if getattr(o, "occupants", None) is not None
+                else ([o.occupant_id] if getattr(o, "occupant_id", None) else [])
+            ),
         }
         for o in world.objects.values()
     ]

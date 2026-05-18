@@ -105,8 +105,8 @@ export function WorldCanvas() {
     const seenObjects = new Set<string>()
     for (const obj of worldState.objects) {
       seenObjects.add(obj.id)
-      const sx = obj.pos[0] * CELL
-      const sy = obj.pos[1] * CELL
+      const sx = obj.pos[1] * CELL
+      const sy = obj.pos[0] * CELL
 
       // 首次出现时创建 Graphics（和可选的占用数量标签），后续只重绘
       if (!objectGfx.has(obj.id)) {
@@ -170,9 +170,9 @@ export function WorldCanvas() {
     const seenAgents = new Set<string>()
     for (const agent of worldState.agents) {
       seenAgents.add(agent.id)
-      // pos[0] → X（列），pos[1] → Y（行），与 map.grid 索引一致
-      const sx = agent.pos[0] * CELL + CELL / 2
-      const sy = agent.pos[1] * CELL + CELL / 2
+      // pos[0] → 行（垂直/Y），pos[1] → 列（水平/X），与后端 map.grid[x][y] 一致
+      const sx = agent.pos[1] * CELL + CELL / 2
+      const sy = agent.pos[0] * CELL + CELL / 2
       const color = agentColor(agent.id)
 
       if (!agentGfx.has(agent.id)) {
@@ -227,8 +227,8 @@ export function WorldCanvas() {
     if (selectedAgentId) {
       const agent = worldState.agents.find((a) => a.id === selectedAgentId)
       if (agent) {
-        const sx = agent.pos[0] * CELL + CELL / 2
-        const sy = agent.pos[1] * CELL + CELL / 2
+        const sx = agent.pos[1] * CELL + CELL / 2
+        const sy = agent.pos[0] * CELL + CELL / 2
         const r = OBSERVATION_RADIUS * CELL
 
         selGfx.circle(sx, sy, r).fill({ color: 0xffffff, alpha: 0.05 })
@@ -241,8 +241,8 @@ export function WorldCanvas() {
     if (selectedObjectId) {
       const obj = worldState.objects.find((o) => o.id === selectedObjectId)
       if (obj) {
-        const sx = obj.pos[0] * CELL
-        const sy = obj.pos[1] * CELL
+        const sx = obj.pos[1] * CELL
+        const sy = obj.pos[0] * CELL
         selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
       }
     }
