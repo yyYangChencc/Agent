@@ -126,7 +126,6 @@ function ObjectDetail({ object }: { object: ObjectState }) {
       )}
     </div>
   )
-  )
 }
 
 // 点击智能体后展开的详情面板，包含 need/demand 仪表盘和思考内容

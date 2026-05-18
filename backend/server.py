@@ -47,7 +47,7 @@ def _build_runtime() -> SimulationRuntime:
         role="积极探索者，乐于尝试新事物并分享经验", speaking_style="热情、喜欢分享")
     c = r.create_agent("agent_3", [6, 6],
         role="中立观察者，善于倾听各方意见后再表态", speaking_style="理性、措辞中立")
-    d = r.create_agent("agent_4", [2, 8],
+    d = r.create_agent("agent_4", [2, 9],
         role="激进改革派，主张打破现有秩序追求效率", speaking_style="直接、充满激情")
     e = r.create_agent("agent_5", [8, 4],
         role="社区协调员，重视群体和谐与共识", speaking_style="温和、善于调解")
