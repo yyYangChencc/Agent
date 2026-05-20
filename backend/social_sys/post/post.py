@@ -1,5 +1,4 @@
 import random
-import numpy as np
 
 class Post:
     def __init__(self,id, author_id, content, is_rumor=False):

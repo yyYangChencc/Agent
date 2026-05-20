@@ -1,4 +1,5 @@
 from tools.base import Tool
+# 死代码：get_agent_memory 引用不存在的 agent.mem.agent_profile，此文件未被任何模块调用
 def register_mem_tools(mem):
     tool_specs = {
         "get_agent_memory": {

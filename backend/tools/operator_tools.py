@@ -212,7 +212,6 @@ class Operator:
         return msg
 
     def sleep(self, operator_ID: str, ID: str):
-        # 占位实现：仅做存在性/种类/距离校验，实际 need/demand 效果待 sleep 系统接入
         if ID == '0':
             return "此处为空"
         if operator_ID not in self.world.agents:
@@ -233,7 +232,6 @@ class Operator:
         return f"{operator_ID}{result}"
 
     def buy(self, operator_ID: str, ID: str):
-        # 占位实现：仅做存在性/种类/距离校验，实际购买/扣费/satiety 效果待购买系统接入
         if ID == '0':
             return "此处为空"
         if operator_ID not in self.world.agents:

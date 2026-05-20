@@ -46,5 +46,5 @@ class SocialAgent:
         mem_info = self.recall(posts_info)
         logger.debug("[%s] 相关记忆: %s", self.id, mem_info)
         raw = self.social_policy.decide(self, posts_info, mem_info)
-        feedback = self.platform.excute(self.id, raw)
+        feedback = self.platform.execute(self.id, raw)
         logger.debug("[%s] 平台反馈: %s", self.id, feedback)

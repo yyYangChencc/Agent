@@ -85,8 +85,9 @@ class company(building):
         self.salary = salary  # 工作获得的工资
 
     def interact(self, agent) -> str:
-        # 占位实现：等待 work 动作系统接入后再扩展
-        return f"在公司 {self.id} 工作（暂未实现具体效果）"
+        agent.update_need("money", self.salary)
+        agent.update_need("relax", -10)
+        return f"在公司 {self.id} 工作，获得 {self.salary} 元工资，消耗 10 relax"
     
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}，功能：工作赚钱，每次工作获得 {self.salary} 元工资"
@@ -155,8 +156,11 @@ class playground(building):
         self.price = price  # 价格
 
     def interact(self, agent) -> str:
-        # 占位实现：等待娱乐动作系统接入后再扩展
-        return f"在游乐场 {self.id} 放松（暂未实现具体效果）"
+        if agent.need.get("money", 0) < self.price:
+            return f"余额不足，无法在游乐场 {self.id} 娱乐（需要 {self.price} 元）"
+        agent.update_need("money", -self.price)
+        agent.update_need("relax", self.provide)
+        return f"在游乐场 {self.id} 放松，花费 {self.price} 元，恢复 {self.provide} relax"
     
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}，功能：放松恢复，每次花费 {self.price} 元，提供 {self.provide} 放松度"
