@@ -16,18 +16,18 @@ const OBJECT_META: Record<string, { label: string; desc: string; func: string }>
   },
   bed: {
     label: '床',
-    desc: '建筑子类，供智能体休息恢复。',
-    func: 'sleep 动作的目标，具体效果待动作系统接入后实现。',
+    desc: '建筑子类，供智能体休息恢复放松度。',
+    func: 'sleep 动作的目标，立即恢复 50 relax，持续 8 步后自动醒来。',
   },
   food_shop: {
     label: '食品店',
     desc: '建筑子类，供智能体购买食物补充饱腹度。',
-    func: '购买动作的目标，具体效果待动作系统接入后实现。',
+    func: 'buy 动作的目标，每次花费 5 元，提供 2 饱腹感。',
   },
   playground: {
     label: '游乐场',
     desc: '建筑子类，供智能体娱乐恢复放松度。',
-    func: '娱乐动作的目标，具体效果待动作系统接入后实现。',
+    func: '娱乐动作的目标，每次花费 3 元，恢复 10 relax。余额不足时无法使用。',
   },
   objects: {
     label: '通用物品',

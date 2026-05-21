@@ -23,7 +23,7 @@ export function WorldCanvas() {
   // 按智能体 ID 缓存 Graphics/Text 对象，tick 时只更新坐标，不重建
   const agentGfxRef = useRef<Map<string, { body: PIXI.Graphics; label: PIXI.Text }>>(new Map())
   // 按对象 ID 缓存场景物体的 Graphics 和可选的占用数量标签
-  const objectGfxRef = useRef<Map<string, { g: PIXI.Graphics; badge: PIXI.Text | null }>>(new Map())
+  const objectGfxRef = useRef<Map<string, { g: PIXI.Graphics; badge: PIXI.Text | null; kindLabel: PIXI.Text | null }>>(new Map())
   // 选中高亮层（观测范围圆 + 黄色描边），独立于智能体图层便于整体清除
   const selectionGfxRef = useRef<PIXI.Graphics | null>(null)
 
@@ -98,8 +98,24 @@ export function WorldCanvas() {
     const agentGfx = agentGfxRef.current
     const objectGfx = objectGfxRef.current
 
-    // 建筑类 kind 集合，用于统一渲染为灰色整格
+    // 建筑类 kind 集合，用于整格渲染
     const BUILDING_KINDS = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
+    // 各建筑 kind 的填充色
+    const BUILDING_COLORS: Record<string, number> = {
+      bed:        0x8b5cf6,  // 紫色
+      company:    0x3b82f6,  // 蓝色
+      food_shop:  0xf59e0b,  // 琥珀色
+      playground: 0x10b981,  // 翠绿色
+      building:   0x6b7280,  // 灰色（通用）
+    }
+    // 各建筑 kind 的单字标识，显示在格子中央
+    const BUILDING_LABELS: Record<string, string> = {
+      bed:        '床',
+      company:    '公',
+      food_shop:  '店',
+      playground: '乐',
+      building:   '筑',
+    }
 
     // 更新场景物体（食物等）
     const seenObjects = new Set<string>()
@@ -119,27 +135,40 @@ export function WorldCanvas() {
           sel(obj.id === curId ? null : obj.id)
         })
         stage.addChild(g)
-        // 建筑才需要占用数量标签
+        // 建筑才需要占用数量标签和种类标签
         let badge: PIXI.Text | null = null
+        let kindLabel: PIXI.Text | null = null
         if (BUILDING_KINDS.has(obj.kind)) {
           badge = new PIXI.Text({ text: '', style: { fontSize: 8, fill: 0xffffff } })
           badge.anchor.set(1, 0)
           stage.addChild(badge)
+          kindLabel = new PIXI.Text({
+            text: BUILDING_LABELS[obj.kind] ?? obj.kind,
+            style: { fontSize: 10, fill: 0xffffff, fontWeight: 'bold' },
+          })
+          kindLabel.anchor.set(0.5, 0.5)
+          stage.addChild(kindLabel)
         }
-        objectGfx.set(obj.id, { g, badge })
+        objectGfx.set(obj.id, { g, badge, kindLabel })
       }
-      const { g, badge } = objectGfx.get(obj.id)!
+      const { g, badge, kindLabel } = objectGfx.get(obj.id)!
       g.clear()
       // num <= 0 表示物品已耗尽，隐藏方块而非移除，保留对象引用
       const hidden = obj.num !== null && obj.num <= 0
       if (!hidden) {
         if (BUILDING_KINDS.has(obj.kind)) {
-          // 建筑：灰色填充整格，区别于食物的小方块
-          g.rect(sx, sy, CELL, CELL).fill(0x6b7280)
+          // 建筑：按 kind 填充不同颜色的整格
+          const color = BUILDING_COLORS[obj.kind] ?? 0x6b7280
+          g.rect(sx, sy, CELL, CELL).fill(color)
         } else {
           // 默认（含 food）：绿色小方块
           g.rect(sx + 6, sy + 6, 12, 12).fill(0x2ecc71)
         }
+      }
+      // 更新种类标签（格子中央）
+      if (kindLabel) {
+        kindLabel.visible = !hidden
+        kindLabel.position.set(sx + CELL / 2, sy + CELL / 2)
       }
       // 更新占用数量标签（右上角）
       if (badge) {
@@ -154,13 +183,17 @@ export function WorldCanvas() {
       }
     }
     // 清除服务端已不存在的物体
-    for (const [id, { g, badge }] of objectGfx) {
+    for (const [id, { g, badge, kindLabel }] of objectGfx) {
       if (!seenObjects.has(id)) {
         stage.removeChild(g)
         g.destroy()
         if (badge) {
           stage.removeChild(badge)
           badge.destroy()
+        }
+        if (kindLabel) {
+          stage.removeChild(kindLabel)
+          kindLabel.destroy()
         }
         objectGfx.delete(id)
       }
@@ -237,13 +270,18 @@ export function WorldCanvas() {
       }
     }
 
-    // 物品选中：黄色描边矩形，比物品方块略大以便视觉区分
+    // 物品选中：建筑用全格描边，食物用小方块描边
     if (selectedObjectId) {
       const obj = worldState.objects.find((o) => o.id === selectedObjectId)
       if (obj) {
         const sx = obj.pos[1] * CELL
         const sy = obj.pos[0] * CELL
-        selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
+        const BUILDING_KINDS_SEL = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
+        if (BUILDING_KINDS_SEL.has(obj.kind)) {
+          selGfx.rect(sx, sy, CELL, CELL).stroke({ color: 0xffff00, width: 2 })
+        } else {
+          selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
+        }
       }
     }
   }, [worldState, selectedAgentId, selectedObjectId])

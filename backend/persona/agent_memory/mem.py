@@ -43,9 +43,9 @@ class MultiAgentMemoryManager:
                 logger.info("为智能体 %s 初始化记忆存储", agent_id)
         return self.agent_collections[agent_id]["collection"]
 
-    def store_agent_memory(self, agent_id: str, memory_text: str, **metadata) -> str:
+    def store_agent_memory(self, agent_id: str, memory_text: str, world_time: int = 0, **metadata) -> str:
         collection = self.get_agent_collection(agent_id)
-        full_metadata = {"agent_id": agent_id, **metadata}
+        full_metadata = {"agent_id": agent_id, "saved_at": world_time, **metadata}
         memory_id = f"{agent_id}_{hashlib.md5(memory_text.encode()).hexdigest()[:10]}"
         embedding = self._get_embedding(memory_text)
         if not embedding:
@@ -116,6 +116,7 @@ class MultiAgentMemoryManager:
             results = collection.query(
                 query_embeddings=[query_embedding],
                 n_results=n_results,
+                include=["documents", "metadatas"],
                 **kwargs,
             )
         except Exception as e:
@@ -126,8 +127,14 @@ class MultiAgentMemoryManager:
             else:
                 logger.error("[%s] 记忆查询失败: %s", agent_id, e, exc_info=True)
             return []
-        docs = results.get("documents", [[]])
-        return docs[0] if docs else []
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        out = []
+        for doc, meta in zip(docs, metas):
+            tick = meta.get("saved_at")
+            prefix = f"[t={tick}] " if tick is not None else ""
+            out.append(f"{prefix}{doc}")
+        return out
 
     def get_all_agents_stats(self) -> dict:
         stats = {}

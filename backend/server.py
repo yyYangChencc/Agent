@@ -56,6 +56,9 @@ def _build_runtime() -> SimulationRuntime:
     a.opinion = 0.15; b.opinion = 0.45; c.opinion = 0.50
     d.opinion = 0.85; e.opinion = 0.60
 
+    for agent in [a, b, c, d, e]:
+        agent.need["money"] = 500.0
+
     # offline_trust 超过 friend_trust_threshold 才会触发离线意见同化
     a.offline_trust["agent_2"] = 0.75; a.offline_trust["agent_3"] = 0.65
     b.offline_trust["agent_1"] = 0.75; b.offline_trust["agent_3"] = 0.70

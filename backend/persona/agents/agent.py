@@ -138,7 +138,7 @@ class Agent:
         )
 
     def remember(self, info: str, **metadata) -> None:
-        self.mem.store_agent_memory(self.id, info, **metadata)
+        self.mem.store_agent_memory(self.id, info, world_time=self.world.time, **metadata)
 
     def append_trajectory(self, obs: str, action: str, reward: float | None) -> None:
         self.trajectory_buffer.append({
@@ -293,6 +293,8 @@ class Agent:
         self.emotion = new_emotion
 
     def tick_needs(self) -> None:
+        if self.sleeping:
+            return
         self.update_need("satiety", -self.config.satiety_decay_rate)
         self.update_need("relax", -self.config.relax_decay_rate)
         if self.task == "none":
