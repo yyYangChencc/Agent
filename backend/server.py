@@ -161,7 +161,7 @@ async def do_step() -> None:
     """
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, rt.world.step)
-    await broadcast({"type": "tick", "state": snapshot(rt.world)})
+    await broadcast({"type": "tick", "state": snapshot(rt.world, rt.platform)})
 
 
 async def _sim_loop() -> None:
@@ -218,7 +218,7 @@ async def ws_endpoint(websocket: WebSocket):
         # 新连接立即推送当前世界快照和运行状态，前端无需等待第一个 tick
         await websocket.send_text(json.dumps({
             "type": "init",
-            "state": snapshot(rt.world),
+            "state": snapshot(rt.world, rt.platform),
             "running": sim_state["running"],
             "speed": sim_state["speed"],
         }, ensure_ascii=False))
@@ -272,7 +272,7 @@ async def _handle_cmd(msg: dict) -> None:
         rt = await loop.run_in_executor(None, _build_runtime)
         await broadcast({
             "type": "init",
-            "state": snapshot(rt.world),
+            "state": snapshot(rt.world, rt.platform),
             "running": False,
             "speed": sim_state["speed"],
         })

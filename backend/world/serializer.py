@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from world.world import World
+    from social_sys.platform.platform import SocialPlatform
 
 
 def _extract_last_think(history: list[str]) -> str:
@@ -19,7 +20,7 @@ def _extract_last_think(history: list[str]) -> str:
     return ""
 
 
-def snapshot(world: "World") -> dict:
+def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
     """将当前世界状态序列化为可 JSON 传输的字典。
 
     仅提取前端渲染所需字段，避免将 LLM prompt、ChromaDB 对象等不可序列化
@@ -64,9 +65,33 @@ def snapshot(world: "World") -> dict:
         }
         for o in world.objects.values()
     ]
+    posts = []
+    if platform is not None:
+        posts = [
+            {
+                "id": p.id,
+                "author_id": p.author_id,
+                "content": p.content,
+                "time": p.time,
+                "likes": p.likes,
+                "dislikes": p.dislikes,
+                "opinion_index": round(p.opinion_index, 3),
+                "comments": [
+                    {
+                        "id": c.id,
+                        "author_id": c.author_id,
+                        "content": c.content,
+                        "time": c.time,
+                    }
+                    for c in p.comments_list
+                ],
+            }
+            for p in platform.posts
+        ]
     return {
         "time": world.time,
         "map_size": [world.map.width, world.map.height],
         "agents": agents,
         "objects": objects,
+        "posts": posts,
     }

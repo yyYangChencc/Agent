@@ -30,11 +30,30 @@ export interface ObjectState {
   occupants: string[]         // 当前占用者的智能体 ID 列表
 }
 
+export interface CommentState {
+  id: string
+  author_id: string
+  content: string
+  time: number | null
+}
+
+export interface PostState {
+  id: number
+  author_id: string
+  content: string
+  time: number
+  likes: number
+  dislikes: number
+  comments: CommentState[]
+  opinion_index: number
+}
+
 export interface WorldState {
   time: number
   map_size: [number, number]
   agents: AgentState[]
   objects: ObjectState[]
+  posts: PostState[]
 }
 
 interface SimStore {
