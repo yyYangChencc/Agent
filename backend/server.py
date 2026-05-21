@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from persona.logger import setup_logging
 from persona.runtime import SimulationRuntime
+from persona.history_recorder import HistoryRecorder
 from world.objects import food, bed, company, food_shop, playground
 from world.serializer import snapshot
 
@@ -22,6 +23,8 @@ from world.serializer import snapshot
 
 # rt 在 lifespan 中初始化，reset 命令会重建它
 rt: SimulationRuntime | None = None
+# 历史记录器，随 rt 一起重建
+_recorder: HistoryRecorder | None = None
 # 当前所有已连接的 WebSocket 客户端，广播时遍历
 clients: set[WebSocket] = set()
 # 仿真控制状态，running=True 时自动步进循环运行
@@ -36,6 +39,11 @@ _sim_task: asyncio.Task | None = None
 
 def _build_runtime() -> SimulationRuntime:
     """构建仿真运行时并初始化5个智能体、3处食物和信任关系。"""
+    global _recorder
+    if _recorder is not None:
+        _recorder.close()
+    _recorder = HistoryRecorder("data/history")
+
     r = SimulationRuntime.build(conversation_max_rounds=2)
     # 每次 reset 清空向量记忆，保证实验可重复
     r.mem.reset_all()
@@ -127,6 +135,7 @@ def _build_runtime() -> SimulationRuntime:
     for aid in ["agent_1", "agent_2", "agent_3", "agent_4", "agent_5"]:
         r.mem.store_agent_memory(aid, map_info, memory_type="system", importance=0.9)
 
+    r.world.history_recorder = _recorder
     return r
 
 

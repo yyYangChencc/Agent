@@ -56,6 +56,19 @@ export interface WorldState {
   posts: PostState[]
 }
 
+export interface AgentHistoryPoint {
+  tick: number
+  opinion: number
+  satiety: number
+  relax: number
+  money: number
+  satiety_demand: number
+  relax_demand: number
+  emotion: string
+}
+
+const MAX_HISTORY = 200
+
 interface SimStore {
   worldState: WorldState | null
   running: boolean
@@ -64,6 +77,7 @@ interface SimStore {
   selectedObjectId: string | null   // 当前选中的场景物品 ID
   ws: WebSocket | null
   connected: boolean
+  agentHistory: Record<string, AgentHistoryPoint[]>
   setWorldState: (state: WorldState) => void
   setStatus: (running: boolean, speed: number) => void
   selectAgent: (id: string | null) => void
@@ -71,6 +85,7 @@ interface SimStore {
   setWs: (ws: WebSocket | null) => void
   setConnected: (connected: boolean) => void
   sendCmd: (cmd: object) => void
+  resetHistory: () => void
 }
 
 export const useSimStore = create<SimStore>((set, get) => ({
@@ -81,8 +96,29 @@ export const useSimStore = create<SimStore>((set, get) => ({
   selectedObjectId: null,
   ws: null,
   connected: false,
+  agentHistory: {},
 
-  setWorldState: (worldState) => set({ worldState }),
+  setWorldState: (worldState) => {
+    const prev = get().agentHistory
+    const next: Record<string, AgentHistoryPoint[]> = { ...prev }
+    for (const a of worldState.agents) {
+      const point: AgentHistoryPoint = {
+        tick: worldState.time,
+        opinion: a.opinion,
+        satiety: a.need.satiety ?? 0,
+        relax: a.need.relax ?? 0,
+        money: a.need.money ?? 0,
+        satiety_demand: a.demand.satiety ?? 0,
+        relax_demand: a.demand.relax ?? 0,
+        emotion: a.emotion,
+      }
+      const arr = prev[a.id] ?? []
+      const updated = [...arr, point]
+      next[a.id] = updated.length > MAX_HISTORY ? updated.slice(-MAX_HISTORY) : updated
+    }
+    set({ worldState, agentHistory: next })
+  },
+
   setStatus: (running, speed) => set({ running, speed }),
   // 选中智能体时清除物品选中，保持互斥
   selectAgent: (id) => set({ selectedAgentId: id, selectedObjectId: null }),
@@ -90,6 +126,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   selectObject: (id) => set({ selectedObjectId: id, selectedAgentId: null }),
   setWs: (ws) => set({ ws }),
   setConnected: (connected) => set({ connected }),
+  resetHistory: () => set({ agentHistory: {} }),
 
   sendCmd: (cmd) => {
     const { ws } = get()

@@ -4,7 +4,7 @@ import { useSimStore } from '../store/simStore'
 const RECONNECT_DELAY = 2000
 
 export function useWebSocket() {
-  const { setWorldState, setStatus, setWs, setConnected } = useSimStore()
+  const { setWorldState, setStatus, setWs, setConnected, resetHistory } = useSimStore()
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const activeRef = useRef(true)
 
@@ -29,6 +29,7 @@ export function useWebSocket() {
             setWorldState(msg.state)
           }
           if (msg.type === 'init') {
+            resetHistory()
             setStatus(msg.running ?? false, msg.speed ?? 1.0)
           } else if (msg.type === 'status') {
             setStatus(msg.running, msg.speed)

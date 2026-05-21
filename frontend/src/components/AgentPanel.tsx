@@ -1,5 +1,6 @@
-import { useState } from 'react'
-import { useSimStore, AgentState, ObjectState } from '../store/simStore'
+import { useState, useMemo } from 'react'
+import { useSimStore, AgentState, ObjectState, AgentHistoryPoint } from '../store/simStore'
+import { AgentCharts } from './AgentCharts'
 
 // 物品种类元数据：按 objects.py 中 self.kind 值为键，提供前端展示信息
 // desc 仅作为后端 get_desc() 返回空字符串时的兜底；func 始终展示
@@ -129,9 +130,14 @@ function ObjectDetail({ object }: { object: ObjectState }) {
 }
 
 // 点击智能体后展开的详情面板，包含 need/demand 仪表盘和思考内容
+const EMPTY_HISTORY: AgentHistoryPoint[] = []
+
 function AgentDetail({ agent }: { agent: AgentState }) {
   // last_think 内容可能很长，默认折叠
   const [thinkOpen, setThinkOpen] = useState(false)
+  const [chartOpen, setChartOpen] = useState(false)
+  const history = useSimStore((s) => s.agentHistory[agent.id] ?? EMPTY_HISTORY)
+  const stableHistory = useMemo(() => history, [history])
 
   return (
     <div className="p-3 space-y-2">
@@ -194,6 +200,21 @@ function AgentDetail({ agent }: { agent: AgentState }) {
           )}
         </div>
       )}
+
+      {/* 历史趋势图表，默认折叠 */}
+      <div>
+        <button
+          className="text-xs text-gray-500 hover:text-gray-300 underline"
+          onClick={() => setChartOpen((v) => !v)}
+        >
+          {chartOpen ? '收起趋势' : `展开趋势 (${stableHistory.length} 条)`}
+        </button>
+        {chartOpen && (
+          <div className="mt-2">
+            <AgentCharts history={stableHistory} />
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -261,7 +282,7 @@ export function AgentPanel() {
       </div>
       {/* 详情区域固定在面板底部，智能体和物品互斥显示 */}
       {selected && (
-        <div className="border-t border-gray-700 overflow-y-auto max-h-80">
+        <div className="border-t border-gray-700 overflow-y-auto max-h-[32rem]">
           <AgentDetail agent={selected} />
         </div>
       )}

@@ -10,7 +10,7 @@ from persona.logger import get_logger
 logger = get_logger(__name__)
 
 class World:
-    def __init__(self, opinion_updater=None):
+    def __init__(self, opinion_updater=None, history_recorder=None):
         self.time = 0
         self.map = Map(25, 25)
         self.agents = {}
@@ -19,6 +19,7 @@ class World:
         self.conversation_policy = None   # set externally to enable conversation phase
         self.conversation_max_rounds = 3  # max conversation rounds per time step
         self.opinion_updater = opinion_updater
+        self.history_recorder = history_recorder
         operator = Operator(self)
         self.tools, self.tools_prompt = register_operator_tools(operator)
 
@@ -69,6 +70,9 @@ class World:
 
         if self.conversation_policy:
             self._conversation_phase(agents)
+
+        if self.history_recorder:
+            self.history_recorder.record(self.time, list(self.agents.values()))
 
     def _conversation_phase(self, agents):
         max_rounds = self.conversation_max_rounds
