@@ -42,7 +42,7 @@ def _build_runtime() -> SimulationRuntime:
     global _recorder
     if _recorder is not None:
         _recorder.close()
-    _recorder = HistoryRecorder("data/history")
+    _recorder = HistoryRecorder()
 
     r = SimulationRuntime.build(conversation_max_rounds=2)
     # 每次 reset 清空向量记忆，保证实验可重复

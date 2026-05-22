@@ -49,6 +49,7 @@ class Agent:
         }
         self.state: dict = {}
         self.task: str = "none"
+        self.task_demand_key: str = ""  # 当前任务对应的 need/demand 键，由 set_task() 设置
         self.observed_events: list = []
         self.mem = mem
         self.inbox: list[dict] = []
@@ -278,16 +279,19 @@ class Agent:
         self.next_action = None
         return res
 
-    def set_task(self, task: str) -> None:
-        from persona.reflect.reflect import _TASK_DEMAND_MAP, _TASK_INITIAL_FOCUS
-        valid = {"none"} | set(_TASK_DEMAND_MAP.keys())
-        if task in valid:
-            self.task = task
-            self.current_focus = _TASK_INITIAL_FOCUS.get(task, "")
-            self.stuck_ticks = 0
-            self._prev_task_need = None
-        else:
-            logger.warning("无效任务: %s，合法任务为 %s", task, valid)
+    def set_task(self, task: str, demand_key: str = "") -> None:
+        """设置当前任务及其对应的 need/demand 键。
+        task="none" 时 demand_key 忽略；其余任务应传入合法的 need 键（satiety/relax/money）。
+        """
+        valid_keys = set(self.need.keys()) | {""}
+        if task != "none" and demand_key not in valid_keys:
+            logger.warning("[%s] 无效 demand_key: %s，合法值为 %s", self.id, demand_key, valid_keys)
+            return
+        self.task = task
+        self.task_demand_key = demand_key if task != "none" else ""
+        self.current_focus = ""
+        self.stuck_ticks = 0
+        self._prev_task_need = None
 
     def update_emotion(self, new_emotion: str) -> None:
         self.emotion = new_emotion

@@ -255,19 +255,20 @@ class ReflectPromptBuilder(BasePromptBuilder):
         # Not used directly; use task_reset_prompt / trajectory_summary instead
         raise NotImplementedError
 
-    def task_decide_prompt(self, agent: "Agent", task_info: dict[str, str]) -> tuple[str, str]:
-        task_list = "\n".join(f"  - {task}：{desc}" for task, desc in task_info.items())
+    def task_decide_prompt(self, agent: "Agent") -> tuple[str, str]:
         system = (
             f"你是智能体 {agent.id} 的决策模块，当前没有进行中的任务。\n"
             f"智能体角色：{agent.role or '无特定角色'}\n"
-            "请综合以下几个维度，从可选任务中选择最优的一个：\n"
-            "  1. 优先选 need 值最低（客观最匮乏）的任务\n"
-            "  2. need 相近时，选 demand 值最高（主观最渴望）的任务\n"
-            "  3. 角色契合度：哪个任务最符合该智能体的角色行为？\n"
-            "输出格式（必须严格遵守，必须包含完整的<Think>和</Think>、<Task>和</Task>标签）：\n"
-            "<Think>[对各候选任务分析 need/demand 数值与角色契合度，给出综合判断]</Think>\n"
+            "请根据当前需求状态，自由决定一个最合适的任务名称，并指定该任务所针对的需求键。\n\n"
+            "决策原则：\n"
+            "  1. 优先针对 need 值最低（客观最匮乏）的需求\n"
+            "  2. need 相近时，选 demand 值最高（主观最渴望）的需求\n"
+            "  3. 任务名称应简洁描述智能体接下来要做的事（例如：'寻找食物'、'前往休息'、'赚钱打工'）\n"
+            "  4. 需求键必须是以下之一：satiety（饱腹度）、relax（放松度）、money（金钱）\n\n"
+            "输出格式（必须严格遵守）：\n"
+            "<Think>[分析各需求的 need/demand 数值与紧迫程度，给出综合判断]</Think>\n"
             "<Task>任务名称</Task>\n"
-            "任务名称必须与可选任务列表完全一致。"
+            "<DemandKey>需求键</DemandKey>"
         )
         user = (
             "## 当前状态\n"
@@ -276,9 +277,7 @@ class ReflectPromptBuilder(BasePromptBuilder):
             "## 最近观测\n"
             f"{agent.history[-1] if agent.history else '（无）'}\n\n"
             "## 近期历史\n"
-            f"{self._history_block(agent)}\n\n"
-            "## 可选任务\n"
-            f"{task_list}"
+            f"{self._history_block(agent)}"
         )
         return system, user
 
@@ -297,8 +296,7 @@ class ReflectPromptBuilder(BasePromptBuilder):
         return system, user
 
     def micro_reflect_prompt(self, agent: "Agent") -> tuple[str, str]:
-        from persona.reflect.reflect import _TASK_DEMAND_MAP
-        demand_key = _TASK_DEMAND_MAP.get(agent.task, "")
+        demand_key = agent.task_demand_key
         need_val = agent.need.get(demand_key, float("nan")) if demand_key else float("nan")
         demand_val = agent.demand.get(demand_key, float("nan")) if demand_key else float("nan")
         if demand_key:
