@@ -11,3 +11,4 @@ logs/
 CLAUDE.md
 frontend/node_modules/
 data/
+backend/history/
