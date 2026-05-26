@@ -10,3 +10,11 @@ class LLMClient(ABC):
     @abstractmethod
     def get_embeddings(self, text: str) -> list[float]:
         raise NotImplementedError
+
+    async def agenerate(self, system: str, user: str) -> str:
+        import asyncio
+        return await asyncio.to_thread(self.generate, system, user)
+
+    async def aget_embeddings(self, text: str) -> list[float]:
+        import asyncio
+        return await asyncio.to_thread(self.get_embeddings, text)

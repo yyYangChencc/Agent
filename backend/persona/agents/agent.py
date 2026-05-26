@@ -80,6 +80,7 @@ class Agent:
         self._sleep_start_need: dict[str, float] = {}
         self._sleep_start_time: int = 0
         self.inside_building_id: str | None = None
+        self._pending_social_notifications: list[str] = []  # 待推送的社交通知
 
         self.world.add_agent(self)
 
@@ -91,6 +92,13 @@ class Agent:
         self.add_history("observation", observation)
         mem_info = self.recall(observation)
         action = self.policy.decide(self, observation, mem_info)
+        self.add_history("action", action)
+        return action
+
+    async def astep(self, observation: str) -> str:
+        self.add_history("observation", observation)
+        mem_info = await self.arecall(observation)
+        action = await self.policy.adecide(self, observation, mem_info)
         self.add_history("action", action)
         return action
 
@@ -138,8 +146,17 @@ class Agent:
             n_results=self.config.memory_top_k,
         )
 
+    async def arecall(self, obs: str) -> list[str]:
+        return await self.mem.asmart_retrieve(
+            self.id, obs, self.task, self.demand, self.demand_threshold,
+            n_results=self.config.memory_top_k,
+        )
+
     def remember(self, info: str, **metadata) -> None:
         self.mem.store_agent_memory(self.id, info, world_time=self.world.time, **metadata)
+
+    async def aremember(self, info: str, **metadata) -> None:
+        await self.mem.astore_agent_memory(self.id, info, world_time=self.world.time, **metadata)
 
     def append_trajectory(self, obs: str, action: str, reward: float | None) -> None:
         self.trajectory_buffer.append({
@@ -166,6 +183,26 @@ class Agent:
         summary = self.reflect.llm.generate(system, user)
         logger.debug("[%s] 轨迹总结: %s", self.id, summary)
         self.remember(summary, type="trajectory", task=task)
+        logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
+        self.trajectory_buffer.clear()
+
+    async def aflush_trajectory(self, task: str) -> None:
+        if not self.trajectory_buffer:
+            return
+        lines = [f"任务：{task}"]
+        for i, entry in enumerate(self.trajectory_buffer, start=1):
+            reward_str = f"{entry['reward']:.3f}" if entry["reward"] is not None else "N/A"
+            lines.append(
+                f"步骤{i} (t={entry['step']})\n"
+                f"  obs:    {entry['obs']}\n"
+                f"  action: {entry['action']}\n"
+                f"  reward: {reward_str}"
+            )
+        trajectory_text = "\n".join(lines)
+        system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
+        summary = await self.reflect.llm.agenerate(system, user)
+        logger.debug("[%s] 轨迹总结: %s", self.id, summary)
+        await self.aremember(summary, type="trajectory", task=task)
         logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
         self.trajectory_buffer.clear()
 
@@ -335,6 +372,9 @@ class Agent:
 
     def get_reflect(self) -> None:
         self.reflect.step(self)
+
+    async def aget_reflect(self) -> None:
+        await self.reflect.astep(self)
 
     def sleep_status(self, bed_id: str) -> None:
         self.update_need("relax", self.config.sleep_relax_recover)

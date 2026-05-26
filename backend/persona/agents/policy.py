@@ -48,3 +48,28 @@ class LLMPolicy(Policy):
         if error:
             logger.warning("[%s] 重试%d次后仍解析失败，本轮跳过行动", agent.id, MAX_RETRIES)
         return action
+
+    async def adecide(self, agent: "Agent", observation: str, mem_info) -> str:
+        system, user = self.prompt_builder.build(agent, observation, mem_info)
+        raw = await self.llm.agenerate(system, user)
+        logger.debug("[%s] LLM 输出: %s", agent.id, raw)
+        action, error = self.parser.parse_action_with_error(raw)
+
+        for attempt in range(MAX_RETRIES):
+            if not error:
+                break
+            logger.warning("[%s] 解析失败（第%d次），错误：%s，尝试重试", agent.id, attempt + 1, error)
+            retry_user = (
+                f"{user}\n\n"
+                f"[上一次输出]\n{raw}\n\n"
+                f"[错误信息]\n{error}\n\n"
+                "请检查上述错误，重新输出符合格式要求的内容。"
+                "必须包含 <Action>{...}</Action> 标签，内容为合法 JSON。"
+            )
+            raw = await self.llm.agenerate(system, retry_user)
+            logger.debug("[%s] 重试%d LLM 输出: %s", agent.id, attempt + 1, raw)
+            action, error = self.parser.parse_action_with_error(raw)
+
+        if error:
+            logger.warning("[%s] 重试%d次后仍解析失败，本轮跳过行动", agent.id, MAX_RETRIES)
+        return action

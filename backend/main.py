@@ -1,13 +1,12 @@
+import asyncio
 import os
 from dotenv import load_dotenv
 from persona.logger import setup_logging
 from persona.runtime import SimulationRuntime
 from world.objects import food
 
-if __name__ == "__main__":
-    setup_logging()
-    load_dotenv()
 
+async def _main():
     rt = SimulationRuntime.build(conversation_max_rounds=2)
     rt.mem.reset_all()
 
@@ -31,41 +30,25 @@ if __name__ == "__main__":
     agents = [a, b, c, d, e]
 
     # --- 设置初始观念 ---
-    a.opinion = 0.15   # 极保守
-    b.opinion = 0.45   # 略保守
-    c.opinion = 0.50   # 中立
-    d.opinion = 0.85   # 极激进
-    e.opinion = 0.60   # 略激进
+    a.opinion = 0.15; b.opinion = 0.45; c.opinion = 0.50
+    d.opinion = 0.85; e.opinion = 0.60
 
-    # --- 好友关系（offline_trust >= 0.6 视为线下邻居）---
-    # 阵营1：a、b、c 互相认识
-    a.offline_trust["agent_2"] = 0.75
-    a.offline_trust["agent_3"] = 0.65
-    b.offline_trust["agent_1"] = 0.75
-    b.offline_trust["agent_3"] = 0.70
-    c.offline_trust["agent_1"] = 0.65
-    c.offline_trust["agent_2"] = 0.70
-    # 阵营2：d、e 互相认识
-    d.offline_trust["agent_5"] = 0.80
-    e.offline_trust["agent_4"] = 0.80
-    # 跨阵营：c 与 e 是桥梁
-    c.offline_trust["agent_5"] = 0.62
-    e.offline_trust["agent_3"] = 0.62
+    # --- 好友关系 ---
+    a.offline_trust["agent_2"] = 0.75; a.offline_trust["agent_3"] = 0.65
+    b.offline_trust["agent_1"] = 0.75; b.offline_trust["agent_3"] = 0.70
+    c.offline_trust["agent_1"] = 0.65; c.offline_trust["agent_2"] = 0.70
+    d.offline_trust["agent_5"] = 0.80; e.offline_trust["agent_4"] = 0.80
+    c.offline_trust["agent_5"] = 0.62; e.offline_trust["agent_3"] = 0.62
 
-    # --- 线上信任（默认 0.5，按关系调整）---
-    a.online_trust["agent_2"] = 0.55
-    a.online_trust["agent_3"] = 0.60
-    b.online_trust["agent_1"] = 0.50
-    b.online_trust["agent_4"] = 0.35   # b 不太信任激进派
-    c.online_trust["agent_1"] = 0.55
-    c.online_trust["agent_4"] = 0.55
-    c.online_trust["agent_5"] = 0.60
-    d.online_trust["agent_5"] = 0.65
-    d.online_trust["agent_1"] = 0.30   # d 不信任保守派
-    e.online_trust["agent_4"] = 0.60
+    # --- 线上信任 ---
+    a.online_trust["agent_2"] = 0.55; a.online_trust["agent_3"] = 0.60
+    b.online_trust["agent_1"] = 0.50; b.online_trust["agent_4"] = 0.35
+    c.online_trust["agent_1"] = 0.55; c.online_trust["agent_4"] = 0.55
+    c.online_trust["agent_5"] = 0.60; d.online_trust["agent_5"] = 0.65
+    d.online_trust["agent_1"] = 0.30; e.online_trust["agent_4"] = 0.60
     e.online_trust["agent_3"] = 0.65
 
-    # --- 关注关系（能看到被关注者的帖子）---
+    # --- 关注关系 ---
     a.add_follower("agent_2"); a.add_follower("agent_3")
     b.add_follower("agent_1"); b.add_follower("agent_3"); b.add_follower("agent_5")
     c.add_follower("agent_1"); c.add_follower("agent_4"); c.add_follower("agent_5")
@@ -85,14 +68,20 @@ if __name__ == "__main__":
     rt.mem.store_agent_memory("agent_5", "在（18，5）附近可能存在食物",
         memory_type="system", importance=0.9)
 
-    # --- 运行仿真（offline 更新在 tick 3、6、9 触发）---
+    # --- 运行仿真 ---
     header = "  ".join(f"{ag.id:>8}" for ag in agents)
     print(f"\n=== 初始观念 ===\n  {'tick':>4}  {header}")
     print(f"  {'init':>4}  " + "  ".join(f"{ag.opinion:>8.3f}" for ag in agents))
 
     for tick in range(10):
-        rt.world.step()
+        await rt.world.astep()
         marker = " ◀offline" if tick + 1 in (3, 6, 9) else ""
         print(f"  {tick+1:>4}  " + "  ".join(f"{ag.opinion:>8.3f}" for ag in agents) + marker)
+
+
+if __name__ == "__main__":
+    setup_logging()
+    load_dotenv()
+    asyncio.run(_main())
 
 

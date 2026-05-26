@@ -36,6 +36,14 @@ def observe(agent,r:int) -> list:
     if len(res) == 3:
         res.append("无可观测动作")
     agent.observed_events.clear()
+
+    # 社交通知（评论/点赞/点踩 + 新闻推送）
+    if agent._pending_social_notifications:
+        res.append("社交通知如下：")
+        for note in agent._pending_social_notifications:
+            res.append(note)
+        agent._pending_social_notifications.clear()
+
     agent.observation = "\n".join(res)
     res = "\n".join(res)
     logger.debug("[%s] 观测结果:\n%s", agent.id, res)

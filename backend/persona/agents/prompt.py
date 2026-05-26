@@ -23,18 +23,17 @@ class BasePromptBuilder:
         d = agent.demand
         n = agent.need
         t = agent.demand_threshold
-        lines = ["- 需求状态（当前属性=客观拥有量 0→1，急迫度=主观急迫度 1→0，当前属性超过阈值表示已满足）："]
+        lines = ["- 需求（need低=匮乏，demand高=渴望；need>阈值=已满足）："]
         for k, urgency in d.items():
             need_val = n.get(k, 0.0)
             th = t.get(k, "?")
-            status = "已满足" if isinstance(th, float) and need_val > th else "未满足"
+            status = "✓" if isinstance(th, float) and need_val > th else "✗"
             lines.append(
-                f"  {k}：当前属性 {need_val:.2f} | 急迫度 {urgency:.2f}"
-                f"（阈值 {th:.2f}，{status}）"
+                f"  {k}: need={need_val:.1f} demand={urgency:.2f} thr={th:.1f} {status}"
             )
         return "\n".join(lines)
 
-    def _history_block(self, agent: "Agent", max_n: int = 10) -> str:
+    def _history_block(self, agent: "Agent", max_n: int = 5) -> str:
         recent = agent.history[-max_n:]
         if not recent:
             return "（无历史记录）"
@@ -84,10 +83,17 @@ class WorldPromptBuilder(BasePromptBuilder):
             "- 优先执行当前任务，通过行动降低对应需求值，若行动可顺便解决其他需求，可在不耽误当前主任务的前提下进行\n"
             "- 若任务为 none，根据需求自由决策\n"
             "- 若任务长时间无进展，优先依据当前焦点行动\n"
-            "- 每轮只能执行一个工具调用\n\n"
+            "- 每轮只能执行一个工具调用\n"
+            "- 根据当前情况选择最合适的动作：\n"
+            "  · 有任务目标且知道目标位置时 → 使用 move 前往，配合 eat/sleep/buy/enter_building 完成任务\n"
+            "  · 想分享经历、表达观点、了解他人动态时 → 使用 social_step 浏览或发布内容\n"
+            "  · 确实不知道某信息（如食物/建筑位置）且记忆中也没有时 → 用 speak 询问附近智能体，或用 social_step 发帖求助\n"
+            "  · 禁止：发帖询问你已知的信息（记忆中或观测到的建筑、食物、商店位置等）\n"
+            "  · 任务为 none 且所有需求已满足时，可自由选择任意动作\n"
+            "- 记忆中的位置信息是可靠的，直接使用，不需要反复确认\n\n"
             "输出格式（必须严格遵守，必须输出完整成对的<Think></Think>与<Action></Action>标签）：\n"
             "<Think>\n"
-            "[分析：当前任务状态 → 最紧迫需求 → 可行动作列表 → 前提检查 → 选择理由]\n"
+            "[分析：当前任务状态 → 最紧迫需求 → 回忆/观测中已知目标位置 → 可行动作列表 → 前提检查 → 选择理由]\n"
             "</Think>\n"
             "<Action>\n"
             '{"tool": "<tool_name>", "args": {"<key>": <value>}}\n'
@@ -98,7 +104,7 @@ class WorldPromptBuilder(BasePromptBuilder):
             "</Action>\n\n"
             "示例：\n"
             "<Think>\n"
-            "任务 eat something，satiety=85 未满足。观测到 food_1 在 (7,5)，当前位置 (3,5)，需移动靠近。move 工具满足前提。\n"
+            "任务 eat something，satiety=85 未满足。记忆中 food_1 位于 (7,5)，当前位置 (3,5)，使用 move 前往。move 工具满足前提。\n"
             "</Think>\n"
             "<Action>\n"
             '{"tool": "move", "args": {"x": 7, "y": 5}}\n'
@@ -143,13 +149,15 @@ class SocialPromptBuilder(BasePromptBuilder):
         system = (
             f"你是社交平台智能体 {agent.id}。\n"
             f"{persona_block}\n"
-            "你的目标是通过社交平台获取有用信息、表达观点、建立社交联系；\n"
-            "当物理世界中遇到困难（如找不到食物），也可发帖向他人寻求帮助。\n"
+            "你的目标是通过社交平台获取有用信息、表达观点、建立社交联系。\n"
             "每轮只能执行一个社交动作。\n\n"
             "行为原则：\n"
+            "- 适合发帖的时机：分享最近的行动经历或发现、对他人帖子发表看法、表达你的观点和立场\n"
             "- 发帖内容应与你的记忆和当前话题相关\n"
             "- 不允许重复发布完全相同的内容\n"
-            "- 仅对真实存在的帖子执行 comment / like / dislike\n\n"
+            "- 禁止发帖询问你已知的信息（如记忆中已有的建筑、食物位置等）\n"
+            "- 仅对真实存在的帖子执行 comment / like / dislike\n"
+            "- 浏览时积极参与互动（点赞/评论），而非只看不发\n\n"
             "输出格式（必须严格遵守，必须输出完整成对的<Think></Think>与<Action></Action>标签）：\n"
             "<Think>\n"
             "[分析：当前帖子对我意味着什么 → 我想传达什么 → 最合适的社交动作]\n"

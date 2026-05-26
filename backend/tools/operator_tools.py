@@ -60,7 +60,7 @@ class Operator:
                 "constraint": "距离己方5格内才能听见"
             },
             "social_step": {
-                "description": "查看社交平台上的帖子，并可选择进行发帖、评论、点赞或点踩等社交行为。社交平台上可能会获得物理世界中无法获得的信息，社交行为也会影响其他智能体的态度和行为",
+                "description": "浏览社交平台或发布内容。适合分享经历、表达观点、了解他人动态。如果你已知目标位置，应使用 move 前往，而非发帖询问",
                 "args": {},
                 "returns": str,
             },
@@ -337,6 +337,14 @@ class SocialOperator:
         comment_id = f"{post_id}_c{post.comments+1}"
         new_comment = Comment(comment_id, operator_ID, content, time=None)
         post.add_comment(new_comment)
+        # 通知帖主有人评论了其帖子
+        if post.author_id != operator_ID:
+            author_agent = self.platform.get_agent(post.author_id)
+            if author_agent is not None:
+                snippet = content[:40] + "..." if len(content) > 40 else content
+                author_agent._pending_social_notifications.append(
+                    f"[社交通知] {operator_ID} 评论了你的帖子：{snippet}"
+                )
         logger.info("[%s] 评论帖子 %s: %s", operator_ID, post_id, content)
         return f"{operator_ID}成功评论了帖子 {post_id}: {content}"
 
@@ -353,6 +361,12 @@ class SocialOperator:
                 1.0,
                 agent.online_trust.get(post.author_id, cfg.default_online_trust) + 0.05
             )
+            # 通知帖主有人点赞
+            author_agent = self.platform.get_agent(post.author_id)
+            if author_agent is not None:
+                author_agent._pending_social_notifications.append(
+                    f"[社交通知] {operator_ID} 点赞了你的帖子"
+                )
         logger.info("[%s] 点赞帖子 %s", operator_ID, post_id)
         return f"{operator_ID}成功点赞了帖子 {post_id}"
 
@@ -369,5 +383,11 @@ class SocialOperator:
                 0.0,
                 agent.online_trust.get(post.author_id, cfg.default_online_trust) - 0.05
             )
+            # 通知帖主有人点踩
+            author_agent = self.platform.get_agent(post.author_id)
+            if author_agent is not None:
+                author_agent._pending_social_notifications.append(
+                    f"[社交通知] {operator_ID} 点踩了你的帖子"
+                )
         logger.info("[%s] 点踩帖子 %s", operator_ID, post_id)
         return f"{operator_ID}成功点踩了帖子 {post_id}"

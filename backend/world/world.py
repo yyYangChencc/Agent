@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 import concurrent.futures
@@ -10,7 +11,7 @@ from persona.logger import get_logger
 logger = get_logger(__name__)
 
 class World:
-    def __init__(self, opinion_updater=None, history_recorder=None):
+    def __init__(self, opinion_updater=None, history_recorder=None, platform=None):
         self.time = 0
         self.map = Map(25, 25)
         self.agents = {}
@@ -20,6 +21,7 @@ class World:
         self.conversation_max_rounds = 3  # max conversation rounds per time step
         self.opinion_updater = opinion_updater
         self.history_recorder = history_recorder
+        self.platform = platform          # set externally for news injection
         operator = Operator(self)
         self.tools, self.tools_prompt = register_operator_tools(operator)
 
@@ -34,11 +36,16 @@ class World:
         self.map.place(x, y, obj.id)
 
     def step(self):
+        """同步入口（CLI 模式兼容），内部委托给 astep()。"""
+        return asyncio.run(self.astep())
+
+    async def astep(self):
         self.time += 1
         self.map.print_map()
         agents = list(self.agents.values())
 
-        def _agent_full_step(agent):
+        # Phase 1: observe + step + execute 并发（所有 agent 的 LLM 调用同时飞行中）
+        async def _agent_step_and_execute(agent):
             try:
                 if agent.sleeping:
                     agent.sleep_ticks_remaining -= 1
@@ -47,19 +54,25 @@ class World:
                         bed = self.objects.get(agent.sleeping_on_bed_id)
                         agent.wakeup(bed)
                     return
-                obs    = observe(agent, agent.config.observation_radius)
-                action = agent.step(obs)
+                obs = observe(agent, agent.config.observation_radius)
+                action = await agent.astep(obs)
                 reward = self.execute(agent, action)
                 agent.append_trajectory(obs, action, reward)
-                agent.get_reflect()     #反思总结
-                agent.tick_needs()      #需求的自然衰减
             except Exception as e:
                 logger.error("[World] agent %s 本轮执行失败: %s", agent.id, e, exc_info=True)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(agents) or 1) as ex:
-            futs = [ex.submit(_agent_full_step, a) for a in agents]
-            for f in concurrent.futures.as_completed(futs):
-                f.result()
+        await asyncio.gather(*[_agent_step_and_execute(a) for a in agents])
+
+        # Phase 2: reflect + tick_needs 并发（reflect 的 LLM 调用同时飞行中）
+        async def _agent_reflect(agent):
+            try:
+                if not agent.sleeping:
+                    await agent.aget_reflect()
+                    agent.tick_needs()
+            except Exception as e:
+                logger.error("[World] agent %s 反思失败: %s", agent.id, e, exc_info=True)
+
+        await asyncio.gather(*[_agent_reflect(a) for a in agents])
 
         if self.opinion_updater:
             for agent in self.agents.values():
@@ -70,6 +83,21 @@ class World:
 
         if self.conversation_policy:
             self._conversation_phase(agents)
+
+        if self.platform is not None:
+            from persona.news_events import NEWS_SCHEDULE
+            news = NEWS_SCHEDULE.get(self.time)
+            if news:
+                self.platform.inject_news(
+                    self.time, news["title"], news["content"],
+                    news.get("opinion_index", 0.5),
+                )
+                for agent in self.agents.values():
+                    agent._pending_social_notifications.append(
+                        f"[新闻] {news['title']}：{news['content']}"
+                    )
+                    agent.add_history("news", f"{news['title']}：{news['content']}")
+                logger.info("[World] tick=%d 新闻已投放，所有智能体自动阅览", self.time)
 
         if self.history_recorder:
             self.history_recorder.record(self.time, list(self.agents.values()))

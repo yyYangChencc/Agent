@@ -1,11 +1,12 @@
 import random
 
 class Post:
-    def __init__(self,id, author_id, content, is_rumor=False):
+    def __init__(self,id, author_id, content, is_rumor=False, is_news=False):
         self.id = id
         self.author_id = author_id
         self.content = content     # 帖子内容
         self.is_rumor = is_rumor   # 是否谣言
+        self.is_news = is_news     # 是否为系统投放的真实新闻
         self.opinion_index: float = 0.0  # author's opinion snapshot at post creation time
 
         self.likes = 0
@@ -24,10 +25,11 @@ class Post:
         self.comments += 1
      
     def show(self):
+        tag = "[新闻] " if self.is_news else ""
         comments = "\n".join([comment.show() for comment in self.comments_list])
         return f"""
-        发布时间：{self.time}  发布作者：{self.author_id} 
-        帖子内容：{self.content}
+        发布时间：{self.time}  发布作者：{self.author_id}
+        {tag}帖子内容：{self.content}
         评论：{comments}
         """
     

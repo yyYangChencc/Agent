@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass, field
 
 from persona.config import AgentConfig
-from persona.llm.openai_client import OpenAIClient
+from persona.llm.interface import LLMClient
 from persona.agent_memory.mem import MultiAgentMemoryManager
 from world.world import World
 from persona.agents.agent import Agent
@@ -24,7 +24,7 @@ from persona.opinion.updater import OpinionUpdater
 class SimulationRuntime:
     """Composition root: holds every shared service; create once per simulation."""
     config: AgentConfig
-    llm: OpenAIClient
+    llm: LLMClient
     mem: MultiAgentMemoryManager
     world: World
     platform: SocialPlatform
@@ -50,11 +50,12 @@ class SimulationRuntime:
         if base_url is None:
             base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
-        llm = OpenAIClient(api_key=api_key, base_url=base_url, config=config)
+        from persona.llm.openai_client import AsyncOpenAIClient
+        llm = AsyncOpenAIClient(api_key=api_key, base_url=base_url, config=config)
         mem = MultiAgentMemoryManager(llm)
         opinion_updater = OpinionUpdater(config)
-        world = World(opinion_updater=opinion_updater)
         platform = SocialPlatform()
+        world = World(opinion_updater=opinion_updater, platform=platform)
         policy = LLMPolicy(llm, WorldPromptBuilder(), ActionParser())
         social_policy = LLMPolicy(llm, SocialPromptBuilder(), ActionParser())
         conv_policy = LLMPolicy(llm, ConversationPromptBuilder(), ActionParser())
@@ -100,7 +101,7 @@ class SimulationRuntime:
     def reset(self) -> None:
         """Wipe memory and rebuild world and platform for a fresh run."""
         self.mem.reset_all()
-        self.world = World(opinion_updater=OpinionUpdater(self.config))
+        self.platform = SocialPlatform()
+        self.world = World(opinion_updater=OpinionUpdater(self.config), platform=self.platform)
         self.world.conversation_policy = self.conv_policy
         self.world.conversation_max_rounds = self.conversation_max_rounds
-        self.platform = SocialPlatform()

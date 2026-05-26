@@ -51,7 +51,22 @@ class MultiAgentMemoryManager:
         if not embedding:
             logger.warning("[%s] 获取 embedding 失败，跳过记忆存储: %r", agent_id, memory_text[:60])
             return memory_id
-        # upsert 允许相同文本重复写入而不报错
+        collection.upsert(
+            embeddings=[embedding],
+            documents=[memory_text],
+            metadatas=[full_metadata],
+            ids=[memory_id],
+        )
+        return memory_id
+
+    async def astore_agent_memory(self, agent_id: str, memory_text: str, world_time: int = 0, **metadata) -> str:
+        collection = self.get_agent_collection(agent_id)
+        full_metadata = {"agent_id": agent_id, "saved_at": world_time, **metadata}
+        memory_id = f"{agent_id}_{hashlib.md5(memory_text.encode()).hexdigest()[:10]}"
+        embedding = await self.llm_client.aget_embeddings(memory_text)
+        if not embedding:
+            logger.warning("[%s] 获取 embedding 失败，跳过记忆存储: %r", agent_id, memory_text[:60])
+            return memory_id
         collection.upsert(
             embeddings=[embedding],
             documents=[memory_text],
@@ -96,7 +111,6 @@ class MultiAgentMemoryManager:
     ) -> list[str]:
         collection = self.get_agent_collection(agent_id)
 
-        # 集合为空时直接返回，避免 ChromaDB 因 n_results > count 报错
         count = collection.count()
         if count == 0:
             return []
@@ -108,6 +122,73 @@ class MultiAgentMemoryManager:
             kwargs["where"] = {"agent_id": agent_id}
 
         query_embedding = self._get_embedding(query)
+        if not query_embedding:
+            logger.warning("[%s] 获取查询 embedding 失败，返回空记忆", agent_id)
+            return []
+
+        try:
+            results = collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results,
+                include=["documents", "metadatas"],
+                **kwargs,
+            )
+        except Exception as e:
+            if "Nothing found on disk" in str(e):
+                logger.warning("[%s] HNSW 索引损坏，重建 collection", agent_id)
+                self.client.delete_collection(self._get_collection_name(agent_id))
+                self.agent_collections.pop(agent_id, None)
+            else:
+                logger.error("[%s] 记忆查询失败: %s", agent_id, e, exc_info=True)
+            return []
+        docs = results.get("documents", [[]])[0]
+        metas = results.get("metadatas", [[]])[0]
+        out = []
+        for doc, meta in zip(docs, metas):
+            tick = meta.get("saved_at")
+            prefix = f"[t={tick}] " if tick is not None else ""
+            out.append(f"{prefix}{doc}")
+        return out
+
+    async def asmart_retrieve(
+        self,
+        agent_id: str,
+        observation: str,
+        task: str,
+        demand: dict,
+        demand_threshold: dict,
+        n_results: int = 3,
+    ) -> list[str]:
+        query = self._build_retrieval_query(observation, task, demand, demand_threshold)
+        return await self.aretrieve_agent_memories(agent_id, query, n_results=n_results)
+
+    def _build_retrieval_query(self, observation, task, demand, demand_threshold) -> str:
+        parts = [observation]
+        if task and task != "none":
+            parts.append(f"当前任务: {task}")
+        urgent = [(k, v) for k, v in demand.items()
+                  if demand_threshold.get(k) and demand.get(k, 0) > 0.5]
+        if urgent:
+            urgent_str = ", ".join(f"{k}急切度{v:.2f}" for k, v in urgent[:2])
+            parts.append(f"紧迫需求: {urgent_str}")
+        return " | ".join(parts)
+
+    async def aretrieve_agent_memories(
+        self, agent_id: str, query: str, n_results: int = 5, **kwargs
+    ) -> list[str]:
+        collection = self.get_agent_collection(agent_id)
+
+        count = collection.count()
+        if count == 0:
+            return []
+        n_results = min(n_results, count)
+
+        if "where" in kwargs:
+            kwargs["where"] = {"$and": [{"agent_id": agent_id}, kwargs["where"]]}
+        else:
+            kwargs["where"] = {"agent_id": agent_id}
+
+        query_embedding = await self.llm_client.aget_embeddings(query)
         if not query_embedding:
             logger.warning("[%s] 获取查询 embedding 失败，返回空记忆", agent_id)
             return []

@@ -52,20 +52,20 @@ def _build_runtime() -> SimulationRuntime:
     a = r.create_agent("agent_1", [3, 3],
         role="保守主义者，倾向于节约资源，不喜欢变化", speaking_style="沉稳、措辞谨慎")
     b = r.create_agent("agent_2", [4, 2],
-        role="积极探索者，乐于尝试新事物并分享经验", speaking_style="热情、喜欢分享")
+        role="积极探索者，乐于尝试新事物，遇到问题优先自己动手解决", speaking_style="热情、喜欢分享")
     c = r.create_agent("agent_3", [6, 6],
-        role="中立观察者，善于倾听各方意见后再表态", speaking_style="理性、措辞中立")
+        role="中立观察者，善于独立分析后再做决定", speaking_style="理性、措辞中立")
     d = r.create_agent("agent_4", [2, 9],
         role="激进改革派，主张打破现有秩序追求效率", speaking_style="直接、充满激情")
     e = r.create_agent("agent_5", [8, 4],
-        role="社区协调员，重视群体和谐与共识", speaking_style="温和、善于调解")
+        role="社区协调员，重视群体和谐，但优先以自身行动解决问题", speaking_style="温和、善于调解")
 
     # opinion 范围 0~1，0.5 为中立；此初始值代表各角色的预设立场
     a.opinion = 0.15; b.opinion = 0.45; c.opinion = 0.50
     d.opinion = 0.85; e.opinion = 0.60
 
     for agent in [a, b, c, d, e]:
-        agent.need["money"] = 500.0
+        agent.need["money"] = 200.0
 
     # offline_trust 超过 friend_trust_threshold 才会触发离线意见同化
     a.offline_trust["agent_2"] = 0.75; a.offline_trust["agent_3"] = 0.65
@@ -130,7 +130,6 @@ def _build_runtime() -> SimulationRuntime:
         "工作区在右上角，company_1在(20,3)、company_2在(22,6)，工作可赚钱；"
         "商业区在左下角，shop_1在(2,18)、shop_2在(4,21)，可购买食物；"
         "娱乐区在右下角，playground_1在(20,20)，可放松；"
-        "地图中部(10,8)(12,14)(8,18)(15,5)(16,20)附近有散落食物"
     )
     for aid in ["agent_1", "agent_2", "agent_3", "agent_4", "agent_5"]:
         r.mem.store_agent_memory(aid, map_info, memory_type="system", importance=0.9)
@@ -163,13 +162,12 @@ async def broadcast(msg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 async def do_step() -> None:
-    """在线程池执行 world.step()，完成后广播最新状态。
+    """执行 world.astep()，完成后广播最新状态。
 
-    world.step() 内部调用 LLM，属于阻塞 I/O，必须放到 executor 中
-    避免阻塞事件循环导致 WebSocket 心跳超时。
+    world.astep() 使用 AsyncOpenAI 实现真正异步 I/O，
+    LLM 调用期间释放事件循环，不会阻塞 WebSocket 心跳。
     """
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, rt.world.step)
+    await rt.world.astep()
     await broadcast({"type": "tick", "state": snapshot(rt.world, rt.platform)})
 
 
