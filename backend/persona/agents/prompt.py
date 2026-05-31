@@ -19,17 +19,17 @@ class BasePromptBuilder:
             f"| 时间步：t={agent.world.time}"
         )
 
-    def _demand_block(self, agent: "Agent") -> str:
-        d = agent.demand
-        n = agent.need
-        t = agent.demand_threshold
-        lines = ["- 需求（need低=匮乏，demand高=渴望；need>阈值=已满足）："]
+    def _urgency_block(self, agent: "Agent") -> str:
+        d = agent.urgency
+        n = agent.satisfaction
+        t = agent.satisfaction_threshold
+        lines = ["- 需求（need低=匮乏，demand高=渴望；satisfaction>阈值=已满足）："]
         for k, urgency in d.items():
-            need_val = n.get(k, 0.0)
+            satisfaction_val = n.get(k, 0.0)
             th = t.get(k, "?")
-            status = "✓" if isinstance(th, float) and need_val > th else "✗"
+            status = "✓" if isinstance(th, float) and satisfaction_val > th else "✗"
             lines.append(
-                f"  {k}: need={need_val:.1f} demand={urgency:.2f} thr={th:.1f} {status}"
+                f"  {k}: satisfaction={satisfaction_val:.1f} urgency={urgency:.2f} thr={th:.1f} {status}"
             )
         return "\n".join(lines)
 
@@ -115,7 +115,7 @@ class WorldPromptBuilder(BasePromptBuilder):
             "## 当前状态\n"
             f"{self._state_block(agent)}\n"
             f"- 任务：{agent.task}\n"
-            f"{self._demand_block(agent)}\n"
+            f"{self._urgency_block(agent)}\n"
             f"{self._focus_block(agent)}"
             f"{self._opinion_block(agent)}\n\n"
             "## 观测（半径5格）\n"
@@ -182,7 +182,7 @@ class SocialPromptBuilder(BasePromptBuilder):
             "## 当前状态\n"
             f"- 时间步：t={agent.world.time}\n"
             f"- 任务：{agent.task}\n"
-            f"{self._demand_block(agent)}\n"
+            f"{self._urgency_block(agent)}\n"
             f"{self._focus_block(agent)}"
             f"{self._opinion_block(agent)}\n\n"
             "## 你的发帖历史\n"
@@ -269,19 +269,19 @@ class ReflectPromptBuilder(BasePromptBuilder):
             f"智能体角色：{agent.role or '无特定角色'}\n"
             "请根据当前需求状态，自由决定一个最合适的任务名称，并指定该任务所针对的需求键。\n\n"
             "决策原则：\n"
-            "  1. 优先针对 need 值最低（客观最匮乏）的需求\n"
-            "  2. need 相近时，选 demand 值最高（主观最渴望）的需求\n"
+            "  1. 优先针对 satisfaction 值最低（客观最匮乏）的需求\n"
+            "  2. satisfaction 相近时，选 urgency 值最高（主观最渴望）的需求\n"
             "  3. 任务名称应简洁描述智能体接下来要做的事（例如：'寻找食物'、'前往休息'、'赚钱打工'）\n"
             "  4. 需求键必须是以下之一：satiety（饱腹度）、relax（放松度）、money（金钱）\n\n"
             "输出格式（必须严格遵守）：\n"
-            "<Think>[分析各需求的 need/demand 数值与紧迫程度，给出综合判断]</Think>\n"
+            "<Think>[分析各需求的 satisfaction/urgency 数值与紧迫程度，给出综合判断]</Think>\n"
             "<Task>任务名称</Task>\n"
-            "<DemandKey>需求键</DemandKey>"
+            "<UrgencyKey>需求键</UrgencyKey>"
         )
         user = (
             "## 当前状态\n"
             f"{self._state_block(agent)}\n"
-            f"{self._demand_block(agent)}\n\n"
+            f"{self._urgency_block(agent)}\n\n"
             "## 最近观测\n"
             f"{agent.history[-1] if agent.history else '（无）'}\n\n"
             "## 近期历史\n"
@@ -304,13 +304,13 @@ class ReflectPromptBuilder(BasePromptBuilder):
         return system, user
 
     def micro_reflect_prompt(self, agent: "Agent") -> tuple[str, str]:
-        demand_key = agent.task_demand_key
-        need_val = agent.need.get(demand_key, float("nan")) if demand_key else float("nan")
-        demand_val = agent.demand.get(demand_key, float("nan")) if demand_key else float("nan")
-        if demand_key:
-            demand_info = f"{demand_key}：need={need_val:.2f}，demand={demand_val:.2f}"
+        urgency_key = agent.task_urgency_key
+        satisfaction_val = agent.satisfaction.get(urgency_key, float("nan")) if urgency_key else float("nan")
+        urgency_val = agent.urgency.get(urgency_key, float("nan")) if urgency_key else float("nan")
+        if urgency_key:
+            urgency_info = f"{urgency_key}：satisfaction={satisfaction_val:.2f}，urgency={urgency_val:.2f}"
         else:
-            demand_info = "（无对应需求）"
+            urgency_info = "（无对应需求）"
 
         system = (
             f"你是智能体 {agent.id}，角色：{agent.role or '无特定角色'}。\n"
@@ -322,7 +322,7 @@ class ReflectPromptBuilder(BasePromptBuilder):
         )
         user = (
             f"当前任务：{agent.task}\n"
-            f"当前需求值：{demand_info}\n"
+            f"当前需求值：{urgency_info}\n"
             f"当前焦点：{agent.current_focus or '（未设定）'}\n\n"
             "近期行动历史：\n"
             + "\n".join(agent.history[-6:])

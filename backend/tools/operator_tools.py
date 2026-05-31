@@ -162,7 +162,7 @@ class Operator:
                 return f"{operator_ID}原地不动{interact_msg}"
             return f"无法移动，[{old_x},{old_y}]周围路径被阻挡"
 
-        agent.update_need("relax", -agent.config.relax_moving_usage * steps)
+        agent.update_satisfaction("relax", -agent.config.relax_moving_usage * steps)
 
         with self.world._world_lock:
             if not self.world.map.is_empty(cur_x, cur_y):

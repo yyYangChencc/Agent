@@ -36,7 +36,7 @@ class food(Interactable):
         return f"ID: {self.id}，类别：{self.kind}，功能：提供 {self.provide} 饱腹感，剩余数量 {self.num}"
         
     def interact(self, agent) -> str:
-        agent.update_need("satiety", self.provide)
+        agent.update_satisfaction("satiety", self.provide)
         self.eaten()
         return f"吃到了{self.id}"
 
@@ -85,8 +85,8 @@ class company(building):
         self.salary = salary  # 工作获得的工资
 
     def interact(self, agent) -> str:
-        agent.update_need("money", self.salary)
-        agent.update_need("relax", -10)
+        agent.update_satisfaction("money", self.salary)
+        agent.update_satisfaction("relax", -10)
         return f"在公司 {self.id} 工作，获得 {self.salary} 元工资，消耗 10 relax"
     
     def get_desc(self) -> str:
@@ -138,8 +138,8 @@ class food_shop(building):
         if self.food_num <= 0:
             return f"食品店 {self.id} 已售罄"
         self.food_num -= 1
-        agent.update_need("satiety", self.provide)
-        agent.update_need("money", -self.price)
+        agent.update_satisfaction("satiety", self.provide)
+        agent.update_satisfaction("money", -self.price)
         return f"在食品店 {self.id}"
 
     def get_desc(self) -> str:
@@ -156,10 +156,10 @@ class playground(building):
         self.price = price  # 价格
 
     def interact(self, agent) -> str:
-        if agent.need.get("money", 0) < self.price:
+        if agent.satisfaction.get("money", 0) < self.price:
             return f"余额不足，无法在游乐场 {self.id} 娱乐（需要 {self.price} 元）"
-        agent.update_need("money", -self.price)
-        agent.update_need("relax", self.provide)
+        agent.update_satisfaction("money", -self.price)
+        agent.update_satisfaction("relax", self.provide)
         return f"在游乐场 {self.id} 放松，花费 {self.price} 元，恢复 {self.provide} relax"
     
     def get_desc(self) -> str:

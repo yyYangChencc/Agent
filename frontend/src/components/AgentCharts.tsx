@@ -38,9 +38,9 @@ export function AgentCharts({ history }: Props) {
 
   return (
     <div className="space-y-3">
-      {/* Need */}
+      {/* Satisfaction */}
       <div>
-        <div className="text-xs text-gray-400 mb-1">需求 (Need)</div>
+        <div className="text-xs text-gray-400 mb-1">满足度 (Satisfaction)</div>
         <ResponsiveContainer width="100%" height={110}>
           <LineChart data={history} margin={CHART_MARGIN}>
             <XAxis dataKey="tick" tick={false} />
@@ -60,7 +60,7 @@ export function AgentCharts({ history }: Props) {
 
       {/* Demand */}
       <div>
-        <div className="text-xs text-gray-400 mb-1">急迫度 (Demand)</div>
+        <div className="text-xs text-gray-400 mb-1">急迫度 (Urgency)</div>
         <ResponsiveContainer width="100%" height={90}>
           <LineChart data={history} margin={CHART_MARGIN}>
             <XAxis dataKey="tick" tick={false} />
@@ -71,8 +71,8 @@ export function AgentCharts({ history }: Props) {
               labelFormatter={(l) => `t=${l}`}
             />
             <Legend wrapperStyle={{ fontSize: 10 }} />
-            <Line type="monotone" dataKey="satiety_demand" name="饱食急迫" stroke="#93c5fd" strokeDasharray="4 2" dot={false} strokeWidth={1.5} />
-            <Line type="monotone" dataKey="relax_demand" name="放松急迫" stroke="#6ee7b7" strokeDasharray="4 2" dot={false} strokeWidth={1.5} />
+            <Line type="monotone" dataKey="satiety_urgency" name="饱食急迫" stroke="#93c5fd" strokeDasharray="4 2" dot={false} strokeWidth={1.5} />
+            <Line type="monotone" dataKey="relax_urgency" name="放松急迫" stroke="#6ee7b7" strokeDasharray="4 2" dot={false} strokeWidth={1.5} />
           </LineChart>
         </ResponsiveContainer>
       </div>

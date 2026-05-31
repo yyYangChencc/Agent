@@ -9,9 +9,9 @@ export interface AgentState {
   task: string
   current_focus: string       // micro-reflect 更新的当前策略焦点
   salary: number              // 工资：参与 work 动作时获得的 money 增量
-  need: Record<string, number>            // 客观需求，0→1
-  demand: Record<string, number>          // 主观急迫度，1→0
-  demand_threshold: Record<string, number> // 任务完成阈值
+  satisfaction: Record<string, number>            // 客观需求，0→1
+  urgency: Record<string, number>          // 主观急迫度，1→0
+  satisfaction_threshold: Record<string, number> // 任务完成阈值
   opinion: number             // 意见倾向，0~1
   last_think: string          // 最近一次 <Think> 内容
   sleeping: boolean           // 是否处于睡眠状态
@@ -62,8 +62,8 @@ export interface AgentHistoryPoint {
   satiety: number
   relax: number
   money: number
-  satiety_demand: number
-  relax_demand: number
+  satiety_urgency: number
+  relax_urgency: number
   emotion: string
 }
 
@@ -105,11 +105,11 @@ export const useSimStore = create<SimStore>((set, get) => ({
       const point: AgentHistoryPoint = {
         tick: worldState.time,
         opinion: a.opinion,
-        satiety: a.need.satiety ?? 0,
-        relax: a.need.relax ?? 0,
-        money: a.need.money ?? 0,
-        satiety_demand: a.demand.satiety ?? 0,
-        relax_demand: a.demand.relax ?? 0,
+        satiety: a.satisfaction.satiety ?? 0,
+        relax: a.satisfaction.relax ?? 0,
+        money: a.satisfaction.money ?? 0,
+        satiety_urgency: a.urgency.satiety ?? 0,
+        relax_urgency: a.urgency.relax ?? 0,
         emotion: a.emotion,
       }
       const arr = prev[a.id] ?? []

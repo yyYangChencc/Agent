@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from persona.agents.agent import Agent
 
 FIELDS = ["tick", "opinion", "satiety", "relax", "money",
-          "satiety_demand", "relax_demand", "emotion", "task"]
+          "satiety_urgency", "relax_urgency", "emotion", "task"]
 
 # 历史记录默认存储在 backend/history/<timestamp>/ 下
 _DEFAULT_BASE = os.path.join(os.path.dirname(__file__), "..", "history")
@@ -35,11 +35,11 @@ class HistoryRecorder:
             self._writers[agent.id].writerow({
                 "tick": tick,
                 "opinion": round(agent.opinion, 4),
-                "satiety": round(agent.need.get("satiety", 0), 2),
-                "relax": round(agent.need.get("relax", 0), 2),
-                "money": round(agent.need.get("money", 0), 2),
-                "satiety_demand": round(agent.demand.get("satiety", 0), 4),
-                "relax_demand": round(agent.demand.get("relax", 0), 4),
+                "satiety": round(agent.satisfaction.get("satiety", 0), 2),
+                "relax": round(agent.satisfaction.get("relax", 0), 2),
+                "money": round(agent.satisfaction.get("money", 0), 2),
+                "satiety_urgency": round(agent.urgency.get("satiety", 0), 4),
+                "relax_urgency": round(agent.urgency.get("relax", 0), 4),
                 "emotion": agent.emotion,
                 "task": agent.task,
             })

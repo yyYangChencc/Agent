@@ -16,7 +16,7 @@ class AgentConfig:
     # Agent
     max_history: int = 12
     memory_top_k: int = 5
-    # need 范围：satiety / relax 为 [0, 100]，money 无上限
+    # satisfaction 范围：satiety / relax 为 [0, 100]，money 无上限
     satiety_threshold: float = 30.0
     relax_threshold: float = 30.0
     money_threshold: float = 0.3
@@ -43,4 +43,4 @@ class AgentConfig:
     friend_trust_threshold: float = 0.6 # offline_trust >= this to count as an offline neighbor/friend
 
     # Micro-reflection
-    micro_reflect_interval: int = 3    # trigger micro-reflection after N ticks with no demand progress
+    micro_reflect_interval: int = 3    # trigger micro-reflection after N ticks with no urgency progress

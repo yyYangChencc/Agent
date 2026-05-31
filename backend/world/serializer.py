@@ -35,9 +35,9 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             "task": a.task,
             "current_focus": a.current_focus,
             "salary": a.salary,                # 工资：参与 work 动作时获得的 money 增量
-            "need": dict(a.need),               # 客观需求值，0→1
-            "demand": dict(a.demand),           # 主观急迫度，1→0
-            "demand_threshold": dict(a.demand_threshold),  # 任务完成判定线
+            "satisfaction": dict(a.satisfaction),               # 客观需求值，0→1
+            "urgency": dict(a.urgency),           # 主观急迫度，1→0
+            "satisfaction_threshold": dict(a.satisfaction_threshold),  # 任务完成判定线
             "opinion": round(a.opinion, 3),
             "last_think": _extract_last_think(a.history),
             "sleeping": a.sleeping,

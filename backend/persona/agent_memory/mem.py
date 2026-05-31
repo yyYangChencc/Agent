@@ -80,8 +80,8 @@ class MultiAgentMemoryManager:
         agent_id: str,
         observation: str,
         task: str,
-        demand: dict,
-        demand_threshold: dict,
+        urgency: dict,
+        satisfaction_threshold: dict,
         n_results: int = 3,
     ) -> list[str]:
         """Ask the LLM to extract search keywords, then retrieve matching memories."""
@@ -92,8 +92,8 @@ class MultiAgentMemoryManager:
         )
         user = (
             f"任务：{task}\n"
-            f"需求：satiety={demand.get('satiety', 0):.2f}  relax={demand.get('relax', 0):.2f}\n"
-            f"阈值：satiety<{demand_threshold.get('satiety', 0):.2f}  relax<{demand_threshold.get('relax', 0):.2f}\n"
+            f"需求：satiety={urgency.get('satiety', 0):.2f}  relax={urgency.get('relax', 0):.2f}\n"
+            f"阈值：satiety<{satisfaction_threshold.get('satiety', 0):.2f}  relax<{satisfaction_threshold.get('relax', 0):.2f}\n"
             f"观测：{observation}"
         )
         try:
@@ -155,19 +155,19 @@ class MultiAgentMemoryManager:
         agent_id: str,
         observation: str,
         task: str,
-        demand: dict,
-        demand_threshold: dict,
+        urgency: dict,
+        satisfaction_threshold: dict,
         n_results: int = 3,
     ) -> list[str]:
-        query = self._build_retrieval_query(observation, task, demand, demand_threshold)
+        query = self._build_retrieval_query(observation, task, urgency, satisfaction_threshold)
         return await self.aretrieve_agent_memories(agent_id, query, n_results=n_results)
 
-    def _build_retrieval_query(self, observation, task, demand, demand_threshold) -> str:
+    def _build_retrieval_query(self, observation, task, urgency, satisfaction_threshold) -> str:
         parts = [observation]
         if task and task != "none":
             parts.append(f"当前任务: {task}")
-        urgent = [(k, v) for k, v in demand.items()
-                  if demand_threshold.get(k) and demand.get(k, 0) > 0.5]
+        urgent = [(k, v) for k, v in urgency.items()
+                  if satisfaction_threshold.get(k) and urgency.get(k, 0) > 0.5]
         if urgent:
             urgent_str = ", ".join(f"{k}急切度{v:.2f}" for k, v in urgent[:2])
             parts.append(f"紧迫需求: {urgent_str}")

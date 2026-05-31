@@ -8,7 +8,7 @@ const OBJECT_META: Record<string, { label: string; desc: string; func: string }>
   food: {
     label: '食物',
     desc: '地图上可供采集的食物资源，智能体移动至相邻格后可执行 eat 动作消耗。',
-    func: '每次 eat 动作使智能体 satiety（饱腹度）need 值增加；num 降至 0 时资源耗尽，方块隐藏。',
+    func: '每次 eat 动作使智能体 satiety（饱腹度）satisfaction 值增加；num 降至 0 时资源耗尽，方块隐藏。',
   },
   building: {
     label: '建筑',
@@ -37,22 +37,22 @@ const OBJECT_META: Record<string, { label: string; desc: string; func: string }>
   },
 }
 
-// need 值进度条：显示当前值、满足阈值线、急迫度
+// satisfaction 值进度条：显示当前值、满足阈值线、急迫度
 // satiety / relax 范围 [0, 100]，value 即为百分比；threshold 用白色竖线标注
-function NeedBar({
+function SatisfactionBar({
   label,
   value,
   threshold,
-  demand,
+  urgency,
 }: {
   label: string
   value: number
   threshold: number
-  demand: number
+  urgency: number
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(value)))
   const thPct = Math.max(0, Math.min(100, Math.round(threshold)))
-  // need 超过 threshold 才算任务完成条件（见 reflect.py task_reset）
+  // satisfaction 超过 threshold 才算任务完成条件（见 reflect.py task_reset）
   const satisfied = value >= threshold
 
   return (
@@ -62,19 +62,19 @@ function NeedBar({
         <span>{pct}</span>
       </div>
       <div className="relative h-3 bg-gray-700 rounded overflow-visible">
-        {/* need 当前值：满足绿色，未满足红色 */}
+        {/* satisfaction 当前值：满足绿色，未满足红色 */}
         <div
           className={`h-full rounded transition-all ${satisfied ? 'bg-green-500' : 'bg-red-500'}`}
           style={{ width: `${pct}%` }}
         />
-        {/* 阈值竖线：对应 agent.demand_threshold，超过此线任务视为完成 */}
+        {/* 阈值竖线：对应 agent.satisfaction_threshold，超过此线任务视为完成 */}
         <div
           className="absolute top-0 h-full w-0.5 bg-white opacity-70"
           style={{ left: `${thPct}%` }}
         />
       </div>
-      {/* demand 仍为主观急迫度 [0, 1]，1=极度渴望，0=已满足 */}
-      <div className="text-xs text-gray-500 mt-0.5">urgency {(demand * 100).toFixed(0)}%</div>
+      {/* urgency 仍为主观急迫度 [0, 1]，1=极度渴望，0=已满足 */}
+      <div className="text-xs text-gray-500 mt-0.5">urgency {(urgency * 100).toFixed(0)}%</div>
     </div>
   )
 }
@@ -129,7 +129,7 @@ function ObjectDetail({ object }: { object: ObjectState }) {
   )
 }
 
-// 点击智能体后展开的详情面板，包含 need/demand 仪表盘和思考内容
+// 点击智能体后展开的详情面板，包含 satisfaction/urgency 仪表盘和思考内容
 const EMPTY_HISTORY: AgentHistoryPoint[] = []
 
 function AgentDetail({ agent }: { agent: AgentState }) {
@@ -161,24 +161,24 @@ function AgentDetail({ agent }: { agent: AgentState }) {
         <div className="text-xs text-blue-300 italic">{agent.current_focus}</div>
       )}
 
-      <NeedBar
+      <SatisfactionBar
         label="satiety"
-        value={agent.need.satiety ?? 0}
-        threshold={agent.demand_threshold.satiety ?? 30}
-        demand={agent.demand.satiety ?? 1}
+        value={agent.satisfaction.satiety ?? 0}
+        threshold={agent.satisfaction_threshold.satiety ?? 30}
+        urgency={agent.urgency.satiety ?? 1}
       />
-      <NeedBar
+      <SatisfactionBar
         label="relax"
-        value={agent.need.relax ?? 0}
-        threshold={agent.demand_threshold.relax ?? 30}
-        demand={agent.demand.relax ?? 1}
+        value={agent.satisfaction.relax ?? 0}
+        threshold={agent.satisfaction_threshold.relax ?? 30}
+        urgency={agent.urgency.relax ?? 1}
       />
-      {/* money 无上限（累计金额），改为文字展示，附带阈值与 demand 参考值 */}
+      {/* money 无上限（累计金额），改为文字展示，附带阈值与 urgency 参考值 */}
       <div className="mb-2 text-xs text-gray-400">
         <span>money </span>
-        <span className="text-yellow-300 font-mono">{(agent.need.money ?? 0).toFixed(2)}</span>
-        <span className="text-gray-500"> / 阈值 {(agent.demand_threshold.money ?? 0).toFixed(2)}</span>
-        <span className="text-gray-500"> · urgency {((agent.demand.money ?? 1) * 100).toFixed(0)}%</span>
+        <span className="text-yellow-300 font-mono">{(agent.satisfaction.money ?? 0).toFixed(2)}</span>
+        <span className="text-gray-500"> / 阈值 {(agent.satisfaction_threshold.money ?? 0).toFixed(2)}</span>
+        <span className="text-gray-500"> · urgency {((agent.urgency.money ?? 1) * 100).toFixed(0)}%</span>
       </div>
 
       {/* opinion 范围 0~1，越高代表越支持正向立场 */}
@@ -221,9 +221,9 @@ function AgentDetail({ agent }: { agent: AgentState }) {
 
 // 列表行：紧凑展示智能体 ID、当前任务、satiety/relax 迷你进度条；money 以文字呈现
 function AgentRow({ agent, selected, onClick }: { agent: AgentState; selected: boolean; onClick: () => void }) {
-  const satiety = agent.need.satiety ?? 0
-  const relax = agent.need.relax ?? 0
-  const money = agent.need.money ?? 0
+  const satiety = agent.satisfaction.satiety ?? 0
+  const relax = agent.satisfaction.relax ?? 0
+  const money = agent.satisfaction.money ?? 0
 
   return (
     <div
@@ -237,7 +237,7 @@ function AgentRow({ agent, selected, onClick }: { agent: AgentState; selected: b
         {/* 任务文本可能较长，截断显示 */}
         <span className="text-xs text-gray-500 truncate max-w-[80px]">{agent.task}</span>
       </div>
-      {/* 橙色=饱腹度，蓝色=放松度；money 无上限，改为右侧文字展示。need 范围 [0, 100] 直接作为百分比 */}
+      {/* 橙色=饱腹度，蓝色=放松度；money 无上限，改为右侧文字展示。satisfaction 范围 [0, 100] 直接作为百分比 */}
       <div className="flex items-center gap-2 mt-1">
         <div className="flex-1 h-1.5 bg-gray-600 rounded overflow-hidden">
           <div className="h-full bg-orange-400 rounded" style={{ width: `${Math.max(0, Math.min(100, satiety))}%` }} />

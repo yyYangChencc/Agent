@@ -118,12 +118,12 @@ def _manual_tick(world: World) -> None:
     for agent in world.agents.values():
         if agent.sleeping:
             agent.sleep_ticks_remaining -= 1
-            agent.tick_needs()
+            agent.tick_satisfaction()
             if agent.sleep_ticks_remaining <= 0:
                 bed_obj = world.objects.get(agent.sleeping_on_bed_id)
                 agent.wakeup(bed_obj)
         else:
-            agent.tick_needs()
+            agent.tick_satisfaction()
 
 
 # ---------------------------------------------------------------------------

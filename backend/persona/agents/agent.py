@@ -40,16 +40,16 @@ class Agent:
         self.history: list[str] = []
         self.trajectory_buffer: list[dict] = []  # (obs, action, reward) per step within current task
 
-        self.need: dict[str, float] = {"satiety": 0.0, "relax": 0.0, "money": 0.0}
-        self.demand: dict[str, float] = {"satiety": 1.0, "relax": 1.0, "money": 1.0}
-        self.demand_threshold: dict[str, float] = {
+        self.satisfaction: dict[str, float] = {"satiety": 0.0, "relax": 0.0, "money": 0.0}
+        self.urgency: dict[str, float] = {"satiety": 1.0, "relax": 1.0, "money": 1.0}
+        self.satisfaction_threshold: dict[str, float] = {
             "satiety": config.satiety_threshold,
             "relax": config.relax_threshold,
             "money": config.money_threshold,
         }
         self.state: dict = {}
         self.task: str = "none"
-        self.task_demand_key: str = ""  # 当前任务对应的 need/demand 键，由 set_task() 设置
+        self.task_urgency_key: str = ""  # 当前任务对应的 satisfaction/urgency 键，由 set_task() 设置
         self.observed_events: list = []
         self.mem = mem
         self.inbox: list[dict] = []
@@ -62,7 +62,7 @@ class Agent:
         self.role: str = role
         self.speaking_style: str = speaking_style
         self.emotion: str = "平静"
-        # 工资：参与 work 动作时每次获得的 money need 增量（>=0）
+        # 工资：参与 work 动作时每次获得的 money satisfaction 增量（>=0）
         self.salary: float = salary
 
         self.opinion: float = config.initial_opinion
@@ -72,12 +72,12 @@ class Agent:
 
         self.current_focus: str = ""
         self.stuck_ticks: int = 0
-        self._prev_task_need: float | None = None
+        self._prev_task_satisfaction: float | None = None
 
         self.sleeping: bool = False
         self.sleep_ticks_remaining: int = 0
         self.sleeping_on_bed_id: str | None = None
-        self._sleep_start_need: dict[str, float] = {}
+        self._sleep_start_satisfaction: dict[str, float] = {}
         self._sleep_start_time: int = 0
         self.inside_building_id: str | None = None
         self._pending_social_notifications: list[str] = []  # 待推送的社交通知
@@ -142,13 +142,13 @@ class Agent:
 
     def recall(self, obs: str) -> list[str]:
         return self.mem.smart_retrieve(
-            self.id, obs, self.task, self.demand, self.demand_threshold,
+            self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
             n_results=self.config.memory_top_k,
         )
 
     async def arecall(self, obs: str) -> list[str]:
         return await self.mem.asmart_retrieve(
-            self.id, obs, self.task, self.demand, self.demand_threshold,
+            self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
             n_results=self.config.memory_top_k,
         )
 
@@ -276,24 +276,24 @@ class Agent:
         return action
 
     # ------------------------------------------------------------------
-    # Demand & reward
+    # Urgency & reward
     # ------------------------------------------------------------------
 
     def get_position(self) -> list[int]:
         return self.position
 
-    def update_demand(self, demand_key: str, demand_delta: float) -> None:
-        if demand_key in self.demand:
-            self.demand[demand_key] = max(0.0, self.demand[demand_key] + demand_delta)
+    def update_urgency(self, urgency_key: str, urgency_delta: float) -> None:
+        if urgency_key in self.urgency:
+            self.urgency[urgency_key] = max(0.0, self.urgency[urgency_key] + urgency_delta)
 
-    def update_need(self, need_key: str, need_delta: float) -> None:
-        if need_key in self.need:
-            new_val = self.need[need_key] + need_delta
+    def update_satisfaction(self, satisfaction_key: str, satisfaction_delta: float) -> None:
+        if satisfaction_key in self.satisfaction:
+            new_val = self.satisfaction[satisfaction_key] + satisfaction_delta
             # money 无上限（累计金额）；satiety / relax 范围 [0, 100]
-            if need_key == "money":
-                self.need[need_key] = max(0.0, new_val)
+            if satisfaction_key == "money":
+                self.satisfaction[satisfaction_key] = max(0.0, new_val)
             else:
-                self.need[need_key] = max(0.0, min(100.0, new_val))
+                self.satisfaction[satisfaction_key] = max(0.0, min(100.0, new_val))
 
     def update_opinion(self, delta: float) -> None:
         self.opinion = max(0.0, min(1.0, self.opinion + delta))
@@ -316,36 +316,36 @@ class Agent:
         self.next_action = None
         return res
 
-    def set_task(self, task: str, demand_key: str = "") -> None:
-        """设置当前任务及其对应的 need/demand 键。
-        task="none" 时 demand_key 忽略；其余任务应传入合法的 need 键（satiety/relax/money）。
+    def set_task(self, task: str, urgency_key: str = "") -> None:
+        """设置当前任务及其对应的 satisfaction/urgency 键。
+        task="none" 时 urgency_key 忽略；其余任务应传入合法的 satisfaction 键（satiety/relax/money）。
         """
-        valid_keys = set(self.need.keys()) | {""}
-        if task != "none" and demand_key not in valid_keys:
-            logger.warning("[%s] 无效 demand_key: %s，合法值为 %s", self.id, demand_key, valid_keys)
+        valid_keys = set(self.satisfaction.keys()) | {""}
+        if task != "none" and urgency_key not in valid_keys:
+            logger.warning("[%s] 无效 urgency_key: %s，合法值为 %s", self.id, urgency_key, valid_keys)
             return
         self.task = task
-        self.task_demand_key = demand_key if task != "none" else ""
+        self.task_urgency_key = urgency_key if task != "none" else ""
         self.current_focus = ""
         self.stuck_ticks = 0
-        self._prev_task_need = None
+        self._prev_task_satisfaction = None
 
     def update_emotion(self, new_emotion: str) -> None:
         self.emotion = new_emotion
 
-    def tick_needs(self) -> None:
+    def tick_satisfaction(self) -> None:
         if self.sleeping:
             return
-        self.update_need("satiety", -self.config.satiety_decay_rate)
-        self.update_need("relax", -self.config.relax_decay_rate)
+        self.update_satisfaction("satiety", -self.config.satiety_decay_rate)
+        self.update_satisfaction("relax", -self.config.relax_decay_rate)
         if self.task == "none":
-            self.update_need("relax", self.config.relax_increase_rate)
+            self.update_satisfaction("relax", self.config.relax_increase_rate)
 
     def wakeup(self, bed) -> None:
         elapsed = self.world.time - self._sleep_start_time
         changes = {
-            k: round(self.need.get(k, 0) - self._sleep_start_need.get(k, 0), 2)
-            for k in self.need
+            k: round(self.satisfaction.get(k, 0) - self._sleep_start_satisfaction.get(k, 0), 2)
+            for k in self.satisfaction
         }
         change_str = "，".join(f"{k} {'+' if v >= 0 else ''}{v}" for k, v in changes.items())
         self.sleeping = False
@@ -377,11 +377,11 @@ class Agent:
         await self.reflect.astep(self)
 
     def sleep_status(self, bed_id: str) -> None:
-        self.update_need("relax", self.config.sleep_relax_recover)
+        self.update_satisfaction("relax", self.config.sleep_relax_recover)
         self.sleep_ticks_remaining = self.config.sleep_time
         self.sleeping = True
         self.sleeping_on_bed_id = bed_id
-        self._sleep_start_need = dict(self.need)
+        self._sleep_start_satisfaction = dict(self.satisfaction)
         self._sleep_start_time = self.world.time
         self.sleeping_on_bed_id = bed_id
         logger.info("[%s] 开始睡觉，预计睡眠 %d tick", self.id, self.config.sleep_time)

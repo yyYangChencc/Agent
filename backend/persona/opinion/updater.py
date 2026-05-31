@@ -37,7 +37,7 @@ class OpinionUpdater:
                      agent.id, agent.opinion - delta, agent.opinion, social_avg)
 
     def offline_update(self, agent: "Agent", all_agents: dict) -> None:
-        """Offline opinion + demand conformity update: called every m ticks.
+        """Offline opinion + urgency conformity update: called every m ticks.
         Offline neighbors = agents whose offline_trust >= friend_trust_threshold.
         """
         c = self.config
@@ -60,16 +60,16 @@ class OpinionUpdater:
             logger.debug("[%s] 线下观念更新 → %.3f (邻居均值=%.3f, 邻居数=%d)",
                          agent.id, agent.opinion, neighbor_avg, len(neighbors))
 
-        # Demand conformity (demand D updated via offline conformity method)
-        for demand_key in list(agent.demand):
+        # Urgency conformity (urgency U updated via offline conformity method)
+        for urgency_key in list(agent.urgency):
             dt_sum = sum(agent.offline_trust.get(n.id, c.default_offline_trust) for n in neighbors)
             if not dt_sum:
                 continue
             avg_d = sum(
-                agent.offline_trust.get(n.id, c.default_offline_trust) * n.demand.get(demand_key, 0)
+                agent.offline_trust.get(n.id, c.default_offline_trust) * n.urgency.get(urgency_key, 0)
                 for n in neighbors
             ) / dt_sum
-            delta_d = c.offline_opinion_lr * (avg_d - agent.demand.get(demand_key, 0))
-            agent.update_demand(demand_key, delta_d)
+            delta_d = c.offline_opinion_lr * (avg_d - agent.urgency.get(urgency_key, 0))
+            agent.update_urgency(urgency_key, delta_d)
             logger.debug("[%s] 线下需求更新 %s: delta=%.3f (邻居均值=%.3f)",
-                         agent.id, demand_key, delta_d, avg_d)
+                         agent.id, urgency_key, delta_d, avg_d)

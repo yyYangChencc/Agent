@@ -49,7 +49,7 @@ class World:
             try:
                 if agent.sleeping:
                     agent.sleep_ticks_remaining -= 1
-                    agent.tick_needs()
+                    agent.tick_satisfaction()
                     if agent.sleep_ticks_remaining <= 0:
                         bed = self.objects.get(agent.sleeping_on_bed_id)
                         agent.wakeup(bed)
@@ -63,12 +63,12 @@ class World:
 
         await asyncio.gather(*[_agent_step_and_execute(a) for a in agents])
 
-        # Phase 2: reflect + tick_needs 并发（reflect 的 LLM 调用同时飞行中）
+        # Phase 2: reflect + tick_satisfaction 并发（reflect 的 LLM 调用同时飞行中）
         async def _agent_reflect(agent):
             try:
                 if not agent.sleeping:
                     await agent.aget_reflect()
-                    agent.tick_needs()
+                    agent.tick_satisfaction()
             except Exception as e:
                 logger.error("[World] agent %s 反思失败: %s", agent.id, e, exc_info=True)
 
@@ -171,8 +171,8 @@ class World:
             conv_history.extend(round_history)
 
     def execute(self, agent, action_str):
-        old_need = agent.need.copy()
-        old_demand = agent.demand.copy()
+        old_satisfaction = agent.satisfaction.copy()
+        old_urgency = agent.urgency.copy()
         if not action_str:
             return
         try:
@@ -218,8 +218,8 @@ class World:
                             args.get("response_to"),
                         )
         reward = sum(
-            (agent.need.get(k, 0.0) - old_need.get(k, 0.0)) * old_demand.get(k, 0.0)
-            for k in agent.need
+            (agent.satisfaction.get(k, 0.0) - old_satisfaction.get(k, 0.0)) * old_urgency.get(k, 0.0)
+            for k in agent.satisfaction
         )
         agent.add_history("reward: ", reward)
         return reward
