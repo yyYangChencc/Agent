@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 @dataclass
 class AgentConfig:
     # LLM
-    llm_model: str = "gpt-5"
+    llm_model: str = "gpt-5.4mini"
     embedding_model: str = "text-embedding-3-small"
 
     # World
