@@ -43,7 +43,7 @@ class AsyncOpenAIClient(LLMClient):
         self._config = config or AgentConfig()
 
     def generate(self, system: str, user: str) -> str:
-        resp = self._embedding_client.chat.completions.create(
+        resp = self._sclient.chat.completions.create(
             model=self._config.llm_model,
             messages=[
                 {"role": "system", "content": system},
