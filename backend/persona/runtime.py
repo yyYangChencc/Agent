@@ -49,9 +49,11 @@ class SimulationRuntime:
             api_key = os.environ.get("OPENAI_API_KEY")
         if base_url is None:
             base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        embedding_key = os.environ.get("EMBEDDING_KEY")
+        embedding_base_url = os.environ.get("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
 
         from persona.llm.openai_client import AsyncOpenAIClient
-        llm = AsyncOpenAIClient(api_key=api_key, base_url=base_url, config=config)
+        llm = AsyncOpenAIClient(api_key=api_key, base_url=base_url, embedding_key=embedding_key, embedding_base_url=embedding_base_url, config=config)
         mem = MultiAgentMemoryManager(llm)
         opinion_updater = OpinionUpdater(config)
         platform = SocialPlatform()
