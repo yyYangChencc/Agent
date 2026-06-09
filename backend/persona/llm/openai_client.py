@@ -39,6 +39,7 @@ class AsyncOpenAIClient(LLMClient):
         self._aclient = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self._sclient = OpenAI(api_key=api_key, base_url=base_url)
         self._embedding_client = OpenAI(api_key=embedding_key, base_url=embedding_base_url)
+        self._a_embedding_client = AsyncOpenAI(api_key=embedding_key, base_url=embedding_base_url)
         self._config = config or AgentConfig()
 
     def generate(self, system: str, user: str) -> str:
@@ -52,7 +53,7 @@ class AsyncOpenAIClient(LLMClient):
         return resp.choices[0].message.content
 
     def get_embeddings(self, text: str) -> list[float]:
-        resp = self._sclient.embeddings.create(
+        resp = self._embedding_client.embeddings.create(
             model=self._config.embedding_model,
             input=text,
         )
@@ -69,7 +70,7 @@ class AsyncOpenAIClient(LLMClient):
         return resp.choices[0].message.content
 
     async def aget_embeddings(self, text: str) -> list[float]:
-        resp = await self._embedding_client.embeddings.create(  
+        resp = await self._a_embedding_client.embeddings.create(  
             model=self._config.embedding_model,
             input=text,
         )
