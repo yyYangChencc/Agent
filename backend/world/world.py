@@ -3,7 +3,7 @@ import json
 import threading
 import concurrent.futures
 from world.event import Event
-from world.map import Map
+from world.map import Map, build_default_map_design
 from tools.operator_tools import register_operator_tools, Operator
 from world.observer import observe
 from persona.logger import get_logger
@@ -14,6 +14,7 @@ class World:
     def __init__(self, opinion_updater=None, history_recorder=None, platform=None):
         self.time = 0
         self.map = Map(25, 25)
+        self.map_design = build_default_map_design(self.map.width, self.map.height)
         self.agents = {}
         self.objects = {}
         self._world_lock = threading.Lock()

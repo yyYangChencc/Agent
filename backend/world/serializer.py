@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
+from world.map import serialize_map_design
 
 if TYPE_CHECKING:
     from world.world import World
@@ -35,8 +36,8 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             "task": a.task,
             "current_focus": a.current_focus,
             "salary": a.salary,                # 工资：参与 work 动作时获得的 money 增量
-            "satisfaction": dict(a.satisfaction),               # 客观需求值，0→1
-            "urgency": dict(a.urgency),           # 主观急迫度，1→0
+            "satisfaction": dict(a.satisfaction),               # 客观满足度：satiety/relax 为 [0,100]，money 无上限
+            "urgency": dict(a.urgency),           # 主观急迫度，通常为 [0,1]
             "satisfaction_threshold": dict(a.satisfaction_threshold),  # 任务完成判定线
             "opinion": round(a.opinion, 3),
             "last_think": _extract_last_think(a.history),
@@ -91,6 +92,7 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
     return {
         "time": world.time,
         "map_size": [world.map.width, world.map.height],
+        "map_design": serialize_map_design(getattr(world, "map_design", None)),
         "agents": agents,
         "objects": objects,
         "posts": posts,

@@ -1,13 +1,124 @@
 import { useEffect, useRef } from 'react'
 import * as PIXI from 'pixi.js'
 import { useSimStore } from '../store/simStore'
+import type { MapBounds, WorldState } from '../store/simStore'
 
-// 每格像素大小，地图为 25×25，画布固定 600px
+// 每格像素大小，画布尺寸由后端 map_size 决定
 const CELL = 24
 // 智能体圆形颜色池，按 ID 哈希取色，保证同一智能体颜色稳定
 const AGENT_COLORS = [0x4f8ef7, 0xe74c6f, 0x2ecc71, 0xf39c12, 0x9b59b6]
 // 与后端 observer.py 保持一致的观测半径（格数）
 const OBSERVATION_RADIUS = 5
+
+const BUILDING_KINDS = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
+const BUILDING_COLORS: Record<string, number> = {
+  bed: 0x8b5cf6,
+  company: 0x3b82f6,
+  food_shop: 0xf59e0b,
+  playground: 0x10b981,
+  building: 0x6b7280,
+}
+const BUILDING_LABELS: Record<string, string> = {
+  bed: '床',
+  company: '公',
+  food_shop: '店',
+  playground: '乐',
+  building: '筑',
+}
+
+function colorFromHex(value: string, fallback: number): number {
+  if (/^#[0-9a-fA-F]{6}$/.test(value)) {
+    return Number(`0x${value.slice(1)}`)
+  }
+  return fallback
+}
+
+function boundsToRect(bounds: MapBounds) {
+  const [rowStart, colStart, rowEnd, colEnd] = bounds
+  return {
+    x: colStart * CELL,
+    y: rowStart * CELL,
+    width: (colEnd - colStart + 1) * CELL,
+    height: (rowEnd - rowStart + 1) * CELL,
+  }
+}
+
+function mapSignature(worldState: WorldState, showMapRegions: boolean): string {
+  return JSON.stringify({
+    map_size: worldState.map_size,
+    map_design: worldState.map_design,
+    showMapRegions,
+  })
+}
+
+function drawMapLayers(
+  worldState: WorldState,
+  showMapRegions: boolean,
+  app: PIXI.Application,
+  mapGfx: PIXI.Graphics,
+  grid: PIXI.Graphics,
+  labels: PIXI.Container,
+) {
+  const [mapCols, mapRows] = worldState.map_size
+  const pixelWidth = mapCols * CELL
+  const pixelHeight = mapRows * CELL
+
+  if (app.canvas.width !== pixelWidth || app.canvas.height !== pixelHeight) {
+    app.renderer.resize(pixelWidth, pixelHeight)
+  }
+
+  mapGfx.clear()
+  grid.clear()
+  labels.removeChildren().forEach((child) => child.destroy())
+
+  if (worldState.map_design) {
+    for (const terrain of worldState.map_design.terrain) {
+      const rect = boundsToRect(terrain.bounds)
+      mapGfx
+        .rect(rect.x, rect.y, rect.width, rect.height)
+        .fill({ color: colorFromHex(terrain.color, 0x203a2f), alpha: terrain.alpha })
+    }
+
+    if (showMapRegions) {
+      for (const region of worldState.map_design.regions) {
+        const rect = boundsToRect(region.bounds)
+        const color = colorFromHex(region.color, 0x6b7280)
+        mapGfx
+          .rect(rect.x, rect.y, rect.width, rect.height)
+          .fill({ color, alpha: 0.18 })
+        mapGfx
+          .rect(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2)
+          .stroke({ color, width: 1, alpha: 0.45 })
+
+        const label = new PIXI.Text({
+          text: region.name,
+          style: { fontSize: 10, fill: 0xe5e7eb, fontWeight: 'bold' },
+        })
+        label.position.set(region.label_pos[1] * CELL + 4, region.label_pos[0] * CELL + 4)
+        labels.addChild(label)
+      }
+    }
+
+    for (const road of worldState.map_design.roads) {
+      const color = colorFromHex(road.color, 0x8a7356)
+      for (const [row, col] of road.cells) {
+        mapGfx
+          .rect(col * CELL, row * CELL, CELL, CELL)
+          .fill({ color, alpha: 0.75 })
+      }
+    }
+  } else {
+    mapGfx.rect(0, 0, pixelWidth, pixelHeight).fill(0x1a1a2e)
+  }
+
+  for (let col = 0; col <= mapCols; col++) {
+    grid.moveTo(col * CELL, 0).lineTo(col * CELL, pixelHeight)
+  }
+  for (let row = 0; row <= mapRows; row++) {
+    grid.moveTo(0, row * CELL).lineTo(pixelWidth, row * CELL)
+  }
+  grid.stroke({ color: 0x2a2a4a, width: 1 })
+}
 
 // 将智能体 ID 字符串映射到固定颜色，避免每次渲染随机变色
 function agentColor(id: string): number {
@@ -24,12 +135,19 @@ export function WorldCanvas() {
   const agentGfxRef = useRef<Map<string, { body: PIXI.Graphics; label: PIXI.Text }>>(new Map())
   // 按对象 ID 缓存场景物体的 Graphics 和可选的占用数量标签
   const objectGfxRef = useRef<Map<string, { g: PIXI.Graphics; badge: PIXI.Text | null; kindLabel: PIXI.Text | null }>>(new Map())
+  const mapGfxRef = useRef<PIXI.Graphics | null>(null)
+  const gridGfxRef = useRef<PIXI.Graphics | null>(null)
+  const mapLabelContainerRef = useRef<PIXI.Container | null>(null)
+  const objectLayerRef = useRef<PIXI.Container | null>(null)
+  const agentLayerRef = useRef<PIXI.Container | null>(null)
+  const mapSignatureRef = useRef<string>('')
   // 选中高亮层（观测范围圆 + 黄色描边），独立于智能体图层便于整体清除
   const selectionGfxRef = useRef<PIXI.Graphics | null>(null)
 
   const worldState = useSimStore((s) => s.worldState)
   const selectedAgentId = useSimStore((s) => s.selectedAgentId)
   const selectedObjectId = useSimStore((s) => s.selectedObjectId)
+  const showMapRegions = useSimStore((s) => s.showMapRegions)
   const selectAgent = useSimStore((s) => s.selectAgent)
   const selectObject = useSimStore((s) => s.selectObject)
 
@@ -60,19 +178,37 @@ export function WorldCanvas() {
       initialized = true
       el.appendChild(app.canvas)
 
-      // 绘制静态网格，只创建一次，不随 tick 刷新
+      app.stage.sortableChildren = true
+      const mapGfx = new PIXI.Graphics()
       const grid = new PIXI.Graphics()
-      for (let x = 0; x <= 25; x++) {
-        grid.moveTo(x * CELL, 0).lineTo(x * CELL, 600)
-      }
-      for (let y = 0; y <= 25; y++) {
-        grid.moveTo(0, y * CELL).lineTo(600, y * CELL)
-      }
-      grid.stroke({ color: 0x2a2a4a, width: 1 })
+      const mapLabels = new PIXI.Container()
+      const objectLayer = new PIXI.Container()
+      const agentLayer = new PIXI.Container()
+      mapGfx.zIndex = 0
+      grid.zIndex = 10
+      mapLabels.zIndex = 20
+      objectLayer.zIndex = 100
+      agentLayer.zIndex = 200
+      mapGfxRef.current = mapGfx
+      gridGfxRef.current = grid
+      mapLabelContainerRef.current = mapLabels
+      objectLayerRef.current = objectLayer
+      agentLayerRef.current = agentLayer
+      app.stage.addChild(mapGfx)
       app.stage.addChild(grid)
+      app.stage.addChild(mapLabels)
+      app.stage.addChild(objectLayer)
+      app.stage.addChild(agentLayer)
+      const currentWorldState = useSimStore.getState().worldState
+      if (currentWorldState) {
+        const currentShowMapRegions = useSimStore.getState().showMapRegions
+        drawMapLayers(currentWorldState, currentShowMapRegions, app, mapGfx, grid, mapLabels)
+        mapSignatureRef.current = mapSignature(currentWorldState, currentShowMapRegions)
+      }
 
-      // 选中高亮层在网格之上、智能体图层之下，保证不遮挡标签
+      // 选中高亮层在最上方，保证描边和观测范围不会被地图或对象遮挡
       const selGfx = new PIXI.Graphics()
+      selGfx.zIndex = 300
       selectionGfxRef.current = selGfx
       app.stage.addChild(selGfx)
     })
@@ -84,6 +220,12 @@ export function WorldCanvas() {
         app.destroy(true)
       }
       appRef.current = null
+      mapGfxRef.current = null
+      gridGfxRef.current = null
+      mapLabelContainerRef.current = null
+      objectLayerRef.current = null
+      agentLayerRef.current = null
+      mapSignatureRef.current = ''
       agentGfxRef.current.clear()
       objectGfxRef.current.clear()
     }
@@ -97,24 +239,18 @@ export function WorldCanvas() {
     const stage = app.stage
     const agentGfx = agentGfxRef.current
     const objectGfx = objectGfxRef.current
+    const objectLayer = objectLayerRef.current ?? stage
+    const agentLayer = agentLayerRef.current ?? stage
 
-    // 建筑类 kind 集合，用于整格渲染
-    const BUILDING_KINDS = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
-    // 各建筑 kind 的填充色
-    const BUILDING_COLORS: Record<string, number> = {
-      bed:        0x8b5cf6,  // 紫色
-      company:    0x3b82f6,  // 蓝色
-      food_shop:  0xf59e0b,  // 琥珀色
-      playground: 0x10b981,  // 翠绿色
-      building:   0x6b7280,  // 灰色（通用）
-    }
-    // 各建筑 kind 的单字标识，显示在格子中央
-    const BUILDING_LABELS: Record<string, string> = {
-      bed:        '床',
-      company:    '公',
-      food_shop:  '店',
-      playground: '乐',
-      building:   '筑',
+    const mapGfx = mapGfxRef.current
+    const gridGfx = gridGfxRef.current
+    const mapLabels = mapLabelContainerRef.current
+    if (mapGfx && gridGfx && mapLabels) {
+      const signature = mapSignature(worldState, showMapRegions)
+      if (signature !== mapSignatureRef.current) {
+        drawMapLayers(worldState, showMapRegions, app, mapGfx, gridGfx, mapLabels)
+        mapSignatureRef.current = signature
+      }
     }
 
     // 更新场景物体（食物等）
@@ -134,20 +270,20 @@ export function WorldCanvas() {
           const { selectedObjectId: curId, selectObject: sel } = useSimStore.getState()
           sel(obj.id === curId ? null : obj.id)
         })
-        stage.addChild(g)
+        objectLayer.addChild(g)
         // 建筑才需要占用数量标签和种类标签
         let badge: PIXI.Text | null = null
         let kindLabel: PIXI.Text | null = null
         if (BUILDING_KINDS.has(obj.kind)) {
           badge = new PIXI.Text({ text: '', style: { fontSize: 8, fill: 0xffffff } })
           badge.anchor.set(1, 0)
-          stage.addChild(badge)
+          objectLayer.addChild(badge)
           kindLabel = new PIXI.Text({
             text: BUILDING_LABELS[obj.kind] ?? obj.kind,
             style: { fontSize: 10, fill: 0xffffff, fontWeight: 'bold' },
           })
           kindLabel.anchor.set(0.5, 0.5)
-          stage.addChild(kindLabel)
+          objectLayer.addChild(kindLabel)
         }
         objectGfx.set(obj.id, { g, badge, kindLabel })
       }
@@ -185,14 +321,14 @@ export function WorldCanvas() {
     // 清除服务端已不存在的物体
     for (const [id, { g, badge, kindLabel }] of objectGfx) {
       if (!seenObjects.has(id)) {
-        stage.removeChild(g)
+        objectLayer.removeChild(g)
         g.destroy()
         if (badge) {
-          stage.removeChild(badge)
+          objectLayer.removeChild(badge)
           badge.destroy()
         }
         if (kindLabel) {
-          stage.removeChild(kindLabel)
+          objectLayer.removeChild(kindLabel)
           kindLabel.destroy()
         }
         objectGfx.delete(id)
@@ -220,8 +356,8 @@ export function WorldCanvas() {
         const label = new PIXI.Text({ text: agent.id, style: { fontSize: 8, fill: 0xffffff } })
         // anchor(0.5, 1) 使文字底部中心对齐到目标坐标，便于放在圆圈正上方
         label.anchor.set(0.5, 1)
-        stage.addChild(body)
-        stage.addChild(label)
+        agentLayer.addChild(body)
+        agentLayer.addChild(label)
         agentGfx.set(agent.id, { body, label })
       }
 
@@ -240,14 +376,14 @@ export function WorldCanvas() {
     // 清除服务端已不存在的智能体
     for (const [id, { body, label }] of agentGfx) {
       if (!seenAgents.has(id)) {
-        stage.removeChild(body)
-        stage.removeChild(label)
+        agentLayer.removeChild(body)
+        agentLayer.removeChild(label)
         body.destroy()
         label.destroy()
         agentGfx.delete(id)
       }
     }
-  }, [worldState, selectAgent])
+  }, [worldState, selectAgent, showMapRegions])
 
   // 选中状态变化时单独刷新高亮层，避免重绘所有智能体
   useEffect(() => {
@@ -276,8 +412,7 @@ export function WorldCanvas() {
       if (obj) {
         const sx = obj.pos[1] * CELL
         const sy = obj.pos[0] * CELL
-        const BUILDING_KINDS_SEL = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
-        if (BUILDING_KINDS_SEL.has(obj.kind)) {
+        if (BUILDING_KINDS.has(obj.kind)) {
           selGfx.rect(sx, sy, CELL, CELL).stroke({ color: 0xffff00, width: 2 })
         } else {
           selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
@@ -286,10 +421,14 @@ export function WorldCanvas() {
     }
   }, [worldState, selectedAgentId, selectedObjectId])
 
+  const canvasWidth = (worldState?.map_size[0] ?? 25) * CELL
+  const canvasHeight = (worldState?.map_size[1] ?? 25) * CELL
+
   return (
     <div
       ref={containerRef}
-      className="flex-shrink-0 w-[600px] h-[600px] overflow-hidden"
+      className="flex-shrink-0 overflow-hidden"
+      style={{ width: canvasWidth, height: canvasHeight }}
     />
   )
 }

@@ -13,10 +13,9 @@ def observe(agent,r:int) -> list:
                 id = agent.world.map.get_e(i,j)
                 if id == agent.id:
                     continue  
-                kind = id.split("_")[0]
-                if kind == "agent":
+                if id in agent.world.agents:
                     other = agent.world.agents[id]
-                    res.append(f"ID:{id} 位置:({i},{j}) 类别:{kind}")
+                    res.append(f"ID:{id} 位置:({i},{j}) 类别:agent")
                 else:
                     obj = agent.world.objects[id]
                     desc = obj.get_desc() if hasattr(obj, "get_desc") else ""

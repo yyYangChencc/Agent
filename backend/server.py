@@ -1,7 +1,6 @@
 from __future__ import annotations
 import asyncio
 import json
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,10 +10,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from default_scenario import build_default_runtime
 from persona.logger import setup_logging
 from persona.runtime import SimulationRuntime
 from persona.history_recorder import HistoryRecorder
-from world.objects import food, bed, company, food_shop, playground
 from world.serializer import snapshot
 
 # ---------------------------------------------------------------------------
@@ -38,104 +37,13 @@ _sim_task: asyncio.Task | None = None
 # ---------------------------------------------------------------------------
 
 def _build_runtime() -> SimulationRuntime:
-    """构建仿真运行时并初始化5个智能体、3处食物和信任关系。"""
+    """构建仿真运行时并初始化默认场景。"""
     global _recorder
     if _recorder is not None:
         _recorder.close()
     _recorder = HistoryRecorder()
 
-    r = SimulationRuntime.build(conversation_max_rounds=2)
-    # 每次 reset 清空向量记忆，保证实验可重复
-    r.mem.reset_all()
-
-    # 5个角色各有不同的政治/社交倾向，用于观测意见传播效果
-    a = r.create_agent("agent_1", [3, 3],
-        role="保守主义者，倾向于节约资源，不喜欢变化", speaking_style="沉稳、措辞谨慎")
-    b = r.create_agent("agent_2", [4, 2],
-        role="积极探索者，乐于尝试新事物，遇到问题优先自己动手解决", speaking_style="热情、喜欢分享")
-    c = r.create_agent("agent_3", [6, 6],
-        role="中立观察者，善于独立分析后再做决定", speaking_style="理性、措辞中立")
-    d = r.create_agent("agent_4", [2, 9],
-        role="激进改革派，主张打破现有秩序追求效率", speaking_style="直接、充满激情")
-    e = r.create_agent("agent_5", [8, 4],
-        role="社区协调员，重视群体和谐，但优先以自身行动解决问题", speaking_style="温和、善于调解")
-
-    # opinion 范围 0~1，0.5 为中立；此初始值代表各角色的预设立场
-    a.opinion = 0.15; b.opinion = 0.45; c.opinion = 0.50
-    d.opinion = 0.85; e.opinion = 0.60
-
-    for agent in [a, b, c, d, e]:
-        agent.satisfaction["money"] = 200.0
-
-    # offline_trust 超过 friend_trust_threshold 才会触发离线意见同化
-    a.offline_trust["agent_2"] = 0.75; a.offline_trust["agent_3"] = 0.65
-    b.offline_trust["agent_1"] = 0.75; b.offline_trust["agent_3"] = 0.70
-    c.offline_trust["agent_1"] = 0.65; c.offline_trust["agent_2"] = 0.70
-    d.offline_trust["agent_5"] = 0.80; e.offline_trust["agent_4"] = 0.80
-    c.offline_trust["agent_5"] = 0.62; e.offline_trust["agent_3"] = 0.62
-
-    # online_trust 影响看到对方帖子后意见偏移的权重
-    a.online_trust["agent_2"] = 0.55; a.online_trust["agent_3"] = 0.60
-    b.online_trust["agent_1"] = 0.50; b.online_trust["agent_4"] = 0.35
-    c.online_trust["agent_1"] = 0.55; c.online_trust["agent_4"] = 0.55
-    c.online_trust["agent_5"] = 0.60; d.online_trust["agent_5"] = 0.65
-    d.online_trust["agent_1"] = 0.30; e.online_trust["agent_4"] = 0.60
-    e.online_trust["agent_3"] = 0.65
-
-    # 关注关系决定帖子分发范围（被关注者发帖后关注者能看到）
-    a.add_follower("agent_2"); a.add_follower("agent_3")
-    b.add_follower("agent_1"); b.add_follower("agent_3"); b.add_follower("agent_5")
-    c.add_follower("agent_1"); c.add_follower("agent_4"); c.add_follower("agent_5")
-    d.add_follower("agent_5"); d.add_follower("agent_3")
-    e.add_follower("agent_4"); e.add_follower("agent_3"); e.add_follower("agent_2")
-
-    # ------------------------------------------------------------------
-    # 场景布置（25×25 地图，按功能分区）
-    #
-    #  住宅区（左上，x=1-4, y=1-12）：5 张床，智能体初始在各自床旁
-    #  工作区（右上，x=18-22, y=2-6）：2 家公司
-    #  商业区（中左，x=1-4, y=16-22）：2 家食品店
-    #  娱乐区（右下，x=18-22, y=18-22）：1 个游乐场
-    #  散落食物：地图中部
-    # ------------------------------------------------------------------
-
-    # 住宅区：5 张床（x=2，y 间距 2）
-    bed("bed_1", [2,  2], r.world)
-    bed("bed_2", [2,  4], r.world)
-    bed("bed_3", [2,  6], r.world)
-    bed("bed_4", [2,  8], r.world)
-    bed("bed_5", [2, 10], r.world)
-
-    # 工作区：2 家公司
-    company("company_1", [20, 3], r.world, salary=10)
-    company("company_2", [22, 6], r.world, salary=15)
-
-    # 商业区：2 家食品店
-    food_shop("shop_1", [2, 18], r.world, food_num=20, provide=30, price=5)
-    food_shop("shop_2", [4, 21], r.world, food_num=15, provide=20, price=3)
-
-    # 娱乐区：游乐场
-    playground("playground_1", [20, 20], r.world, provide=20, price=3)
-
-    # 散落食物（中部区域，数量充足供多轮消耗）
-    food("food_1", 3, 20, [10,  8], r.world)
-    food("food_2", 3, 20, [12, 14], r.world)
-    food("food_3", 3, 20, [ 8, 18], r.world)
-    food("food_4", 3, 20, [15,  5], r.world)
-    food("food_5", 3, 20, [16, 20], r.world)
-
-    # 初始记忆：告知所有智能体各区域位置
-    map_info = (
-        "地图信息：住宅区在左上角，床(bed_1~bed_5)位于x=2,y=2/4/6/8/10；"
-        "工作区在右上角，company_1在(20,3)、company_2在(22,6)，工作可赚钱；"
-        "商业区在左下角，shop_1在(2,18)、shop_2在(4,21)，可购买食物；"
-        "娱乐区在右下角，playground_1在(20,20)，可放松；"
-    )
-    for aid in ["agent_1", "agent_2", "agent_3", "agent_4", "agent_5"]:
-        r.mem.store_agent_memory(aid, map_info, memory_type="system", importance=0.9)
-
-    r.world.history_recorder = _recorder
-    return r
+    return build_default_runtime(history_recorder=_recorder)
 
 
 # ---------------------------------------------------------------------------

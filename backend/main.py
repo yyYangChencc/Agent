@@ -1,72 +1,12 @@
 import asyncio
-import os
 from dotenv import load_dotenv
+from default_scenario import DEFAULT_AGENT_IDS, build_cli_demo_runtime
 from persona.logger import setup_logging
-from persona.runtime import SimulationRuntime
-from world.objects import food
 
 
 async def _main():
-    rt = SimulationRuntime.build(conversation_max_rounds=2)
-    rt.mem.reset_all()
-
-    # --- 创建智能体 ---
-    a = rt.create_agent("agent_1", [3, 3],
-        role="保守主义者，倾向于节约资源，不喜欢变化",
-        speaking_style="沉稳、措辞谨慎")
-    b = rt.create_agent("agent_2", [4, 2],
-        role="积极探索者，乐于尝试新事物并分享经验",
-        speaking_style="热情、喜欢分享")
-    c = rt.create_agent("agent_3", [6, 6],
-        role="中立观察者，善于倾听各方意见后再表态",
-        speaking_style="理性、措辞中立")
-    d = rt.create_agent("agent_4", [2, 8],
-        role="激进改革派，主张打破现有秩序追求效率",
-        speaking_style="直接、充满激情")
-    e = rt.create_agent("agent_5", [8, 4],
-        role="社区协调员，重视群体和谐与共识",
-        speaking_style="温和、善于调解")
-
-    agents = [a, b, c, d, e]
-
-    # --- 设置初始观念 ---
-    a.opinion = 0.15; b.opinion = 0.45; c.opinion = 0.50
-    d.opinion = 0.85; e.opinion = 0.60
-
-    # --- 好友关系 ---
-    a.offline_trust["agent_2"] = 0.75; a.offline_trust["agent_3"] = 0.65
-    b.offline_trust["agent_1"] = 0.75; b.offline_trust["agent_3"] = 0.70
-    c.offline_trust["agent_1"] = 0.65; c.offline_trust["agent_2"] = 0.70
-    d.offline_trust["agent_5"] = 0.80; e.offline_trust["agent_4"] = 0.80
-    c.offline_trust["agent_5"] = 0.62; e.offline_trust["agent_3"] = 0.62
-
-    # --- 线上信任 ---
-    a.online_trust["agent_2"] = 0.55; a.online_trust["agent_3"] = 0.60
-    b.online_trust["agent_1"] = 0.50; b.online_trust["agent_4"] = 0.35
-    c.online_trust["agent_1"] = 0.55; c.online_trust["agent_4"] = 0.55
-    c.online_trust["agent_5"] = 0.60; d.online_trust["agent_5"] = 0.65
-    d.online_trust["agent_1"] = 0.30; e.online_trust["agent_4"] = 0.60
-    e.online_trust["agent_3"] = 0.65
-
-    # --- 关注关系 ---
-    a.add_follower("agent_2"); a.add_follower("agent_3")
-    b.add_follower("agent_1"); b.add_follower("agent_3"); b.add_follower("agent_5")
-    c.add_follower("agent_1"); c.add_follower("agent_4"); c.add_follower("agent_5")
-    d.add_follower("agent_5"); d.add_follower("agent_3")
-    e.add_follower("agent_4"); e.add_follower("agent_3"); e.add_follower("agent_2")
-
-    # --- 放置食物 ---
-    food("food_1", 1, 2, [10, 10], rt.world)
-    food("food_2", 1, 2, [5, 15], rt.world)
-    food("food_3", 1, 2, [18, 5], rt.world)
-
-    # --- 注入初始记忆 ---
-    rt.mem.store_agent_memory("agent_1", "在（10，10）附近可能存在食物",
-        memory_type="system", importance=0.9)
-    rt.mem.store_agent_memory("agent_4", "在（5，15）附近可能存在食物",
-        memory_type="system", importance=0.9)
-    rt.mem.store_agent_memory("agent_5", "在（18，5）附近可能存在食物",
-        memory_type="system", importance=0.9)
+    rt = build_cli_demo_runtime(conversation_max_rounds=2)
+    agents = [rt.world.agents[agent_id] for agent_id in DEFAULT_AGENT_IDS]
 
     # --- 运行仿真 ---
     header = "  ".join(f"{ag.id:>8}" for ag in agents)

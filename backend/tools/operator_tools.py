@@ -32,7 +32,7 @@ def register_operator_tools(operator):
         if "constraint" in spec:
             lines.append(f"   约束：{spec['constraint']}")
         lines.append("")
-    lines.append("当你决定使用工具时，请严格输出如下 JSON，不要包含任何额外文本：")
+    lines.append("工具调用 JSON 的形状如下：")
     lines.append('{\n  "tool": "<工具名>",\n  "args": { "<参数名>": <参数值> }\n}')
     return tools, '\n'.join(lines)
 
@@ -65,7 +65,7 @@ class Operator:
                 "returns": str,
             },
             "sleep": {
-                "description": "在指定ID的床上休息，进入睡眠状态，经过 sleep_time 步后恢复 50 relax",
+                "description": "在指定ID的床上休息，立即恢复放松度，并进入睡眠状态；睡眠结束前不会行动",
                 "args": {"ID": str},
                 "returns": str,
                 "constraint": "目标必须是床(bed)，且在欧氏距离√2范围内（即相邻格子）"
@@ -80,7 +80,7 @@ class Operator:
                 "description": "进入指定ID的建筑内部，进入后智能体位置与建筑重合，前端不单独显示智能体",
                 "args": {"ID": str},
                 "returns": str,
-                "constraint": "目标必须是建筑(building/bed/food_shop/playground/company)，且在欧氏距离√2范围内"
+                "constraint": "目标必须是建筑(building/food_shop/playground/company)，且在欧氏距离√2范围内"
             },
             "exit_building": {
                 "description": "离开当前所在建筑，回到建筑外部",
@@ -191,8 +191,7 @@ class Operator:
                 logger.warning("[%s] 物品 %s 不存在", operator_ID, ID)
                 return "物品不存在"
             operated = self.world.objects[ID]
-            kind = ID.split('_')[0]
-            if kind != "food":
+            if getattr(operated, "kind", None) != "food":
                 logger.warning("[%s] 物品 %s 种类不是食物", operator_ID, ID)
                 return "物品种类不是食物，不可以吃"
             f_pos = operated.get_position()

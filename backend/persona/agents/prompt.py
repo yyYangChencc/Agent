@@ -23,15 +23,40 @@ class BasePromptBuilder:
         d = agent.urgency
         n = agent.satisfaction
         t = agent.satisfaction_threshold
-        lines = ["- 需求（need低=匮乏，demand高=渴望；satisfaction>阈值=已满足）："]
+        lines = ["- 需求状态（satisfaction低=匮乏，urgency高=主观急迫；satisfaction>阈值=已满足）："]
         for k, urgency in d.items():
             satisfaction_val = n.get(k, 0.0)
-            th = t.get(k, "?")
-            status = "✓" if isinstance(th, float) and satisfaction_val > th else "✗"
+            threshold = t.get(k)
+            status = "✓" if isinstance(threshold, (int, float)) and satisfaction_val > threshold else "✗"
+            threshold_text = f"{threshold:.1f}" if isinstance(threshold, (int, float)) else "未配置"
             lines.append(
-                f"  {k}: satisfaction={satisfaction_val:.1f} urgency={urgency:.2f} thr={th:.1f} {status}"
+                f"  {k}: satisfaction={satisfaction_val:.1f} urgency={urgency:.2f} threshold={threshold_text} {status}"
             )
         return "\n".join(lines)
+
+    def _persona_block(self, agent: "Agent") -> str:
+        lines = []
+        if agent.role:
+            lines.append(f"- 角色：{agent.role}")
+        if agent.speaking_style:
+            lines.append(f"- 说话风格：{agent.speaking_style}")
+        lines.append(f"- 当前情绪：{agent.emotion}")
+        return "\n".join(lines)
+
+    def _action_format_block(self, action_schema: str, no_action_label: str) -> str:
+        return (
+            "输出格式（必须严格遵守，必须输出完整成对的<Think></Think>与<Action></Action>标签）：\n"
+            "<Think>\n"
+            "[分析过程]\n"
+            "</Think>\n"
+            "<Action>\n"
+            f"{action_schema}\n"
+            "</Action>\n"
+            f"{no_action_label}\n"
+            "<Action>\n"
+            "{}\n"
+            "</Action>"
+        )
 
     def _history_block(self, agent: "Agent", max_n: int = 5) -> str:
         recent = agent.history[-max_n:]
@@ -66,21 +91,15 @@ class WorldPromptBuilder(BasePromptBuilder):
     """Standard world interaction prompt for move / eat / speak / social_step."""
 
     def build(self, agent: "Agent", observation: str, mem_info) -> tuple[str, str]:
-        persona_lines = []
-        if agent.role:
-            persona_lines.append(f"- 角色：{agent.role}")
-        if agent.speaking_style:
-            persona_lines.append(f"- 说话风格：{agent.speaking_style}")
-        persona_lines.append(f"- 当前情绪：{agent.emotion}")
-        persona_block = "\n".join(persona_lines)
+        persona_block = self._persona_block(agent)
 
         system = (
             f"你是自主智能体 {agent.id}，运行在一个 2D 网格世界中。\n"
             f"{persona_block}\n"
             "你的目标是根据当前状态、观测和记忆，选择最合理的单一动作。\n\n"
             "行为原则：\n"
-            "- 需求值越高表示越急迫，低于阈值表示该需求已暂时满足\n"
-            "- 优先执行当前任务，通过行动降低对应需求值，若行动可顺便解决其他需求，可在不耽误当前主任务的前提下进行\n"
+            "- satisfaction越低表示越匮乏，urgency越高表示主观越急迫；satisfaction大于阈值才表示该需求已满足\n"
+            "- 优先执行当前任务，通过行动提高对应satisfaction，若行动可顺便解决其他需求，可在不耽误当前主任务的前提下进行\n"
             "- 若任务为 none，根据需求自由决策\n"
             "- 若任务长时间无进展，优先依据当前焦点行动\n"
             "- 每轮只能执行一个工具调用\n"
@@ -91,20 +110,10 @@ class WorldPromptBuilder(BasePromptBuilder):
             "  · 禁止：发帖询问你已知的信息（记忆中或观测到的建筑、食物、商店位置等）\n"
             "  · 任务为 none 且所有需求已满足时，可自由选择任意动作\n"
             "- 记忆中的位置信息是可靠的，直接使用，不需要反复确认\n\n"
-            "输出格式（必须严格遵守，必须输出完整成对的<Think></Think>与<Action></Action>标签）：\n"
-            "<Think>\n"
-            "[分析：当前任务状态 → 最紧迫需求 → 回忆/观测中已知目标位置 → 可行动作列表 → 前提检查 → 选择理由]\n"
-            "</Think>\n"
-            "<Action>\n"
-            '{"tool": "<tool_name>", "args": {"<key>": <value>}}\n'
-            "</Action>\n"
-            "若本轮无可执行动作：\n"
-            "<Action>\n"
-            "{}\n"
-            "</Action>\n\n"
+            f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
             "<Think>\n"
-            "任务 eat something，satiety=85 未满足。记忆中 food_1 位于 (7,5)，当前位置 (3,5)，使用 move 前往。move 工具满足前提。\n"
+            "任务 eat something，satiety=10 未满足。记忆中 food_1 位于 (7,5)，当前位置 (3,5)，使用 move 前往。move 工具满足前提。\n"
             "</Think>\n"
             "<Action>\n"
             '{"tool": "move", "args": {"x": 7, "y": 5}}\n'
@@ -138,13 +147,7 @@ class SocialPromptBuilder(BasePromptBuilder):
     """Social platform interaction prompt."""
 
     def build(self, agent: "Agent", posts_info: str, mem_info) -> tuple[str, str]:
-        persona_lines = []
-        if agent.role:
-            persona_lines.append(f"- 角色：{agent.role}")
-        if agent.speaking_style:
-            persona_lines.append(f"- 说话风格：{agent.speaking_style}")
-        persona_lines.append(f"- 当前情绪：{agent.emotion}")
-        persona_block = "\n".join(persona_lines)
+        persona_block = self._persona_block(agent)
 
         system = (
             f"你是社交平台智能体 {agent.id}。\n"
@@ -156,19 +159,9 @@ class SocialPromptBuilder(BasePromptBuilder):
             "- 发帖内容应与你的记忆和当前话题相关\n"
             "- 不允许重复发布完全相同的内容\n"
             "- 禁止发帖询问你已知的信息（如记忆中已有的建筑、食物位置等）\n"
-            "- 仅对真实存在的帖子执行 comment / like / dislike\n"
+            "- 仅对真实存在的帖子执行 comment_post / like_post / dislike_post\n"
             "- 浏览时积极参与互动（点赞/评论），而非只看不发\n\n"
-            "输出格式（必须严格遵守，必须输出完整成对的<Think></Think>与<Action></Action>标签）：\n"
-            "<Think>\n"
-            "[分析：当前帖子对我意味着什么 → 我想传达什么 → 最合适的社交动作]\n"
-            "</Think>\n"
-            "<Action>\n"
-            '{"tool": "<tool_name>", "args": {"<key>": <value>}}\n'
-            "</Action>\n"
-            "若本轮无可执行动作：\n"
-            "<Action>\n"
-            "{}\n"
-            "</Action>\n\n"
+            f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
             "<Think>\n"
             "帖子讨论的是食物话题，与我的记忆相关。我想分享自己的见解，适合发帖。\n"
@@ -205,13 +198,7 @@ class ConversationPromptBuilder(BasePromptBuilder):
     """Multi-round conversation prompt."""
 
     def build(self, agent: "Agent", observation: str, mem_info) -> tuple[str, str]:
-        persona_lines = []
-        if agent.role:
-            persona_lines.append(f"- 角色：{agent.role}")
-        if agent.speaking_style:
-            persona_lines.append(f"- 说话风格：{agent.speaking_style}")
-        persona_lines.append(f"- 当前情绪：{agent.emotion}")
-        persona_block = "\n".join(persona_lines)
+        persona_block = self._persona_block(agent)
 
         system = (
             f"你是智能体 {agent.id}，当前正在进行对话。\n"
@@ -221,17 +208,7 @@ class ConversationPromptBuilder(BasePromptBuilder):
             "- 若剩余轮数为 0，必须主动收尾或保持沉默\n"
             "- 对话目的达成后，不要重复对话，选择沉默终止\n"
             "- 禁止执行移动、进食等非对话动作\n\n"
-            "输出格式（必须严格遵守，必须输出完整成对的<Think></Think>与<Action></Action>标签）：\n"
-            "<Think>\n"
-            "[对方意图 → 剩余轮数 → 我的目的是否达成 → 回复还是沉默]\n"
-            "</Think>\n"
-            "<Action>\n"
-            '{"tool": "speak", "args": {"content": "<回复内容>", "ID": "<对方ID>", "response_to": "<被回复的原文>"}}\n'
-            "</Action>\n"
-            "沉默时：\n"
-            "<Action>\n"
-            "{}\n"
-            "</Action>\n\n"
+            f"{self._action_format_block('{\"tool\": \"speak\", \"args\": {\"content\": \"<回复内容>\", \"ID\": \"<对方ID>\", \"response_to\": \"<被回复的原文>\"}}', '沉默时：')}\n\n"
             "示例：\n"
             "<Think>\n"
             "对方询问食物位置，剩余 2 轮，目的未达成，应回复。\n"

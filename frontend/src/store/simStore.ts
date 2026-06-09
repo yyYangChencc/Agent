@@ -3,7 +3,7 @@ import { create } from 'zustand'
 // 与后端 serializer.py snapshot() 输出字段保持一致
 export interface AgentState {
   id: string
-  pos: [number, number]       // [col, row]，对应画布坐标 pos * CELL
+  pos: [number, number]       // [row, col]
   role: string
   emotion: string
   task: string
@@ -30,6 +30,53 @@ export interface ObjectState {
   occupants: string[]         // 当前占用者的智能体 ID 列表
 }
 
+export type MapBounds = [number, number, number, number]
+export type MapPosition = [number, number]
+
+export interface MapTerrainState {
+  id: string
+  name: string
+  kind: string
+  bounds: MapBounds
+  color: string
+  alpha: number
+}
+
+export interface MapRegionState {
+  id: string
+  name: string
+  kind: string
+  bounds: MapBounds
+  label_pos: MapPosition
+  color: string
+  description: string
+}
+
+export interface MapRoadState {
+  id: string
+  name: string
+  kind: string
+  cells: MapPosition[]
+  color: string
+  width: number
+}
+
+export interface MapObjectRegionState {
+  region_id: string
+  entrance: MapPosition
+}
+
+export interface MapDesignState {
+  version: number
+  map_size: [number, number]
+  position_format: string
+  bounds_format: string
+  terrain: MapTerrainState[]
+  regions: MapRegionState[]
+  roads: MapRoadState[]
+  object_regions: Record<string, MapObjectRegionState>
+}
+
 export interface CommentState {
   id: string
   author_id: string
@@ -51,6 +98,7 @@ export interface PostState {
 export interface WorldState {
   time: number
   map_size: [number, number]
+  map_design: MapDesignState | null
   agents: AgentState[]
   objects: ObjectState[]
   posts: PostState[]
@@ -75,6 +123,7 @@ interface SimStore {
   speed: number
   selectedAgentId: string | null
   selectedObjectId: string | null   // 当前选中的场景物品 ID
+  showMapRegions: boolean           // 是否显示地图区域划分
   ws: WebSocket | null
   connected: boolean
   agentHistory: Record<string, AgentHistoryPoint[]>
@@ -82,6 +131,7 @@ interface SimStore {
   setStatus: (running: boolean, speed: number) => void
   selectAgent: (id: string | null) => void
   selectObject: (id: string | null) => void  // 选中物品，同时取消智能体选中
+  toggleMapRegions: () => void
   setWs: (ws: WebSocket | null) => void
   setConnected: (connected: boolean) => void
   sendCmd: (cmd: object) => void
@@ -94,6 +144,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   speed: 1.0,
   selectedAgentId: null,
   selectedObjectId: null,
+  showMapRegions: false,
   ws: null,
   connected: false,
   agentHistory: {},
@@ -124,6 +175,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
   selectAgent: (id) => set({ selectedAgentId: id, selectedObjectId: null }),
   // 选中物品时清除智能体选中，保持互斥
   selectObject: (id) => set({ selectedObjectId: id, selectedAgentId: null }),
+  toggleMapRegions: () => set((state) => ({ showMapRegions: !state.showMapRegions })),
   setWs: (ws) => set({ ws }),
   setConnected: (connected) => set({ connected }),
   resetHistory: () => set({ agentHistory: {} }),

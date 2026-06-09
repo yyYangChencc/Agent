@@ -13,22 +13,22 @@ const OBJECT_META: Record<string, { label: string; desc: string; func: string }>
   building: {
     label: '建筑',
     desc: '场景中的建筑设施，占据完整格位。',
-    func: '可作为 work 等交互动作的目标，具体效果由后续动作系统决定。',
+    func: '具体交互效果由后端对象逻辑决定。',
   },
   bed: {
     label: '床',
-    desc: '建筑子类，供智能体休息恢复放松度。',
-    func: 'sleep 动作的目标，立即恢复 50 relax，持续 8 步后自动醒来。',
+    desc: '供智能体休息恢复放松度。',
+    func: 'sleep 动作的目标；恢复量和持续时间以对象描述和后端配置为准。',
   },
   food_shop: {
     label: '食品店',
     desc: '建筑子类，供智能体购买食物补充饱腹度。',
-    func: 'buy 动作的目标，每次花费 5 元，提供 2 饱腹感。',
+    func: 'buy 动作的目标；价格、补充量和剩余商品数以对象描述为准。',
   },
   playground: {
     label: '游乐场',
     desc: '建筑子类，供智能体娱乐恢复放松度。',
-    func: '娱乐动作的目标，每次花费 3 元，恢复 10 relax。余额不足时无法使用。',
+    func: '可通过接近目标触发对象交互；价格和恢复量以对象描述为准。',
   },
   objects: {
     label: '通用物品',
@@ -53,7 +53,7 @@ function SatisfactionBar({
   const pct = Math.max(0, Math.min(100, Math.round(value)))
   const thPct = Math.max(0, Math.min(100, Math.round(threshold)))
   // satisfaction 超过 threshold 才算任务完成条件（见 reflect.py task_reset）
-  const satisfied = value >= threshold
+  const satisfied = value > threshold
 
   return (
     <div className="mb-2">

@@ -9,6 +9,8 @@ export function ControlBar() {
   const speed = useSimStore((s) => s.speed)
   const connected = useSimStore((s) => s.connected)
   const worldState = useSimStore((s) => s.worldState)
+  const showMapRegions = useSimStore((s) => s.showMapRegions)
+  const toggleMapRegions = useSimStore((s) => s.toggleMapRegions)
   const sendCmd = useSimStore((s) => s.sendCmd)
 
   // 未收到任何 tick 时显示 0
@@ -28,6 +30,17 @@ export function ControlBar() {
 
       {/* 弹性空白，将操作按钮推到右侧 */}
       <div className="flex-1" />
+
+      <button
+        onClick={toggleMapRegions}
+        className={`px-3 py-1 rounded text-xs ${
+          showMapRegions
+            ? 'bg-purple-600 hover:bg-purple-500 text-white'
+            : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+        }`}
+      >
+        {showMapRegions ? '隐藏区域' : '显示区域'}
+      </button>
 
       {/* 单步：仅在暂停状态可用，每次触发后端执行一个 world.step() */}
       <button
