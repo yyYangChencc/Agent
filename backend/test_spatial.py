@@ -99,6 +99,9 @@ def _build_world() -> tuple[World, Operator]:
     make_agent("agent_2", [11, 12])
     # agent_3: 先进入 building_2，再用 move 自动出建筑
     make_agent("agent_3", [17, 18])
+    # agent_4: 紧邻 shop_1，用于验证进入建筑后立即自动 interact，停留时每 tick 继续自动 interact
+    agent_4 = make_agent("agent_4", [19, 5])
+    agent_4.satisfaction["money"] = 50
 
     # 放置物品
     bed("bed_1", [5, 5], world)
@@ -115,6 +118,7 @@ def _build_world() -> tuple[World, Operator]:
 
 def _manual_tick(world: World) -> None:
     world.time += 1
+    world.auto_interact_inside_buildings()
     for agent in world.agents.values():
         if agent.sleeping:
             agent.sleep_ticks_remaining -= 1
@@ -153,6 +157,42 @@ def _build_script(world: World, op: Operator) -> list[tuple[str, callable]]:
     # 步骤 9: agent_3 在建筑内调用 move（自动出建筑后前往目标）
     script.append(("agent_3 在建筑内 move → [15, 15]（自动出建筑）",
                    lambda: op.move("agent_3", 15, 15)))
+
+    def _assert_shop_entry_auto_interact():
+        agent = world.agents["agent_4"]
+        before_satiety = agent.satisfaction["satiety"]
+        before_money = agent.satisfaction["money"]
+        result = op.enter_building("agent_4", "shop_1")
+        assert agent.inside_building_id == "shop_1"
+        assert agent.satisfaction["satiety"] > before_satiety
+        assert agent.satisfaction["money"] < before_money
+        return result
+
+    def _assert_shop_tick_auto_interact():
+        agent = world.agents["agent_4"]
+        before_satiety = agent.satisfaction["satiety"]
+        before_money = agent.satisfaction["money"]
+        _manual_tick(world)
+        assert agent.inside_building_id == "shop_1"
+        assert agent.satisfaction["satiety"] > before_satiety
+        assert agent.satisfaction["money"] < before_money
+        return "shop_1 自动 interact 已在 tick 内再次触发"
+
+    def _assert_shop_exit_stops_auto_interact():
+        agent = world.agents["agent_4"]
+        result = op.exit_building("agent_4")
+        before_satiety = agent.satisfaction["satiety"]
+        before_money = agent.satisfaction["money"]
+        _manual_tick(world)
+        assert agent.inside_building_id is None
+        assert agent.satisfaction["satiety"] <= before_satiety
+        assert agent.satisfaction["money"] == before_money
+        return result
+
+    # 步骤 10-12: 验证建筑交互流程简化后，食品店不需要 buy，进入和停留自动 interact，离开后停止
+    script.append(("agent_4 进入 shop_1 后立即自动 interact", _assert_shop_entry_auto_interact))
+    script.append(("agent_4 仍在 shop_1 内，tick 自动 interact", _assert_shop_tick_auto_interact))
+    script.append(("agent_4 离开 shop_1 后停止自动 interact", _assert_shop_exit_stops_auto_interact))
 
     return script
 

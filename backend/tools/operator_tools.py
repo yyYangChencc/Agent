@@ -1,7 +1,7 @@
 from tools.base import Tool
 from social_sys.post.post import Post
 from social_sys.post.comment import Comment
-from world.objects import Interactable
+from world.objects import Interactable, building
 from persona.opinion.scorer import evaluate_opinion
 from persona.logger import get_logger
 
@@ -70,14 +70,8 @@ class Operator:
                 "returns": str,
                 "constraint": "目标必须是床(bed)，且在欧氏距离√2范围内（即相邻格子）"
             },
-            "buy": {
-                "description": "在指定ID的商店里进行购买",
-                "args": {"ID": str},
-                "returns": str,
-                "constraint": "目标必须是食品店(food_shop)，且在欧氏距离√2范围内（即相邻格子）"
-            },
             "enter_building": {
-                "description": "进入指定ID的建筑内部，进入后智能体位置与建筑重合，前端不单独显示智能体",
+                "description": "进入指定ID的建筑内部；进入后会立即自动触发该建筑的 interact 效果，之后每个时间步若仍在建筑内也会自动触发 interact",
                 "args": {"ID": str},
                 "returns": str,
                 "constraint": "目标必须是建筑(building/food_shop/playground/company)，且在欧氏距离√2范围内"
@@ -107,13 +101,17 @@ class Operator:
         if x == old_x and y == old_y:
             return "目标位置是当前位置，没有发生移动"
 
+        if agent.inside_building_id:
+            self.exit_building(operator_ID)
+
         # Detect interactable object at target cell
         target_cell_id = self.world.map.get_e(x, y)
         target_obj = self.world.objects.get(target_cell_id) if target_cell_id != '0' else None
-        target_interactable = isinstance(target_obj, Interactable)
+        target_interactable = isinstance(target_obj, Interactable) and not isinstance(target_obj, building)
 
         n = agent.config.observation_radius
         cur_x, cur_y = old_x, old_y
+        path = [[old_x, old_y]]
         steps = 0
         interact_msg = ""
 
@@ -153,6 +151,7 @@ class Operator:
             if best_pos is None:
                 break
             cur_x, cur_y = best_pos
+            path.append([cur_x, cur_y])
             steps += 1
             # After each step, check if now in eat range of target object
             _try_interact(cur_x, cur_y)
@@ -170,6 +169,10 @@ class Operator:
             self.world.map.place(cur_x, cur_y, agent.id)
             self.world.map.remove(old_x, old_y)
             agent.position = [cur_x, cur_y]
+            self.world.movements.append({
+                "agent_id": operator_ID,
+                "path": path,
+            })
 
         logger.info(
             "[%s] 从 [%d,%d] 移动 %d 步至 [%d,%d]（目标 [%d,%d]）",
@@ -230,26 +233,6 @@ class Operator:
         logger.info("[%s] 开始睡觉 → %s", operator_ID, ID)
         return f"{operator_ID}{result}"
 
-    def buy(self, operator_ID: str, ID: str):
-        if ID == '0':
-            return "此处为空"
-        if operator_ID not in self.world.agents:
-            return "智能体不存在"
-        agent = self.world.agents[operator_ID]
-        with self.world._world_lock:
-            if ID not in self.world.objects:
-                return "物品不存在"
-            target = self.world.objects[ID]
-            if getattr(target, "kind", None) != "food_shop":
-                return "目标不是食品店，不可以购买"
-            t_pos = target.get_position()
-            a_pos = agent.get_position()
-            if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
-                return "距离过远无法购买"
-            result = target.interact(agent)
-        logger.info("[%s] buy 占位调用 → %s", operator_ID, ID)
-        return f"{operator_ID}{result}"
-
     def enter_building(self, operator_ID: str, ID: str):
         if ID == '0':
             return "此处为空"
@@ -267,7 +250,9 @@ class Operator:
             a_pos = agent.get_position()
             if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
                 return "距离过远无法进入"
-            result = target.enter(agent)
+            enter_result = target.enter(agent)
+        interact_result = self.world.interact_inside_building(agent, record_history=False, source="enter_building")
+        result = f"{enter_result}; {interact_result}" if interact_result else enter_result
         logger.info("[%s] 进入建筑 %s", operator_ID, ID)
         return result
 

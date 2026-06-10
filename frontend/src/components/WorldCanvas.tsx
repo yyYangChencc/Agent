@@ -9,6 +9,7 @@ const CELL = 24
 const AGENT_COLORS = [0x4f8ef7, 0xe74c6f, 0x2ecc71, 0xf39c12, 0x9b59b6]
 // 与后端 observer.py 保持一致的观测半径（格数）
 const OBSERVATION_RADIUS = 5
+const MOVE_STEP_MS = 180
 
 const BUILDING_KINDS = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
 const BUILDING_COLORS: Record<string, number> = {
@@ -26,6 +27,14 @@ const BUILDING_LABELS: Record<string, string> = {
   building: '筑',
 }
 
+type AgentGfx = {
+  body: PIXI.Graphics
+  label: PIXI.Text
+  x: number
+  y: number
+  animationId: number
+}
+
 function colorFromHex(value: string, fallback: number): number {
   if (/^#[0-9a-fA-F]{6}$/.test(value)) {
     return Number(`0x${value.slice(1)}`)
@@ -40,6 +49,13 @@ function boundsToRect(bounds: MapBounds) {
     y: rowStart * CELL,
     width: (colEnd - colStart + 1) * CELL,
     height: (rowEnd - rowStart + 1) * CELL,
+  }
+}
+
+function cellCenter(pos: [number, number]) {
+  return {
+    x: pos[1] * CELL + CELL / 2,
+    y: pos[0] * CELL + CELL / 2,
   }
 }
 
@@ -120,6 +136,97 @@ function drawMapLayers(
   grid.stroke({ color: 0x2a2a4a, width: 1 })
 }
 
+function drawAgentAt(gfx: AgentGfx, x: number, y: number, color: number) {
+  gfx.x = x
+  gfx.y = y
+  gfx.body.clear()
+  gfx.body.circle(x, y, 9).fill(color)
+  gfx.label.position.set(x, y - 11)
+}
+
+function animateAgentAlongPath(
+  gfx: AgentGfx,
+  path: [number, number][],
+  color: number,
+  onFrame?: () => void,
+) {
+  if (path.length < 2) return
+
+  const animationId = gfx.animationId + 1
+  gfx.animationId = animationId
+  const points = path.map(cellCenter)
+  let segmentIndex = 0
+  let segmentStartTime: number | null = null
+
+  const step = (timestamp: number) => {
+    if (gfx.animationId !== animationId) return
+    if (segmentStartTime === null) {
+      segmentStartTime = timestamp
+    }
+
+    const from = points[segmentIndex]
+    const to = points[segmentIndex + 1]
+    const t = Math.min(1, (timestamp - segmentStartTime) / MOVE_STEP_MS)
+    const x = from.x + (to.x - from.x) * t
+    const y = from.y + (to.y - from.y) * t
+    drawAgentAt(gfx, x, y, color)
+    onFrame?.()
+
+    if (t >= 1) {
+      segmentIndex += 1
+      segmentStartTime = timestamp
+      if (segmentIndex >= points.length - 1) {
+        const end = points[points.length - 1]
+        drawAgentAt(gfx, end.x, end.y, color)
+        onFrame?.()
+        return
+      }
+    }
+
+    requestAnimationFrame(step)
+  }
+
+  requestAnimationFrame(step)
+}
+
+function drawSelection(
+  selGfx: PIXI.Graphics,
+  worldState: WorldState,
+  selectedAgentId: string | null,
+  selectedObjectId: string | null,
+  agentGfx: Map<string, AgentGfx>,
+) {
+  selGfx.clear()
+
+  if (selectedAgentId) {
+    const agent = worldState.agents.find((a) => a.id === selectedAgentId)
+    if (agent) {
+      const gfx = agentGfx.get(agent.id)
+      const finalPoint = cellCenter(agent.pos)
+      const sx = gfx?.x ?? finalPoint.x
+      const sy = gfx?.y ?? finalPoint.y
+      const r = OBSERVATION_RADIUS * CELL
+
+      selGfx.circle(sx, sy, r).fill({ color: 0xffffff, alpha: 0.05 })
+      selGfx.circle(sx, sy, r).stroke({ color: 0xffff00, width: 1, alpha: 0.4 })
+      selGfx.circle(sx, sy, 9).stroke({ color: 0xffff00, width: 2 })
+    }
+  }
+
+  if (selectedObjectId) {
+    const obj = worldState.objects.find((o) => o.id === selectedObjectId)
+    if (obj) {
+      const sx = obj.pos[1] * CELL
+      const sy = obj.pos[0] * CELL
+      if (BUILDING_KINDS.has(obj.kind)) {
+        selGfx.rect(sx, sy, CELL, CELL).stroke({ color: 0xffff00, width: 2 })
+      } else {
+        selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
+      }
+    }
+  }
+}
+
 // 将智能体 ID 字符串映射到固定颜色，避免每次渲染随机变色
 function agentColor(id: string): number {
   let h = 0
@@ -132,7 +239,7 @@ export function WorldCanvas() {
   // 用 ref 持有 Pixi app 实例，避免重渲染时重复初始化
   const appRef = useRef<PIXI.Application | null>(null)
   // 按智能体 ID 缓存 Graphics/Text 对象，tick 时只更新坐标，不重建
-  const agentGfxRef = useRef<Map<string, { body: PIXI.Graphics; label: PIXI.Text }>>(new Map())
+  const agentGfxRef = useRef<Map<string, AgentGfx>>(new Map())
   // 按对象 ID 缓存场景物体的 Graphics 和可选的占用数量标签
   const objectGfxRef = useRef<Map<string, { g: PIXI.Graphics; badge: PIXI.Text | null; kindLabel: PIXI.Text | null }>>(new Map())
   const mapGfxRef = useRef<PIXI.Graphics | null>(null)
@@ -337,11 +444,11 @@ export function WorldCanvas() {
 
     // 更新智能体
     const seenAgents = new Set<string>()
+    const movementByAgent = new Map((worldState.movements ?? []).map((movement) => [movement.agent_id, movement.path]))
     for (const agent of worldState.agents) {
       seenAgents.add(agent.id)
       // pos[0] → 行（垂直/Y），pos[1] → 列（水平/X），与后端 map.grid[x][y] 一致
-      const sx = agent.pos[1] * CELL + CELL / 2
-      const sy = agent.pos[0] * CELL + CELL / 2
+      const finalPoint = cellCenter(agent.pos)
       const color = agentColor(agent.id)
 
       if (!agentGfx.has(agent.id)) {
@@ -358,19 +465,44 @@ export function WorldCanvas() {
         label.anchor.set(0.5, 1)
         agentLayer.addChild(body)
         agentLayer.addChild(label)
-        agentGfx.set(agent.id, { body, label })
+        agentGfx.set(agent.id, {
+          body,
+          label,
+          x: finalPoint.x,
+          y: finalPoint.y,
+          animationId: 0,
+        })
       }
 
-      const { body, label } = agentGfx.get(agent.id)!
+      const gfx = agentGfx.get(agent.id)!
       // 在建筑内或睡觉中的智能体不在画布上单独渲染
       const hidden = !!agent.inside_building_id || agent.sleeping
-      body.visible = !hidden
-      label.visible = !hidden
+      gfx.body.visible = !hidden
+      gfx.label.visible = !hidden
       if (!hidden) {
-        body.clear()
-        body.circle(sx, sy, 9).fill(color)
-        // 标签放在圆圈上方 11px，留出圆形半径 + 2px 间距
-        label.position.set(sx, sy - 11)
+        const movementPath = movementByAgent.get(agent.id)
+        if (movementPath && movementPath.length > 1) {
+          animateAgentAlongPath(gfx, movementPath, color, () => {
+            const selGfx = selectionGfxRef.current
+            const currentWorldState = useSimStore.getState().worldState
+            const currentSelectedAgentId = useSimStore.getState().selectedAgentId
+            const currentSelectedObjectId = useSimStore.getState().selectedObjectId
+            if (selGfx && currentWorldState && currentSelectedAgentId === agent.id) {
+              drawSelection(
+                selGfx,
+                currentWorldState,
+                currentSelectedAgentId,
+                currentSelectedObjectId,
+                agentGfxRef.current,
+              )
+            }
+          })
+        } else {
+          gfx.animationId += 1
+          drawAgentAt(gfx, finalPoint.x, finalPoint.y, color)
+        }
+      } else {
+        gfx.animationId += 1
       }
     }
     // 清除服务端已不存在的智能体
@@ -390,35 +522,7 @@ export function WorldCanvas() {
     const selGfx = selectionGfxRef.current
     if (!selGfx || !worldState) return
 
-    selGfx.clear()
-
-    // 智能体选中：半透明观测范围圆 + 黄色描边
-    if (selectedAgentId) {
-      const agent = worldState.agents.find((a) => a.id === selectedAgentId)
-      if (agent) {
-        const sx = agent.pos[1] * CELL + CELL / 2
-        const sy = agent.pos[0] * CELL + CELL / 2
-        const r = OBSERVATION_RADIUS * CELL
-
-        selGfx.circle(sx, sy, r).fill({ color: 0xffffff, alpha: 0.05 })
-        selGfx.circle(sx, sy, r).stroke({ color: 0xffff00, width: 1, alpha: 0.4 })
-        selGfx.circle(sx, sy, 9).stroke({ color: 0xffff00, width: 2 })
-      }
-    }
-
-    // 物品选中：建筑用全格描边，食物用小方块描边
-    if (selectedObjectId) {
-      const obj = worldState.objects.find((o) => o.id === selectedObjectId)
-      if (obj) {
-        const sx = obj.pos[1] * CELL
-        const sy = obj.pos[0] * CELL
-        if (BUILDING_KINDS.has(obj.kind)) {
-          selGfx.rect(sx, sy, CELL, CELL).stroke({ color: 0xffff00, width: 2 })
-        } else {
-          selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
-        }
-      }
-    }
+    drawSelection(selGfx, worldState, selectedAgentId, selectedObjectId, agentGfxRef.current)
   }, [worldState, selectedAgentId, selectedObjectId])
 
   const canvasWidth = (worldState?.map_size[0] ?? 25) * CELL

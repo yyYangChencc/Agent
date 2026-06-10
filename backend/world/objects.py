@@ -48,7 +48,7 @@ class food(Interactable):
 
 
 class building(Interactable):
-    """场景中的建筑，作为可交互物品占据地图格位。具体交互动作（如 work）后续接入。"""
+    """场景中的建筑，作为可交互物品占据地图格位。进入建筑后由世界循环自动触发 interact。"""
 
     def __init__(self, id: str, position: list, world):
         # 建筑无数量属性，num 固定为 None（前端按"无限"渲染，不会因 num<=0 而隐藏）
@@ -57,7 +57,6 @@ class building(Interactable):
         self.occupants: list[str] = []
 
     def interact(self, agent) -> str:
-        # 占位实现：等待 work 动作系统接入后再扩展
         return f"与建筑 {self.id} 互动（暂未实现具体效果）"
 
     def enter(self, agent) -> str:
@@ -77,7 +76,7 @@ class building(Interactable):
     
     
 class company(building):
-    """公司：建筑子类，供智能体工作赚钱。具体交互效果待 work 动作接入后实现。"""
+    """公司：建筑子类，智能体进入并停留时自动获得工作效果。"""
 
     def __init__(self, id: str, position: list, world, salary=10):
         super().__init__(id, position, world)
@@ -90,7 +89,7 @@ class company(building):
         return f"在公司 {self.id} 工作，获得 {self.salary} 元工资，消耗 10 relax"
     
     def get_desc(self) -> str:
-        return f"ID: {self.id}，类别: {self.kind}，功能：工作赚钱，每次工作获得 {self.salary} 元工资"
+        return f"ID: {self.id}，类别: {self.kind}，功能：进入并停留时自动获得工资，每次获得 {self.salary} 元"
 
 class bed(Interactable):
     """床：可交互物品，供智能体休息恢复 relax。"""
@@ -125,7 +124,7 @@ class bed(Interactable):
         return f"ID: {self.id}，类别: {self.kind}，功能：休息恢复，每张床只能同时供 1 个智能体使用，当前空闲床位 {self.free_num}"
 
 class food_shop(building):
-    """食品店：建筑子类，供智能体购买食物补充 satiety。具体交互效果待购买动作接入后实现。"""
+    """食品店：建筑子类，智能体进入并停留时自动补充 satiety。"""
 
     def __init__(self, id: str, position: list, world,food_num=10, provide=2, price=5):
         super().__init__(id, position, world)
@@ -143,11 +142,11 @@ class food_shop(building):
         return f"在食品店 {self.id}"
 
     def get_desc(self) -> str:
-        return f"ID: {self.id}，类别: {self.kind}，功能：购买食物，每次购买花费 {self.price} 元，提供 {self.provide} 饱腹感，剩余商品 {self.food_num}"
+        return f"ID: {self.id}，类别: {self.kind}，功能：进入并停留时自动补充饱腹度，每次花费 {self.price} 元，提供 {self.provide} 饱腹感，剩余商品 {self.food_num}"
 
 
 class playground(building):
-    """游乐场：建筑子类，供智能体放松恢复 relax。具体交互效果待娱乐动作接入后实现。"""
+    """游乐场：建筑子类，智能体进入并停留时自动恢复 relax。"""
 
     def __init__(self, id: str, position: list, world,provide=10,price=3):
         super().__init__(id, position, world)

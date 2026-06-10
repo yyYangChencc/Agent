@@ -7,6 +7,12 @@ class AgentConfig:
     # LLM
     llm_model: str = "gpt-5.5"
     embedding_model: str = "text-embedding-3-small"
+    llm_timeout_seconds: float = 30.0
+    llm_connect_timeout_seconds: float = 5.0
+    llm_max_retries: int = 0
+    embedding_timeout_seconds: float = 15.0
+    embedding_connect_timeout_seconds: float = 5.0
+    embedding_max_retries: int = 0
 
     # World
     observation_radius: int = 5

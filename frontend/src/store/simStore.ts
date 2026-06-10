@@ -8,7 +8,7 @@ export interface AgentState {
   emotion: string
   task: string
   current_focus: string       // micro-reflect 更新的当前策略焦点
-  salary: number              // 工资：参与 work 动作时获得的 money 增量
+  salary: number              // 工资：公司自动交互时获得的 money 增量
   satisfaction: Record<string, number>            // 客观需求，0→1
   urgency: Record<string, number>          // 主观急迫度，1→0
   satisfaction_threshold: Record<string, number> // 任务完成阈值
@@ -95,10 +95,16 @@ export interface PostState {
   opinion_index: number
 }
 
+export interface MovementState {
+  agent_id: string
+  path: MapPosition[]
+}
+
 export interface WorldState {
   time: number
   map_size: [number, number]
   map_design: MapDesignState | null
+  movements: MovementState[]
   agents: AgentState[]
   objects: ObjectState[]
   posts: PostState[]

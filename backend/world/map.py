@@ -101,7 +101,7 @@ DEFAULT_REGIONS = [
         "bounds": [0, 15, 8, 24],
         "label_pos": [1, 16],
         "color": "#f59e0b",
-        "description": "购买食物的区域，包含 shop_1 和 shop_2。",
+        "description": "补充食物的区域，进入 shop_1 或 shop_2 后会自动交互。",
     },
     {
         "id": "central_food_area",

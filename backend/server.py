@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,9 +13,12 @@ from fastapi.staticfiles import StaticFiles
 
 from default_scenario import build_default_runtime
 from persona.logger import setup_logging
+from persona.logger import get_logger
 from persona.runtime import SimulationRuntime
 from persona.history_recorder import HistoryRecorder
 from world.serializer import snapshot
+
+logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # 全局运行时状态
@@ -69,22 +73,45 @@ async def broadcast(msg: dict) -> None:
 # 仿真步进逻辑
 # ---------------------------------------------------------------------------
 
-async def do_step() -> None:
+async def do_step() -> float:
     """执行 world.astep()，完成后广播最新状态。
 
     world.astep() 使用 AsyncOpenAI 实现真正异步 I/O，
     LLM 调用期间释放事件循环，不会阻塞 WebSocket 心跳。
     """
+    start = time.perf_counter()
     await rt.world.astep()
-    await broadcast({"type": "tick", "state": snapshot(rt.world, rt.platform)})
+    world_elapsed = time.perf_counter() - start
+
+    snapshot_start = time.perf_counter()
+    state = snapshot(rt.world, rt.platform)
+    snapshot_elapsed = time.perf_counter() - snapshot_start
+
+    broadcast_start = time.perf_counter()
+    await broadcast({"type": "tick", "state": state})
+    broadcast_elapsed = time.perf_counter() - broadcast_start
+
+    total_elapsed = time.perf_counter() - start
+    logger.info(
+        "[Perf] tick=%d total=%.3fs world=%.3fs snapshot=%.3fs broadcast=%.3fs clients=%d",
+        rt.world.time,
+        total_elapsed,
+        world_elapsed,
+        snapshot_elapsed,
+        broadcast_elapsed,
+        len(clients),
+    )
+    return total_elapsed
 
 
 async def _sim_loop() -> None:
     """自动步进循环，以 speed 倍率持续执行，直到 running 被置为 False。"""
     while sim_state["running"]:
-        await do_step()
-        # 每步之间等待 1/speed 秒，速度越高间隔越短
-        await asyncio.sleep(1.0 / sim_state["speed"])
+        elapsed = await do_step()
+        target_interval = 1.0 / sim_state["speed"]
+        sleep_seconds = max(0.0, target_interval - elapsed)
+        if sleep_seconds > 0:
+            await asyncio.sleep(sleep_seconds)
 
 
 # ---------------------------------------------------------------------------

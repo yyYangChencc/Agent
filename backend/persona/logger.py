@@ -32,6 +32,8 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs") -> None:
     # Suppress verbose HTTP request logs from the OpenAI client's transport layer
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("openai._base_client").setLevel(logging.WARNING)
 
     logging.getLogger(__name__).info("日志系统已启动，日志文件: %s", log_file)
 

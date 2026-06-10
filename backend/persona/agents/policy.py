@@ -27,6 +27,9 @@ class LLMPolicy(Policy):
     def decide(self, agent: "Agent", observation: str, mem_info) -> str:
         system, user = self.prompt_builder.build(agent, observation, mem_info)
         raw = self.llm.generate(system, user)
+        if not raw.strip():
+            logger.warning("[%s] LLM returned an empty response; skip action this tick", agent.id)
+            return ""
         logger.debug("[%s] LLM 输出: %s", agent.id, raw)
         action, error = self.parser.parse_action_with_error(raw)
 
@@ -52,6 +55,9 @@ class LLMPolicy(Policy):
     async def adecide(self, agent: "Agent", observation: str, mem_info) -> str:
         system, user = self.prompt_builder.build(agent, observation, mem_info)
         raw = await self.llm.agenerate(system, user)
+        if not raw.strip():
+            logger.warning("[%s] LLM returned an empty response; skip action this tick", agent.id)
+            return ""
         logger.debug("[%s] LLM 输出: %s", agent.id, raw)
         action, error = self.parser.parse_action_with_error(raw)
 

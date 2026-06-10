@@ -13,7 +13,7 @@ const OBJECT_META: Record<string, { label: string; desc: string; func: string }>
   building: {
     label: '建筑',
     desc: '场景中的建筑设施，占据完整格位。',
-    func: '具体交互效果由后端对象逻辑决定。',
+    func: '智能体进入建筑后会立即自动交互；停留在建筑内时每个时间步继续自动交互，直到离开。',
   },
   bed: {
     label: '床',
@@ -22,13 +22,13 @@ const OBJECT_META: Record<string, { label: string; desc: string; func: string }>
   },
   food_shop: {
     label: '食品店',
-    desc: '建筑子类，供智能体购买食物补充饱腹度。',
-    func: 'buy 动作的目标；价格、补充量和剩余商品数以对象描述为准。',
+    desc: '建筑子类，供智能体补充饱腹度。',
+    func: '智能体进入并停留时自动补充饱腹度；价格、补充量和剩余商品数以对象描述为准。',
   },
   playground: {
     label: '游乐场',
     desc: '建筑子类，供智能体娱乐恢复放松度。',
-    func: '可通过接近目标触发对象交互；价格和恢复量以对象描述为准。',
+    func: '智能体进入并停留时自动恢复放松度；价格和恢复量以对象描述为准。',
   },
   objects: {
     label: '通用物品',

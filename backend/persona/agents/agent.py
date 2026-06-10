@@ -62,7 +62,7 @@ class Agent:
         self.role: str = role
         self.speaking_style: str = speaking_style
         self.emotion: str = "平静"
-        # 工资：参与 work 动作时每次获得的 money satisfaction 增量（>=0）
+        # 工资：公司自动交互时每次获得的 money satisfaction 增量（>=0）
         self.salary: float = salary
 
         self.opinion: float = config.initial_opinion

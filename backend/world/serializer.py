@@ -35,7 +35,7 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             "emotion": a.emotion,
             "task": a.task,
             "current_focus": a.current_focus,
-            "salary": a.salary,                # 工资：参与 work 动作时获得的 money 增量
+            "salary": a.salary,                # 工资：公司自动交互时获得的 money 增量
             "satisfaction": dict(a.satisfaction),               # 客观满足度：satiety/relax 为 [0,100]，money 无上限
             "urgency": dict(a.urgency),           # 主观急迫度，通常为 [0,1]
             "satisfaction_threshold": dict(a.satisfaction_threshold),  # 任务完成判定线
@@ -93,6 +93,7 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
         "time": world.time,
         "map_size": [world.map.width, world.map.height],
         "map_design": serialize_map_design(getattr(world, "map_design", None)),
+        "movements": list(getattr(world, "movements", [])),
         "agents": agents,
         "objects": objects,
         "posts": posts,
