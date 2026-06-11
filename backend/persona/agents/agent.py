@@ -124,7 +124,9 @@ class Agent:
         if not posts:
             logger.info("[%s] 没有收到任何帖子", self.id)
             return [], f"{self.id}暂时没有收到任何帖子"
-        return posts, "\n".join([post.show() for post in posts])
+        visible_ids = "、".join(str(post.id) for post in posts)
+        posts_text = "\n".join([post.show() for post in posts])
+        return posts, f"当前可互动帖子ID列表：{visible_ids}\n{posts_text}"
 
     def get_post_history(self) -> str:
         return "\n".join([post.show() for post in self.post_history])

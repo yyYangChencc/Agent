@@ -14,6 +14,7 @@ class SocialAgent:
         self.platform = platform
         self.social_policy = social_policy
         self.world = world
+        self._last_seen_posts = []
         self.platform.add_agent(self)
 
     def add_follower(self, follower_id):
@@ -34,7 +35,9 @@ class SocialAgent:
         if len(posts) == 0:
             logger.info("[%s] 没有收到任何帖子", self.id)
             return [], f"{self.id}暂时没有收到任何帖子"
-        return posts, "\n".join([post.show() for post in posts])
+        visible_ids = "、".join(str(post.id) for post in posts)
+        posts_text = "\n".join([post.show() for post in posts])
+        return posts, f"当前可互动帖子ID列表：{visible_ids}\n{posts_text}"
 
     def recall(self, obs):
         return self.mem.retrieve_agent_memories(self.id, obs, n_results=3)
@@ -42,6 +45,7 @@ class SocialAgent:
     def step(self):
         logger.info("[%s] 正在查看帖子...", self.id)
         posts, posts_info = self.receive_post()
+        self._last_seen_posts = posts
         logger.debug("[%s] 帖子内容: %s", self.id, posts_info)
         mem_info = self.recall(posts_info)
         logger.debug("[%s] 相关记忆: %s", self.id, mem_info)

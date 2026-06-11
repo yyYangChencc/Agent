@@ -28,6 +28,7 @@ class Post:
         tag = "[新闻] " if self.is_news else ""
         comments = "\n".join([comment.show() for comment in self.comments_list])
         return f"""
+        帖子ID：{self.id}
         发布时间：{self.time}  发布作者：{self.author_id}
         {tag}帖子内容：{self.content}
         评论：{comments}

@@ -299,6 +299,38 @@ class SocialOperator:
             }
         }
 
+    def _visible_posts_for(self, operator_ID: str):
+        agent = self.platform.get_agent(operator_ID)
+        if agent is None:
+            return []
+        return list(getattr(agent, "_last_seen_posts", []) or [])
+
+    def _resolve_visible_post(self, operator_ID: str, post_id):
+        if isinstance(post_id, bool):
+            logger.warning("[%s] 社交动作失败，post_id 非整数: %r", operator_ID, post_id)
+            return None, None, "post_id 必须是当前可互动帖子ID列表中的整数"
+        if isinstance(post_id, int):
+            normalized_post_id = post_id
+        elif isinstance(post_id, str) and post_id.strip().isdigit():
+            normalized_post_id = int(post_id.strip())
+        else:
+            logger.warning("[%s] 社交动作失败，post_id 非整数: %r", operator_ID, post_id)
+            return None, None, "post_id 必须是当前可互动帖子ID列表中的整数"
+
+        visible_posts = self._visible_posts_for(operator_ID)
+        visible_ids = [post.id for post in visible_posts]
+        post = next((post for post in visible_posts if post.id == normalized_post_id), None)
+        if post is None:
+            visible_text = "、".join(str(pid) for pid in visible_ids) if visible_ids else "无"
+            logger.warning(
+                "[%s] 社交动作失败，帖子 %s 不在当前可互动帖子ID列表中；可互动ID: %s",
+                operator_ID,
+                normalized_post_id,
+                visible_text,
+            )
+            return None, normalized_post_id, f"帖子{normalized_post_id}不在当前可互动帖子ID列表中；可互动ID：{visible_text}"
+        return post, normalized_post_id, None
+
     def send_message(self, operator_ID, content, ID):
         logger.info("[%s] 私信 → %s: %s", operator_ID, ID, content)
         return f"{operator_ID}对{ID}说:{content}"
@@ -314,10 +346,9 @@ class SocialOperator:
         return f"{operator_ID}成功发表了帖子: {content}"
 
     def comment_post(self, operator_ID, post_id, content):
-        post = next((p for p in self.platform.posts if p.id == post_id), None)
-        if not post:
-            logger.warning("[%s] 评论失败，帖子 %s 不存在", operator_ID, post_id)
-            return "帖子不存在"
+        post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
+        if error:
+            return error
         comment_id = f"{post_id}_c{post.comments+1}"
         new_comment = Comment(comment_id, operator_ID, content, time=None)
         post.add_comment(new_comment)
@@ -333,10 +364,9 @@ class SocialOperator:
         return f"{operator_ID}成功评论了帖子 {post_id}: {content}"
 
     def like_post(self, operator_ID, post_id):
-        post = next((p for p in self.platform.posts if p.id == post_id), None)
-        if not post:
-            logger.warning("[%s] 点赞失败，帖子 %s 不存在", operator_ID, post_id)
-            return "帖子不存在"
+        post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
+        if error:
+            return error
         post.add_like(operator_ID)
         agent = self.platform.get_agent(operator_ID)
         if agent is not None and post.author_id != operator_ID:
@@ -355,10 +385,9 @@ class SocialOperator:
         return f"{operator_ID}成功点赞了帖子 {post_id}"
 
     def dislike_post(self, operator_ID, post_id):
-        post = next((p for p in self.platform.posts if p.id == post_id), None)
-        if not post:
-            logger.warning("[%s] 点踩失败，帖子 %s 不存在", operator_ID, post_id)
-            return "帖子不存在"
+        post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
+        if error:
+            return error
         post.add_dislike(operator_ID)
         agent = self.platform.get_agent(operator_ID)
         if agent is not None and post.author_id != operator_ID:
