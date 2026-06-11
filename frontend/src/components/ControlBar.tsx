@@ -17,11 +17,11 @@ export function ControlBar() {
   const tick = worldState?.time ?? 0
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2 bg-gray-800 border-b border-gray-700 text-sm flex-shrink-0">
-      <span className="font-semibold text-gray-200">Agent Sim</span>
-      <span className="text-gray-600">|</span>
+    <div className="flex items-center gap-3 px-4 py-2 bg-[#dde3c3] border-b-4 border-[#25251c] text-sm flex-shrink-0 text-[#243225]">
+      <span className="font-extrabold text-[#243225]">Agent Sim</span>
+      <span className="text-[#6c584c]">|</span>
       {/* 当前仿真时刻，与后端 world.time 同步 */}
-      <span className="text-gray-400 font-mono">t={tick}</span>
+      <span className="text-[#3f4f37] font-mono">t={tick}</span>
       {/* 连接状态指示灯：绿色=已连接，红色=断开 */}
       <span
         className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-500'}`}
@@ -35,8 +35,8 @@ export function ControlBar() {
         onClick={toggleMapRegions}
         className={`px-3 py-1 rounded text-xs ${
           showMapRegions
-            ? 'bg-purple-600 hover:bg-purple-500 text-white'
-            : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+            ? 'bg-[#f8c86b] hover:bg-[#ffd77f] text-[#243225]'
+            : 'bg-[#f8f5d8] hover:bg-[#f8c86b] text-[#243225]'
         }`}
       >
         {showMapRegions ? '隐藏区域' : '显示区域'}
@@ -46,7 +46,7 @@ export function ControlBar() {
       <button
         onClick={() => sendCmd({ cmd: 'step' })}
         disabled={running || !connected}
-        className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 disabled:cursor-not-allowed text-gray-200 text-xs"
+        className="px-3 py-1 rounded bg-[#f8f5d8] hover:bg-[#f8c86b] disabled:opacity-40 disabled:cursor-not-allowed text-[#243225] text-xs"
       >
         单步
       </button>
@@ -57,8 +57,8 @@ export function ControlBar() {
         disabled={!connected}
         className={`px-3 py-1 rounded text-xs disabled:opacity-40 disabled:cursor-not-allowed ${
           running
-            ? 'bg-yellow-600 hover:bg-yellow-500 text-white'
-            : 'bg-green-700 hover:bg-green-600 text-white'
+            ? 'bg-[#f8c86b] hover:bg-[#ffd77f] text-[#243225]'
+            : 'bg-[#6aa96f] hover:bg-[#7fbf84] text-[#f8f5d8]'
         }`}
       >
         {running ? '暂停' : '继续'}
@@ -68,12 +68,12 @@ export function ControlBar() {
       <button
         onClick={() => sendCmd({ cmd: 'reset' })}
         disabled={!connected}
-        className="px-3 py-1 rounded bg-red-800 hover:bg-red-700 text-white text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+        className="px-3 py-1 rounded bg-[#9b5b43] hover:bg-[#b66b4f] text-[#f8f5d8] text-xs disabled:opacity-40 disabled:cursor-not-allowed"
       >
         重置
       </button>
 
-      <span className="text-gray-600">|</span>
+      <span className="text-[#6c584c]">|</span>
 
       {/* 速度按钮：当前倍率高亮，点击后后端调整 asyncio.sleep 间隔 */}
       {SPEEDS.map((s) => (
@@ -83,8 +83,8 @@ export function ControlBar() {
           disabled={!connected}
           className={`px-2 py-1 rounded text-xs disabled:opacity-40 disabled:cursor-not-allowed ${
             speed === s
-              ? 'bg-blue-600 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+              ? 'bg-[#4f8fc0] text-[#f8f5d8]'
+              : 'bg-[#f8f5d8] hover:bg-[#f8c86b] text-[#243225]'
           }`}
         >
           {s}×

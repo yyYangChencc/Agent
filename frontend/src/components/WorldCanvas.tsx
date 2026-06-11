@@ -1,24 +1,36 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as PIXI from 'pixi.js'
 import { useSimStore } from '../store/simStore'
 import type { MapBounds, WorldState } from '../store/simStore'
 
-// 每格像素大小，画布尺寸由后端 map_size 决定
-const CELL = 24
+// 每格像素大小，沿用 D:/2d 的 32px 像素瓦片风格，画布尺寸由后端 map_size 决定
+const CELL = 32
 // 智能体圆形颜色池，按 ID 哈希取色，保证同一智能体颜色稳定
-const AGENT_COLORS = [0x4f8ef7, 0xe74c6f, 0x2ecc71, 0xf39c12, 0x9b59b6]
+const AGENT_COLORS = [0xf6d365, 0xff8fa3, 0x76e4f7, 0xc3f584, 0xb69cff]
 // 与后端 observer.py 保持一致的观测半径（格数）
 const OBSERVATION_RADIUS = 5
 const MOVE_STEP_MS = 180
+const LAYER_Z = {
+  map: 0,
+  grid: 10,
+  mapLabels: 20,
+  objects: 100,
+  agents: 200,
+  selection: 300,
+}
+
+type PixelTileKind = 'grass' | 'path' | 'water' | 'floor' | 'wall' | 'garden'
+
+const TILE_COLORS: Record<PixelTileKind, number> = {
+  grass: 0x7fb069,
+  path: 0xd7b36a,
+  water: 0x4f8fc0,
+  floor: 0xbd9560,
+  wall: 0x6c584c,
+  garden: 0x609b57,
+}
 
 const BUILDING_KINDS = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
-const BUILDING_COLORS: Record<string, number> = {
-  bed: 0x8b5cf6,
-  company: 0x3b82f6,
-  food_shop: 0xf59e0b,
-  playground: 0x10b981,
-  building: 0x6b7280,
-}
 const BUILDING_LABELS: Record<string, string> = {
   bed: '床',
   company: '公',
@@ -28,11 +40,28 @@ const BUILDING_LABELS: Record<string, string> = {
 }
 
 type AgentGfx = {
-  body: PIXI.Graphics
+  body: PIXI.Sprite
   label: PIXI.Text
   x: number
   y: number
   animationId: number
+}
+
+let agentTexture: PIXI.Texture | null = null
+
+const LABEL_STYLE = {
+  fill: '#fff7cf',
+  fontFamily: 'monospace',
+  fontSize: 10,
+  stroke: { color: '#25251c', width: 3 },
+}
+
+const BADGE_STYLE = {
+  fontFamily: 'monospace',
+  fontSize: 9,
+  fill: '#fff7cf',
+  fontWeight: 'bold' as const,
+  stroke: { color: '#25251c', width: 3 },
 }
 
 function colorFromHex(value: string, fallback: number): number {
@@ -57,6 +86,90 @@ function cellCenter(pos: [number, number]) {
     x: pos[1] * CELL + CELL / 2,
     y: pos[0] * CELL + CELL / 2,
   }
+}
+
+function inferTileKind(row: number, col: number, worldState: WorldState): PixelTileKind {
+  const design = worldState.map_design
+  if (design) {
+    for (const road of design.roads) {
+      if (road.cells.some(([roadRow, roadCol]) => roadRow === row && roadCol === col)) {
+        return 'path'
+      }
+    }
+
+    const terrain = [...design.terrain].reverse().find((item) => {
+      const [rowStart, colStart, rowEnd, colEnd] = item.bounds
+      return row >= rowStart && row <= rowEnd && col >= colStart && col <= colEnd
+    })
+    if (terrain?.kind === 'plaza' || terrain?.kind === 'office_ground') return 'floor'
+    if (terrain?.kind === 'park') return 'garden'
+    if (terrain?.kind === 'yard') return 'grass'
+  }
+
+  return 'grass'
+}
+
+function drawPixelTile(
+  gfx: PIXI.Graphics,
+  row: number,
+  col: number,
+  kind: PixelTileKind,
+) {
+  const x = col * CELL
+  const y = row * CELL
+  const color = TILE_COLORS[kind]
+  gfx.rect(x, y, CELL, CELL).fill(color)
+  gfx.rect(x, y, CELL, 2).fill({ color: 0x000000, alpha: 0.08 })
+  gfx.rect(x, y, 2, CELL).fill({ color: 0x000000, alpha: 0.06 })
+
+  if (kind === 'grass' && (row * 7 + col * 13) % 5 === 0) {
+    gfx.rect(x + 20, y + 8, 4, 10).fill(0x5b8f4b)
+  }
+  if (kind === 'garden') {
+    gfx.rect(x + 6, y + 6, 20, 4).fill(0x4d7d45)
+    gfx.rect(x + 6, y + 16, 20, 4).fill(0x4d7d45)
+  }
+  if (kind === 'path' || kind === 'floor') {
+    gfx.rect(x + 4, y + 4, 4, 4).fill({ color: 0xffffff, alpha: 0.08 })
+    gfx.rect(x + 22, y + 20, 5, 4).fill({ color: 0x000000, alpha: 0.06 })
+  }
+  if (kind === 'water') {
+    gfx.rect(x + 4, y + 10, 22, 3).fill({ color: 0xa6d4e8, alpha: 0.55 })
+    gfx.rect(x + 10, y + 21, 16, 3).fill({ color: 0xa6d4e8, alpha: 0.35 })
+  }
+}
+
+function makeAgentTexture(): PIXI.Texture {
+  if (agentTexture) return agentTexture
+
+  const canvas = document.createElement('canvas')
+  canvas.width = 16
+  canvas.height = 20
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error('canvas_context_unavailable')
+  }
+
+  context.imageSmoothingEnabled = false
+  context.fillStyle = '#25251c'
+  context.fillRect(5, 1, 6, 4)
+  context.fillStyle = '#f2c39a'
+  context.fillRect(4, 4, 8, 7)
+  context.fillStyle = '#ffffff'
+  context.fillRect(5, 7, 2, 2)
+  context.fillRect(9, 7, 2, 2)
+  context.fillStyle = '#25251c'
+  context.fillRect(5, 8, 2, 1)
+  context.fillRect(9, 8, 2, 1)
+  context.fillStyle = '#ffffff'
+  context.fillRect(4, 11, 8, 7)
+  context.fillStyle = '#4b5f9f'
+  context.fillRect(4, 18, 3, 2)
+  context.fillRect(9, 18, 3, 2)
+
+  agentTexture = PIXI.Texture.from(canvas)
+  agentTexture.source.scaleMode = 'nearest'
+  return agentTexture
 }
 
 function mapSignature(worldState: WorldState, showMapRegions: boolean): string {
@@ -88,11 +201,10 @@ function drawMapLayers(
   labels.removeChildren().forEach((child) => child.destroy())
 
   if (worldState.map_design) {
-    for (const terrain of worldState.map_design.terrain) {
-      const rect = boundsToRect(terrain.bounds)
-      mapGfx
-        .rect(rect.x, rect.y, rect.width, rect.height)
-        .fill({ color: colorFromHex(terrain.color, 0x203a2f), alpha: terrain.alpha })
+    for (let row = 0; row < mapRows; row++) {
+      for (let col = 0; col < mapCols; col++) {
+        drawPixelTile(mapGfx, row, col, inferTileKind(row, col, worldState))
+      }
     }
 
     if (showMapRegions) {
@@ -108,23 +220,18 @@ function drawMapLayers(
 
         const label = new PIXI.Text({
           text: region.name,
-          style: { fontSize: 10, fill: 0xe5e7eb, fontWeight: 'bold' },
+          style: { fontSize: 10, fill: 0xe5e7eb, fontWeight: 'bold' as const },
         })
         label.position.set(region.label_pos[1] * CELL + 4, region.label_pos[0] * CELL + 4)
         labels.addChild(label)
       }
     }
-
-    for (const road of worldState.map_design.roads) {
-      const color = colorFromHex(road.color, 0x8a7356)
-      for (const [row, col] of road.cells) {
-        mapGfx
-          .rect(col * CELL, row * CELL, CELL, CELL)
-          .fill({ color, alpha: 0.75 })
+  } else {
+    for (let row = 0; row < mapRows; row++) {
+      for (let col = 0; col < mapCols; col++) {
+        drawPixelTile(mapGfx, row, col, 'grass')
       }
     }
-  } else {
-    mapGfx.rect(0, 0, pixelWidth, pixelHeight).fill(0x1a1a2e)
   }
 
   for (let col = 0; col <= mapCols; col++) {
@@ -133,15 +240,70 @@ function drawMapLayers(
   for (let row = 0; row <= mapRows; row++) {
     grid.moveTo(0, row * CELL).lineTo(pixelWidth, row * CELL)
   }
-  grid.stroke({ color: 0x2a2a4a, width: 1 })
+  grid.stroke({ color: 0x25251c, width: 1, alpha: 0.18 })
 }
 
 function drawAgentAt(gfx: AgentGfx, x: number, y: number, color: number) {
   gfx.x = x
   gfx.y = y
-  gfx.body.clear()
-  gfx.body.circle(x, y, 9).fill(color)
-  gfx.label.position.set(x, y - 11)
+  gfx.body.position.set(x, y)
+  gfx.body.tint = color
+  gfx.label.position.set(x, y - 24)
+}
+
+function drawPixelObject(
+  gfx: PIXI.Graphics,
+  kind: string,
+  x: number,
+  y: number,
+) {
+  if (kind === 'bed') {
+    gfx.rect(x + 5, y + 6, 22, 20).fill(0x5d6ab1)
+    gfx.rect(x + 8, y + 8, 16, 7).fill(0xf6e6c8)
+    gfx.rect(x + 5, y + 22, 22, 4).fill(0x3e477c)
+    return
+  }
+
+  if (kind === 'food_shop') {
+    gfx.rect(x + 4, y + 10, 24, 18).fill(0xc97b45)
+    gfx.rect(x + 3, y + 6, 26, 7).fill(0xf0c15f)
+    gfx.rect(x + 8, y + 17, 7, 11).fill(0x5b3a29)
+    gfx.rect(x + 18, y + 15, 6, 5).fill(0xf8f5d8)
+    return
+  }
+
+  if (kind === 'company') {
+    gfx.rect(x + 5, y + 5, 22, 23).fill(0x637c9b)
+    gfx.rect(x + 9, y + 9, 5, 5).fill(0xdce6ef)
+    gfx.rect(x + 18, y + 9, 5, 5).fill(0xdce6ef)
+    gfx.rect(x + 13, y + 20, 6, 8).fill(0x344354)
+    return
+  }
+
+  if (kind === 'playground') {
+    gfx.rect(x + 5, y + 21, 22, 4).fill(0x6c584c)
+    gfx.rect(x + 8, y + 9, 4, 13).fill(0x4f9d72)
+    gfx.rect(x + 20, y + 9, 4, 13).fill(0x4f9d72)
+    gfx.rect(x + 7, y + 8, 18, 3).fill(0xf8c86b)
+    return
+  }
+
+  if (kind === 'building') {
+    gfx.rect(x + 5, y + 8, 22, 20).fill(0x8a5a33)
+    gfx.rect(x + 4, y + 5, 24, 6).fill(0xc28f5c)
+    gfx.rect(x + 13, y + 18, 6, 10).fill(0x4b3223)
+    return
+  }
+
+  if (kind === 'food') {
+    gfx.rect(x + 10, y + 12, 12, 12).fill(0x4d9f45)
+    gfx.rect(x + 14, y + 8, 4, 5).fill(0x2d6d33)
+    gfx.rect(x + 13, y + 15, 4, 4).fill(0x8fd46a)
+    return
+  }
+
+  gfx.rect(x + 6, y + 8, 20, 18).fill(0x9b6b43)
+  gfx.rect(x + 8, y + 10, 16, 4).fill(0xc28f5c)
 }
 
 function animateAgentAlongPath(
@@ -209,7 +371,7 @@ function drawSelection(
 
       selGfx.circle(sx, sy, r).fill({ color: 0xffffff, alpha: 0.05 })
       selGfx.circle(sx, sy, r).stroke({ color: 0xffff00, width: 1, alpha: 0.4 })
-      selGfx.circle(sx, sy, 9).stroke({ color: 0xffff00, width: 2 })
+      selGfx.rect(sx - 12, sy - 24, 24, 30).stroke({ color: 0xf8c86b, width: 2 })
     }
   }
 
@@ -219,9 +381,9 @@ function drawSelection(
       const sx = obj.pos[1] * CELL
       const sy = obj.pos[0] * CELL
       if (BUILDING_KINDS.has(obj.kind)) {
-        selGfx.rect(sx, sy, CELL, CELL).stroke({ color: 0xffff00, width: 2 })
+        selGfx.rect(sx + 3, sy + 3, CELL - 6, CELL - 6).stroke({ color: 0xf8c86b, width: 2 })
       } else {
-        selGfx.rect(sx + 4, sy + 4, 16, 16).stroke({ color: 0xffff00, width: 2 })
+        selGfx.rect(sx + 7, sy + 7, 18, 18).stroke({ color: 0xf8c86b, width: 2 })
       }
     }
   }
@@ -236,6 +398,7 @@ function agentColor(id: string): number {
 
 export function WorldCanvas() {
   const containerRef = useRef<HTMLDivElement>(null)
+  const [pixiReadyVersion, setPixiReadyVersion] = useState(0)
   // 用 ref 持有 Pixi app 实例，避免重渲染时重复初始化
   const appRef = useRef<PIXI.Application | null>(null)
   // 按智能体 ID 缓存 Graphics/Text 对象，tick 时只更新坐标，不重建
@@ -268,14 +431,14 @@ export function WorldCanvas() {
     let cancelled = false
     let initialized = false
     const app = new PIXI.Application()
-    appRef.current = app
 
     // Pixi v8 采用异步 init，需要 await 后才能操作 canvas
     app.init({
       width: 600,
       height: 600,
-      background: 0x1a1a2e,
-      antialias: true,
+      background: 0x141714,
+      antialias: false,
+      resolution: window.devicePixelRatio || 1,
     }).then(() => {
       if (cancelled) {
         // cleanup 先于 init 完成时，在这里安全销毁
@@ -291,11 +454,11 @@ export function WorldCanvas() {
       const mapLabels = new PIXI.Container()
       const objectLayer = new PIXI.Container()
       const agentLayer = new PIXI.Container()
-      mapGfx.zIndex = 0
-      grid.zIndex = 10
-      mapLabels.zIndex = 20
-      objectLayer.zIndex = 100
-      agentLayer.zIndex = 200
+      mapGfx.zIndex = LAYER_Z.map
+      grid.zIndex = LAYER_Z.grid
+      mapLabels.zIndex = LAYER_Z.mapLabels
+      objectLayer.zIndex = LAYER_Z.objects
+      agentLayer.zIndex = LAYER_Z.agents
       mapGfxRef.current = mapGfx
       gridGfxRef.current = grid
       mapLabelContainerRef.current = mapLabels
@@ -315,9 +478,12 @@ export function WorldCanvas() {
 
       // 选中高亮层在最上方，保证描边和观测范围不会被地图或对象遮挡
       const selGfx = new PIXI.Graphics()
-      selGfx.zIndex = 300
+      selGfx.zIndex = LAYER_Z.selection
       selectionGfxRef.current = selGfx
       app.stage.addChild(selGfx)
+      app.stage.sortChildren()
+      appRef.current = app
+      setPixiReadyVersion((version) => version + 1)
     })
 
     return () => {
@@ -343,21 +509,20 @@ export function WorldCanvas() {
     const app = appRef.current
     if (!app || !worldState) return
 
-    const stage = app.stage
     const agentGfx = agentGfxRef.current
     const objectGfx = objectGfxRef.current
-    const objectLayer = objectLayerRef.current ?? stage
-    const agentLayer = agentLayerRef.current ?? stage
+    const objectLayer = objectLayerRef.current
+    const agentLayer = agentLayerRef.current
 
     const mapGfx = mapGfxRef.current
     const gridGfx = gridGfxRef.current
     const mapLabels = mapLabelContainerRef.current
-    if (mapGfx && gridGfx && mapLabels) {
-      const signature = mapSignature(worldState, showMapRegions)
-      if (signature !== mapSignatureRef.current) {
-        drawMapLayers(worldState, showMapRegions, app, mapGfx, gridGfx, mapLabels)
-        mapSignatureRef.current = signature
-      }
+    if (!objectLayer || !agentLayer || !mapGfx || !gridGfx || !mapLabels) return
+
+    const signature = mapSignature(worldState, showMapRegions)
+    if (signature !== mapSignatureRef.current) {
+      drawMapLayers(worldState, showMapRegions, app, mapGfx, gridGfx, mapLabels)
+      mapSignatureRef.current = signature
     }
 
     // 更新场景物体（食物等）
@@ -382,12 +547,12 @@ export function WorldCanvas() {
         let badge: PIXI.Text | null = null
         let kindLabel: PIXI.Text | null = null
         if (BUILDING_KINDS.has(obj.kind)) {
-          badge = new PIXI.Text({ text: '', style: { fontSize: 8, fill: 0xffffff } })
+          badge = new PIXI.Text({ text: '', style: BADGE_STYLE })
           badge.anchor.set(1, 0)
           objectLayer.addChild(badge)
           kindLabel = new PIXI.Text({
             text: BUILDING_LABELS[obj.kind] ?? obj.kind,
-            style: { fontSize: 10, fill: 0xffffff, fontWeight: 'bold' },
+            style: BADGE_STYLE,
           })
           kindLabel.anchor.set(0.5, 0.5)
           objectLayer.addChild(kindLabel)
@@ -399,14 +564,7 @@ export function WorldCanvas() {
       // num <= 0 表示物品已耗尽，隐藏方块而非移除，保留对象引用
       const hidden = obj.num !== null && obj.num <= 0
       if (!hidden) {
-        if (BUILDING_KINDS.has(obj.kind)) {
-          // 建筑：按 kind 填充不同颜色的整格
-          const color = BUILDING_COLORS[obj.kind] ?? 0x6b7280
-          g.rect(sx, sy, CELL, CELL).fill(color)
-        } else {
-          // 默认（含 food）：绿色小方块
-          g.rect(sx + 6, sy + 6, 12, 12).fill(0x2ecc71)
-        }
+        drawPixelObject(g, obj.kind, sx, sy)
       }
       // 更新种类标签（格子中央）
       if (kindLabel) {
@@ -452,7 +610,9 @@ export function WorldCanvas() {
       const color = agentColor(agent.id)
 
       if (!agentGfx.has(agent.id)) {
-        const body = new PIXI.Graphics()
+        const body = new PIXI.Sprite(makeAgentTexture())
+        body.anchor.set(0.5, 0.72)
+        body.scale.set(2)
         // Pixi v8 必须显式设置 eventMode 才能接收指针事件
         body.eventMode = 'static'
         body.cursor = 'pointer'
@@ -460,7 +620,7 @@ export function WorldCanvas() {
           // 再次点击已选中智能体则取消选中
           selectAgent(agent.id === useSimStore.getState().selectedAgentId ? null : agent.id)
         })
-        const label = new PIXI.Text({ text: agent.id, style: { fontSize: 8, fill: 0xffffff } })
+        const label = new PIXI.Text({ text: agent.id, style: LABEL_STYLE })
         // anchor(0.5, 1) 使文字底部中心对齐到目标坐标，便于放在圆圈正上方
         label.anchor.set(0.5, 1)
         agentLayer.addChild(body)
@@ -515,7 +675,8 @@ export function WorldCanvas() {
         agentGfx.delete(id)
       }
     }
-  }, [worldState, selectAgent, showMapRegions])
+    app.stage.sortChildren()
+  }, [worldState, selectAgent, showMapRegions, pixiReadyVersion])
 
   // 选中状态变化时单独刷新高亮层，避免重绘所有智能体
   useEffect(() => {

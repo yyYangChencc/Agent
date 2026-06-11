@@ -48,10 +48,11 @@ class Reflect:
         ans = self.task_reset(agent)
         if ans == 1:
             completed_task = agent.task
+            completed_need_key = agent.task_urgency_key
             agent.set_task("none")
             agent.current_focus = ""
             agent._prev_task_urgency = None
-            agent.flush_trajectory(completed_task)
+            agent.flush_trajectory(completed_task, completed_need_key)
 
     def _has_unsatisfied_satisfaction(self, agent: "Agent") -> bool:
         """判断智能体是否有任何 satisfaction 未满足（低于对应阈值）。"""
@@ -105,7 +106,14 @@ class Reflect:
 
         if insight_match:
             insight = insight_match.group(1).strip()
-            agent.remember(insight, type="micro_reflection")
+            agent.remember(
+                insight,
+                memory_type="reflective",
+                task=agent.task,
+                need_key=agent.task_urgency_key,
+                importance=0.65,
+                confidence=0.6,
+            )
             logger.info("[%s] 微反思洞察: %s", agent.id, insight)
 
         if focus_match:
@@ -124,7 +132,14 @@ class Reflect:
 
         if insight_match:
             insight = insight_match.group(1).strip()
-            await agent.aremember(insight, type="micro_reflection")
+            await agent.aremember(
+                insight,
+                memory_type="reflective",
+                task=agent.task,
+                need_key=agent.task_urgency_key,
+                importance=0.65,
+                confidence=0.6,
+            )
             logger.info("[%s] 微反思洞察: %s", agent.id, insight)
 
         if focus_match:
@@ -158,10 +173,11 @@ class Reflect:
         ans = self.task_reset(agent)
         if ans == 1:
             completed_task = agent.task
+            completed_need_key = agent.task_urgency_key
             agent.set_task("none")
             agent.current_focus = ""
             agent._prev_task_urgency = None
-            await agent.aflush_trajectory(completed_task)
+            await agent.aflush_trajectory(completed_task, completed_need_key)
 
     def task_reset(self, agent: "Agent") -> int:
         urgency_key = agent.task_urgency_key

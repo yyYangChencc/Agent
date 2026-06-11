@@ -1,3 +1,5 @@
+import heapq
+
 from tools.base import Tool
 from social_sys.post.post import Post
 from social_sys.post.comment import Comment
@@ -42,7 +44,7 @@ class Operator:
         self.world = world
         self.tool_specs = {
             "move": {
-                "description": "自动向目标坐标 (x, y) 寻路移动，每次可前进多格，但不会超过观测半径大小，自动避开障碍物",
+                "description": "自动向目标坐标 (x, y) 使用网格最短路寻路移动，每次可前进多格，但不会超过观测半径大小，自动避开障碍物并优先利用道路",
                 "args": {"x": int, "y": int},
                 "returns": str,
                 "constraint": "若目标坐标(x,y)存在障碍物，将停在距(x,y)最近的可达位置；若周围路径全被阻挡则原地不动"
@@ -89,90 +91,197 @@ class Operator:
         agent = self.world.agents[operator_ID]
         return agent.social_step()
 
+    @staticmethod
+    def _distance_sq(a: tuple[int, int], b: tuple[int, int]) -> int:
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+    @staticmethod
+    def _manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+    def _road_cells(self) -> set[tuple[int, int]]:
+        design = getattr(self.world, "map_design", None)
+        if not isinstance(design, dict):
+            return set()
+        roads = design.get("roads", [])
+        cells: set[tuple[int, int]] = set()
+        for road in roads:
+            for row, col in road.get("cells", []):
+                if 0 <= row < self.world.map.height and 0 <= col < self.world.map.width:
+                    cells.add((row, col))
+        return cells
+
+    def _is_walkable_cell(self, pos: tuple[int, int], start: tuple[int, int]) -> bool:
+        row, col = pos
+        if row < 0 or col < 0 or row >= self.world.map.height or col >= self.world.map.width:
+            return False
+        return pos == start or self.world.map.is_empty(row, col)
+
+    def _ordered_neighbors(self, pos: tuple[int, int], target: tuple[int, int]) -> list[tuple[int, int]]:
+        row, col = pos
+        neighbors = [
+            (row - 1, col),
+            (row + 1, col),
+            (row, col - 1),
+            (row, col + 1),
+        ]
+        neighbors.sort(key=lambda cell: (self._manhattan(cell, target), cell[0], cell[1]))
+        return neighbors
+
+    def _movement_cost(self, pos: tuple[int, int], road_cells: set[tuple[int, int]]) -> float:
+        return 0.7 if pos in road_cells else 1.0
+
+    def _reconstruct_path(
+        self,
+        parents: dict[tuple[int, int], tuple[int, int] | None],
+        goal: tuple[int, int],
+    ) -> list[list[int]]:
+        path: list[tuple[int, int]] = []
+        cur: tuple[int, int] | None = goal
+        while cur is not None:
+            path.append(cur)
+            cur = parents[cur]
+        path.reverse()
+        return [[row, col] for row, col in path]
+
+    def _find_path(
+        self,
+        start: tuple[int, int],
+        target: tuple[int, int],
+        *,
+        stop_within_distance_sq: float | None = None,
+    ) -> list[list[int]]:
+        """Plan a route on the current grid.
+
+        Occupied cells are treated as blocked, except for the moving agent's start cell.
+        If the exact target is blocked or unreachable, the route ends at the reachable
+        cell nearest to target.
+        """
+        road_cells = self._road_cells()
+        distances: dict[tuple[int, int], float] = {start: 0.0}
+        parents: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+        heap: list[tuple[float, int, int, int]] = [(0.0, start[0], start[1], 0)]
+
+        while heap:
+            cost, row, col, _ = heapq.heappop(heap)
+            pos = (row, col)
+            if cost > distances[pos]:
+                continue
+            for next_pos in self._ordered_neighbors(pos, target):
+                if not self._is_walkable_cell(next_pos, start):
+                    continue
+                next_cost = cost + self._movement_cost(next_pos, road_cells)
+                if next_cost >= distances.get(next_pos, float("inf")):
+                    continue
+                distances[next_pos] = next_cost
+                parents[next_pos] = pos
+                heapq.heappush(heap, (next_cost, next_pos[0], next_pos[1], len(parents)))
+
+        if stop_within_distance_sq is not None:
+            reachable_goals = [
+                pos for pos in distances
+                if self._distance_sq(pos, target) <= stop_within_distance_sq
+            ]
+            if reachable_goals:
+                goal = min(
+                    reachable_goals,
+                    key=lambda pos: (
+                        distances[pos],
+                        self._distance_sq(pos, target),
+                        self._manhattan(pos, target),
+                        pos[0],
+                        pos[1],
+                    ),
+                )
+                return self._reconstruct_path(parents, goal)
+
+        if target in distances:
+            return self._reconstruct_path(parents, target)
+
+        goal = min(
+            distances,
+            key=lambda pos: (
+                self._distance_sq(pos, target),
+                self._manhattan(pos, target),
+                distances[pos],
+                pos[0],
+                pos[1],
+            ),
+        )
+        return self._reconstruct_path(parents, goal)
+
     def move(self, operator_ID: str, x: int, y: int):
         x = int(x)
         y = int(y)
         if operator_ID not in self.world.agents:
             return "智能体不存在"
         agent = self.world.agents[operator_ID]
-        old_x, old_y = agent.position
         if x < 0 or y < 0 or x >= self.world.map.height or y >= self.world.map.width:
             return f"移动失败，[{x},{y}]超出地图边界"
+
+        exit_msg = ""
+        if agent.inside_building_id:
+            exit_msg = self.exit_building(operator_ID)
+
+        old_x, old_y = agent.position
         if x == old_x and y == old_y:
+            if exit_msg:
+                return f"{exit_msg}；目标位置是当前位置，没有发生移动"
             return "目标位置是当前位置，没有发生移动"
 
-        if agent.inside_building_id:
-            self.exit_building(operator_ID)
-
-        # Detect interactable object at target cell
-        target_cell_id = self.world.map.get_e(x, y)
-        target_obj = self.world.objects.get(target_cell_id) if target_cell_id != '0' else None
-        target_interactable = isinstance(target_obj, Interactable) and not isinstance(target_obj, building)
-
-        n = agent.config.observation_radius
-        cur_x, cur_y = old_x, old_y
-        path = [[old_x, old_y]]
-        steps = 0
+        max_steps = max(0, int(agent.config.observation_radius))
         interact_msg = ""
 
-        def _try_interact(cx, cy):
-            nonlocal interact_msg
-            if not target_interactable or interact_msg:
-                return
-            if target_cell_id not in self.world.objects:
-                return
-            if (cx - x) ** 2 + (cy - y) ** 2 > agent.config.eat_distance_sq:
-                return
-            with self.world._world_lock:
+        with self.world._world_lock:
+            target_cell_id = self.world.map.get_e(x, y)
+            target_obj = self.world.objects.get(target_cell_id) if target_cell_id != '0' else None
+            target_interactable = isinstance(target_obj, Interactable) and not isinstance(target_obj, building)
+            stop_distance_sq = agent.config.eat_distance_sq if target_interactable else None
+
+            planned_path = self._find_path(
+                (old_x, old_y),
+                (x, y),
+                stop_within_distance_sq=stop_distance_sq,
+            )
+            path = planned_path[:max_steps + 1]
+            if not path:
+                path = [[old_x, old_y]]
+            cur_x, cur_y = path[-1]
+            steps = max(0, len(path) - 1)
+
+            def _try_interact_at(cx: int, cy: int) -> None:
+                nonlocal interact_msg
+                if not target_interactable or interact_msg:
+                    return
                 if target_cell_id not in self.world.objects:
                     return
+                if (cx - x) ** 2 + (cy - y) ** 2 > agent.config.eat_distance_sq:
+                    return
                 result = target_obj.interact(agent)
-            interact_msg = f"，并{result}"
-            logger.info("[%s] 移动中交互 %s: %s", operator_ID, target_cell_id, result)
+                interact_msg = f"，并{result}"
+                logger.info("[%s] 移动中交互 %s: %s", operator_ID, target_cell_id, result)
 
-        # Check eat range at starting position before any movement
-        _try_interact(cur_x, cur_y)
-
-        for _ in range(n):
-            if cur_x == x and cur_y == y:
-                break
-            best_pos = None
-            best_dist = float("inf")
-            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                nx, ny = cur_x + dx, cur_y + dy
-                if nx < 0 or ny < 0 or nx >= self.world.map.height or ny >= self.world.map.width:
-                    continue
-                if not self.world.map.is_empty(nx, ny):
-                    continue
-                dist = abs(nx - x) + abs(ny - y)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_pos = (nx, ny)
-            if best_pos is None:
-                break
-            cur_x, cur_y = best_pos
-            path.append([cur_x, cur_y])
-            steps += 1
-            # After each step, check if now in eat range of target object
-            _try_interact(cur_x, cur_y)
+            if steps == 0:
+                _try_interact_at(old_x, old_y)
+            else:
+                if not self.world.map.is_empty(cur_x, cur_y):
+                    return f"移动失败，[{cur_x},{cur_y}]已被占用，请下轮重试"
+                if self.world.map.get_e(old_x, old_y) == agent.id:
+                    self.world.map.remove(old_x, old_y)
+                self.world.map.place(cur_x, cur_y, agent.id)
+                agent.position = [cur_x, cur_y]
+                self.world.movements.append({
+                    "agent_id": operator_ID,
+                    "path": path,
+                })
+                _try_interact_at(cur_x, cur_y)
 
         if steps == 0:
             if interact_msg:
                 return f"{operator_ID}原地不动{interact_msg}"
-            return f"无法移动，[{old_x},{old_y}]周围路径被阻挡"
+            return f"无法移动，[{old_x},{old_y}]已是当前可达范围内距目标最近的位置"
 
         agent.update_satisfaction("relax", -agent.config.relax_moving_usage * steps)
-
-        with self.world._world_lock:
-            if not self.world.map.is_empty(cur_x, cur_y):
-                return f"移动失败，[{cur_x},{cur_y}]已被占用，请下轮重试"
-            self.world.map.place(cur_x, cur_y, agent.id)
-            self.world.map.remove(old_x, old_y)
-            agent.position = [cur_x, cur_y]
-            self.world.movements.append({
-                "agent_id": operator_ID,
-                "path": path,
-            })
 
         logger.info(
             "[%s] 从 [%d,%d] 移动 %d 步至 [%d,%d]（目标 [%d,%d]）",

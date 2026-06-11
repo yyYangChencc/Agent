@@ -22,6 +22,8 @@ class AgentConfig:
     # Agent
     max_history: int = 12
     memory_top_k: int = 5
+    memory_focus_bonus_k: int = 2
+    memory_max_top_k: int = 8
     # satisfaction 范围：satiety / relax 为 [0, 100]，money 无上限
     satiety_threshold: float = 30.0
     relax_threshold: float = 30.0

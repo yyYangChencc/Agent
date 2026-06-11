@@ -251,4 +251,12 @@ def _build_map_memory(runtime: SimulationRuntime) -> str:
 def _seed_default_memories(runtime: SimulationRuntime) -> None:
     map_info = _build_map_memory(runtime)
     for agent_id in DEFAULT_AGENT_IDS:
-        runtime.mem.store_agent_memory(agent_id, map_info, memory_type="system", importance=0.9)
+        runtime.mem.store_agent_memory(
+            agent_id,
+            map_info,
+            memory_type="semantic",
+            task="map_navigation",
+            object_id="default_map",
+            importance=0.9,
+            confidence=1.0,
+        )

@@ -10,10 +10,10 @@ export default function App() {
   useWebSocket()
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-gray-100">
+    <div className="flex flex-col h-screen bg-[#20251f] text-[#243225]">
       <ControlBar />
       {/* 画布固定 600px 宽，智能体面板和社交面板占剩余空间 */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden bg-[#141714]">
         <WorldCanvas />
         <AgentPanel />
         <SocialPanel />

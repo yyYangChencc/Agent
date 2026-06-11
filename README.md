@@ -22,7 +22,9 @@
 
 **前端**：React 18、TypeScript、Pixi.js 8、Zustand、Recharts、Tailwind CSS、Vite
 
-## 安装
+## 启动流程
+
+以下命令默认在项目根目录 `Agent/` 下执行。开发模式需要两个终端：一个运行后端 FastAPI 服务，另一个运行前端 Vite 开发服务器。
 
 ### 运行环境
 
@@ -30,15 +32,23 @@
 - Node.js 18+
 - 与 OpenAI Python SDK 接口兼容的对话和嵌入服务
 
-### Python 依赖
+### 1. 安装后端依赖
 
-在项目根目录执行：
+推荐先创建虚拟环境，再安装 Python 依赖：
 
-```bash
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-### 环境变量
+如果已经在可用的 Python 环境中，也可以只执行：
+
+```powershell
+pip install -r requirements.txt
+```
+
+### 2. 配置环境变量
 
 项目根目录的 `.env` 文件会被 `backend/main.py` 和 `backend/server.py` 加载。当前代码读取以下变量：
 
@@ -51,37 +61,48 @@ EMBEDDING_BASE_URL=<嵌入接口地址>
 
 `OPENAI_BASE_URL` 和 `EMBEDDING_BASE_URL` 未设置时，代码使用 `https://api.openai.com/v1`。
 
-### 前端依赖
+后端启动时会初始化默认场景并创建 ChromaDB 记忆管理器；如果缺少可用的 `OPENAI_API_KEY` 或 `EMBEDDING_KEY`，涉及 LLM 或嵌入检索的仿真流程无法正常完成。
 
-```bash
+### 3. 安装前端依赖
+
+```powershell
 cd frontend
 npm install
+cd ..
 ```
 
-## 启动 Web 界面
-
-### 开发模式
+### 4. 开发模式启动
 
 终端 1，在项目根目录启动 FastAPI 服务：
 
-```bash
+```powershell
 python backend/server.py
 ```
 
+后端监听 `http://localhost:8000`，WebSocket 路径为 `ws://localhost:8000/ws`。
+
 终端 2，启动 Vite 开发服务器：
 
-```bash
+```powershell
 cd frontend
 npm run dev
 ```
 
-浏览器访问 `http://localhost:5173`。Vite 会将 `/ws` 代理到 `ws://localhost:8000`。
+浏览器访问 `http://localhost:5173`。`frontend/vite.config.ts` 会将开发环境下的 `/ws` 代理到 `ws://localhost:8000`。
 
-### 构建后运行
+前端页面连接成功后，可以使用顶部控制栏执行：
+
+- **单步**：只推进 1 个 tick。
+- **继续**：按当前速度自动推进 tick。
+- **暂停**：停止自动推进。
+- **重置**：后端重建 runtime，tick 归零，并重新初始化智能体、地图对象和记忆。
+- **速度**：切换 1×、2×、5× 自动推进速度。
+
+### 5. 构建后启动
 
 先构建前端：
 
-```bash
+```powershell
 cd frontend
 npm run build
 cd ..
@@ -89,11 +110,11 @@ cd ..
 
 再由 FastAPI 托管 `frontend/dist`：
 
-```bash
+```powershell
 python backend/server.py
 ```
 
-浏览器访问 `http://localhost:8000`。
+浏览器访问 `http://localhost:8000`。此模式不需要再运行 `npm run dev`。
 
 ## 其他运行入口
 
@@ -101,9 +122,11 @@ python backend/server.py
 
 以下命令创建 5 个智能体并运行 10 个 tick，在终端打印各智能体的意见值：
 
-```bash
+```powershell
 python backend/main.py
 ```
+
+该入口不启动 Web 页面，主要用于快速检查后端 tick 循环和意见传播输出。
 
 ### 空间交互演示
 
@@ -111,18 +134,24 @@ python backend/main.py
 
 终端 1：
 
-```bash
+```powershell
 python backend/test_spatial.py
 ```
 
 终端 2：
 
-```bash
+```powershell
 cd frontend
 npm run dev
 ```
 
-浏览器访问 `http://localhost:5173`。运行前需要停止 `backend/server.py`，因为两个服务都监听 8000 端口。
+浏览器访问 `http://localhost:5173`。运行前需要停止 `backend/server.py`，因为 `backend/server.py` 和 `backend/test_spatial.py` 都监听 8000 端口。
+
+### 端口与常见启动顺序
+
+- 开发模式：先启动 `python backend/server.py`，再启动 `cd frontend && npm run dev`，访问 `http://localhost:5173`。
+- 构建后运行：先执行 `cd frontend && npm run build`，再启动 `python backend/server.py`，访问 `http://localhost:8000`。
+- 空间交互演示：先确保 `backend/server.py` 已停止，再启动 `python backend/test_spatial.py` 和 `cd frontend && npm run dev`，访问 `http://localhost:5173`。
 
 ## Web 界面
 

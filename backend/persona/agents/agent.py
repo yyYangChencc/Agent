@@ -113,7 +113,7 @@ class Agent:
         posts, posts_info = self._receive_post()
         self._last_seen_posts = posts
         logger.debug("[%s] 收到帖子内容: %s", self.id, posts_info)
-        mem_info = self.recall(posts_info)
+        mem_info = self.recall(posts_info, context="social")
         raw = self.social_policy.decide(self, posts_info, mem_info)
         feedback = self.platform.execute(self.id, raw)
         logger.debug("[%s] 社交平台反馈: %s", self.id, feedback)
@@ -142,16 +142,28 @@ class Agent:
     # Memory
     # ------------------------------------------------------------------
 
-    def recall(self, obs: str) -> list[str]:
+    def _memory_top_k_for(self, context: str) -> int:
+        top_k = self.config.memory_top_k
+        if self.stuck_ticks > 0 or self.current_focus:
+            top_k += self.config.memory_focus_bonus_k
+        if context == "social":
+            top_k = max(2, top_k - 1)
+        if context == "conversation":
+            top_k = max(2, top_k - 2)
+        return min(top_k, self.config.memory_max_top_k)
+
+    def recall(self, obs: str, context: str = "world") -> list[str]:
         return self.mem.smart_retrieve(
             self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
-            n_results=self.config.memory_top_k,
+            n_results=self._memory_top_k_for(context),
+            context=context,
         )
 
-    async def arecall(self, obs: str) -> list[str]:
+    async def arecall(self, obs: str, context: str = "world") -> list[str]:
         return await self.mem.asmart_retrieve(
             self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
-            n_results=self.config.memory_top_k,
+            n_results=self._memory_top_k_for(context),
+            context=context,
         )
 
     def remember(self, info: str, **metadata) -> None:
@@ -168,7 +180,7 @@ class Agent:
             "reward": reward,
         })
 
-    def flush_trajectory(self, task: str) -> None:
+    def flush_trajectory(self, task: str, need_key: str = "") -> None:
         if not self.trajectory_buffer:
             return
         lines = [f"任务：{task}"]
@@ -184,11 +196,19 @@ class Agent:
         system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
         summary = self.reflect.llm.generate(system, user)
         logger.debug("[%s] 轨迹总结: %s", self.id, summary)
-        self.remember(summary, type="trajectory", task=task)
+        self.remember(
+            summary,
+            memory_type="episodic",
+            task=task,
+            need_key=need_key,
+            outcome="completed",
+            importance=0.7,
+            confidence=0.7,
+        )
         logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
         self.trajectory_buffer.clear()
 
-    async def aflush_trajectory(self, task: str) -> None:
+    async def aflush_trajectory(self, task: str, need_key: str = "") -> None:
         if not self.trajectory_buffer:
             return
         lines = [f"任务：{task}"]
@@ -204,7 +224,15 @@ class Agent:
         system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
         summary = await self.reflect.llm.agenerate(system, user)
         logger.debug("[%s] 轨迹总结: %s", self.id, summary)
-        await self.aremember(summary, type="trajectory", task=task)
+        await self.aremember(
+            summary,
+            memory_type="episodic",
+            task=task,
+            need_key=need_key,
+            outcome="completed",
+            importance=0.7,
+            confidence=0.7,
+        )
         logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
         self.trajectory_buffer.clear()
 
@@ -268,7 +296,7 @@ class Agent:
         )
         self.inbox.clear()
         self.add_history("conversation", observation)
-        mem_info = self.recall(observation)
+        mem_info = self.recall(observation, context="conversation")
         action = policy.decide(self, observation, mem_info)
         if action:
             self.add_history("conversation_reply", action)

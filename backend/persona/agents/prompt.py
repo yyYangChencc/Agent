@@ -68,8 +68,26 @@ class BasePromptBuilder:
         if not mem_info:
             return "（无相关记忆）"
         if isinstance(mem_info, list):
-            return "\n".join(f"  - {m}" for m in mem_info) if mem_info else "（无相关记忆）"
+            if not mem_info:
+                return "（无相关记忆）"
+            lines = ["可用记忆会影响本轮行动，应优先用于确定位置、对象、已验证流程和失败教训："]
+            for memory in mem_info:
+                lines.append(f"  - {self._memory_action_hint(memory)}")
+            return "\n".join(lines)
         return mem_info
+
+    def _memory_action_hint(self, memory: str) -> str:
+        if "[semantic" in memory:
+            return f"[地图/规则] {memory}。若其中含坐标或对象ID，可直接用于 move / enter_building / eat / sleep。"
+        if "[procedural" in memory:
+            return f"[行动流程] {memory}。若当前任务匹配，应优先复用该流程。"
+        if "[episodic" in memory:
+            return f"[过往经验] {memory}。参考其结果，避免重复低收益行动。"
+        if "[reflective" in memory:
+            return f"[反思] {memory}。若与当前卡住原因相同，应按其中焦点调整行动。"
+        if "[social" in memory:
+            return f"[社交记忆] {memory}。用于决定是否发帖、评论或联系相关智能体。"
+        return memory
 
     def _opinion_block(self, agent: "Agent") -> str:
         return f"- 当前观念倾向：{agent.opinion:.3f}（0=保守，1=激进）"
