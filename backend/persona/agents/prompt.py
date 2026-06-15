@@ -231,6 +231,8 @@ class ConversationPromptBuilder(BasePromptBuilder):
             "行为原则：\n"
             "- 若剩余轮数为 0，必须主动收尾或保持沉默\n"
             "- 对话目的达成后，不要重复对话，选择沉默终止\n"
+            "- 对话消息中若包含 session 或 intent，应优先围绕该会话线程和意图回复，避免混淆多个话题\n"
+            "- 回答事实问题时，优先依据观察和记忆；不知道时直接说明不知道，不要编造坐标、对象ID或他人状态\n"
             "- 禁止执行移动、进食等非对话动作\n\n"
             f"{self._action_format_block('{\"tool\": \"speak\", \"args\": {\"content\": \"<回复内容>\", \"ID\": \"<对方ID>\", \"response_to\": \"<被回复的原文>\"}}', '沉默时：')}\n\n"
             "示例：\n"

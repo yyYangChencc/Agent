@@ -1,8 +1,8 @@
 import asyncio
 import json
 import threading
-import concurrent.futures
 import time
+from persona.conversation import ConversationManager
 from world.event import Event
 from world.map import Map, build_default_map_design
 from tools.operator_tools import register_operator_tools, Operator
@@ -22,6 +22,7 @@ class World:
         self._world_lock = threading.Lock()
         self.conversation_policy = None   # set externally to enable conversation phase
         self.conversation_max_rounds = 3  # max conversation rounds per time step
+        self.conversation_manager = ConversationManager(self)
         self.opinion_updater = opinion_updater
         self.history_recorder = history_recorder
         self.platform = platform          # set externally for news injection
@@ -200,72 +201,11 @@ class World:
         )
 
     def _conversation_phase(self, agents):
-        max_rounds = self.conversation_max_rounds
-        for a in agents:
-            a.conversation_opted_out = False  # reset each time step
-
-        conv_history = []
-        # Seed history with speaks that happened during the main parallel step
-        for a in agents:
-            for msg in a.inbox:
-                conv_history.append({
-                    "round": 0,
-                    "sender": msg["sender"],
-                    "target": a.id,
-                    "content": msg["content"],
-                    "response_to": msg.get("response_to"),
-                })
-
-        # Resolve mutual speaks: if A→B and B→A both happened in the main step,
-        # clear the inbox of the lex-smaller agent so only one conversation thread is active
-        main_step_senders = {entry["sender"] for entry in conv_history if entry["round"] == 0}
-        for a in agents:
-            if a.id in main_step_senders and a.inbox:
-                if all(msg["sender"] in main_step_senders for msg in a.inbox):
-                    if all(a.id < msg["sender"] for msg in a.inbox):
-                        logger.info("[World] 检测到互相说话，清空 %s 的收件箱以避免双向对话循环", a.id)
-                        a.inbox.clear()
-
-        for round_n in range(1, max_rounds + 1):
-            respondents = [a for a in agents if a.inbox and not a.conversation_opted_out]
-            if not respondents:
-                break
-            logger.info("[World] 对话轮次 %d/%d，%d 个智能体待回复",
-                        round_n, max_rounds, len(respondents))
-
-            round_history = []
-
-            def _respond(agent, rn=round_n, mr=max_rounds):
-                try:
-                    action = agent.conversation_step(
-                        self.conversation_policy, rn, mr, list(conv_history)
-                    )
-                    if not action:
-                        return
-                    try:
-                        data = json.loads(action)
-                        if data.get("tool") == "speak":
-                            self.execute(agent, action)
-                            args = data.get("args", {})
-                            round_history.append({
-                                "round": rn,
-                                "sender": agent.id,
-                                "target": args.get("ID", ""),
-                                "content": args.get("content", ""),
-                                "response_to": args.get("response_to"),
-                            })
-                    except (json.JSONDecodeError, KeyError):
-                        pass
-                except Exception as e:
-                    logger.error("[World] agent %s 对话轮次 %d 失败: %s", agent.id, rn, e, exc_info=True)
-
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(respondents) or 1) as ex:
-                futs = [ex.submit(_respond, a) for a in respondents]
-                for f in concurrent.futures.as_completed(futs):
-                    f.result()
-
-            conv_history.extend(round_history)
+        self.conversation_manager.run_phase(
+            agents,
+            self.conversation_policy,
+            self.conversation_max_rounds,
+        )
 
     def execute(self, agent, action_str):
         old_satisfaction = agent.satisfaction.copy()
@@ -313,6 +253,9 @@ class World:
                             agent.id,
                             args.get("content", ""),
                             args.get("response_to"),
+                            args.get("session_id"),
+                            args.get("intent"),
+                            target_str,
                         )
         reward = sum(
             (agent.satisfaction.get(k, 0.0) - old_satisfaction.get(k, 0.0)) * old_urgency.get(k, 0.0)

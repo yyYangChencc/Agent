@@ -251,7 +251,13 @@ class Agent:
         return manhattan(self.position, event.position) <= r
 
     def receive_message(
-        self, sender_id: str, content: str, response_to: str | None = None
+        self,
+        sender_id: str,
+        content: str,
+        response_to: str | None = None,
+        session_id: str | None = None,
+        intent: str | None = None,
+        target: str | None = None,
     ) -> None:
         if self.conversation_opted_out:
             return
@@ -260,6 +266,9 @@ class Agent:
             "content": content,
             "response_to": response_to,
             "time": self.world.time,
+            "session_id": session_id,
+            "intent": intent,
+            "target": target,
         })
 
     def conversation_step(
@@ -276,7 +285,12 @@ class Agent:
         if conv_history:
             lines = []
             for entry in conv_history:
-                line = f"  [第{entry['round']}轮] {entry['sender']} → {entry['target']}: {entry['content']}"
+                session_text = f" session={entry.get('session_id')}" if entry.get("session_id") else ""
+                intent_text = f" intent={entry.get('intent')}" if entry.get("intent") else ""
+                line = (
+                    f"  [第{entry['round']}轮{session_text}{intent_text}] "
+                    f"{entry['sender']} → {entry['target']}: {entry['content']}"
+                )
                 if entry.get("response_to"):
                     line += f"（回复: {entry['response_to']}）"
                 lines.append(line)
@@ -285,7 +299,12 @@ class Agent:
             history_block = "[本时间步对话历史]\n（暂无）"
 
         msgs = "\n".join([
-            f"{m['sender']} 对你说: {m['content']}" +
+            (
+                f"{m['sender']} 对你说"
+                f"{'（session=' + str(m.get('session_id')) + '）' if m.get('session_id') else ''}"
+                f"{'（intent=' + str(m.get('intent')) + '）' if m.get('intent') else ''}: "
+                f"{m['content']}"
+            ) +
             (f"（回复的是: {m['response_to']}）" if m.get("response_to") else "")
             for m in self.inbox
         ])
