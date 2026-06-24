@@ -13,6 +13,7 @@ export function useWebSocket() {
 
     function connect() {
       if (!activeRef.current) return
+      // 前端和后端同源部署；协议根据当前页面自动选择 ws/wss。
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsUrl = `${protocol}//${window.location.host}/ws`
       const ws = new WebSocket(wsUrl)
@@ -29,6 +30,7 @@ export function useWebSocket() {
             setWorldState(msg.state)
           }
           if (msg.type === 'init') {
+            // init 表示后端给出一份完整初始快照；旧图表历史不再适用。
             resetHistory()
             setStatus(msg.running ?? false, msg.speed ?? 1.0)
           } else if (msg.type === 'status') {

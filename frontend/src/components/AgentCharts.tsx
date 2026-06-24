@@ -83,7 +83,7 @@ export function AgentCharts({ history }: Props) {
         <ResponsiveContainer width="100%" height={90}>
           <LineChart data={history} margin={CHART_MARGIN}>
             <XAxis dataKey="tick" tick={false} />
-            <YAxis domain={[0, 1]} tick={{ fontSize: 9, fill: '#9ca3af' }} />
+            <YAxis domain={[-1, 1]} tick={{ fontSize: 9, fill: '#9ca3af' }} />
             <Tooltip
               contentStyle={tooltipStyle}
               formatter={(v: number) => [v.toFixed(3), 'opinion']}

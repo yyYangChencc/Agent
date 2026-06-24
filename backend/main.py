@@ -13,7 +13,7 @@ async def _main():
     print(f"\n=== 初始观念 ===\n  {'tick':>4}  {header}")
     print(f"  {'init':>4}  " + "  ".join(f"{ag.opinion:>8.3f}" for ag in agents))
 
-    for tick in range(10):
+    for tick in range(rt.config.simulation_step_limit):
         await rt.world.astep()
         marker = " ◀offline" if tick + 1 in (3, 6, 9) else ""
         print(f"  {tick+1:>4}  " + "  ".join(f"{ag.opinion:>8.3f}" for ag in agents) + marker)

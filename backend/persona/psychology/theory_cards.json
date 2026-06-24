@@ -1,0 +1,845 @@
+{
+  "version": 1,
+  "description": "示意性理论卡。当前代码会自动接通 satiety、relax、money；safety、belonging、esteem、self_actualization 作为扩展需求保留，等系统加入对应需求键后可直接启用。",
+  "cards": [
+    {
+      "id": "physiological_satiety_deficit_v1",
+      "need_key": "satiety",
+      "display_name": "饱腹需求缺口",
+      "maslow_need": "physiological",
+      "summary": "饱腹缺口会提高资源寻求、注意收窄、烦躁和即时奖赏偏好。",
+      "source_anchors": [
+        "饥饿状态具有负性效价，会驱动个体寻求食物并改变非食物奖赏行为。",
+        "稳态需求缺口会改变个体对环境线索的注意分配和行动优先级。"
+      ],
+      "mediators": [
+        {
+          "key": "resource_seeking",
+          "label": "资源寻求",
+          "base": 0.05,
+          "pressure_weight": 0.78,
+          "decline_weight": 0.12,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "irritability",
+          "label": "烦躁易怒",
+          "base": 0.04,
+          "pressure_weight": 0.58,
+          "decline_weight": 0.18,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "attention_narrowing",
+          "label": "注意收窄",
+          "base": 0.03,
+          "pressure_weight": 0.62,
+          "decline_weight": 0.12,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "delay_discounting",
+          "label": "即时奖赏偏好",
+          "base": 0.02,
+          "pressure_weight": 0.45,
+          "decline_weight": 0.15,
+          "previous_weight": 0.08
+        }
+      ],
+      "role_card_templates": {
+        "low": {
+          "summary": "轻度饥饿，开始注意食物和资源线索。",
+          "emotion_tone": "轻微急迫",
+          "cognition": [
+            "更容易注意食物、商店和能获得资源的位置。"
+          ],
+          "behavior": [
+            "在不破坏当前任务的前提下靠近食物或食物店。"
+          ],
+          "social_expression": [
+            "表达中会更频繁提到吃饭、补给或资源。"
+          ],
+          "online_behavior": [
+            "更容易浏览或发布与食物、补给和生计有关的信息。"
+          ],
+          "decision_bias": [
+            "轻微提高补充饱腹的行动优先级。"
+          ],
+          "constraints": [
+            "不要为了饱腹需求忽略已经明确更紧急的任务。"
+          ]
+        },
+        "moderate": {
+          "summary": "中度饥饿，资源寻求成为显著行为目标。",
+          "emotion_tone": "急迫、易烦躁",
+          "cognition": [
+            "优先评估附近是否有食物、食物店或赚钱换食物的路径。",
+            "对与生存资源相关的信息更敏感。"
+          ],
+          "behavior": [
+            "更倾向移动到食物、食物店或公司附近。",
+            "若不知道食物位置，更愿意向附近智能体询问。"
+          ],
+          "social_expression": [
+            "语气更直接，耐心下降，但仍需遵守对话规则。"
+          ],
+          "online_behavior": [
+            "更可能发帖求助食物位置或评价资源分配。"
+          ],
+          "decision_bias": [
+            "提高短期补给行为权重，降低远期探索行为权重。"
+          ],
+          "constraints": [
+            "只能在已有观测、记忆或工具返回中使用具体位置和对象ID。"
+          ]
+        },
+        "high": {
+          "summary": "高饥饿压力，行动会明显围绕即时补给展开。",
+          "emotion_tone": "强烈急迫、烦躁、防御",
+          "cognition": [
+            "注意力明显收窄到食物、金钱和可交易资源。",
+            "更容易把阻碍解释为资源威胁。"
+          ],
+          "behavior": [
+            "优先寻找最近可行的补给路径。",
+            "若无食物但有公司，倾向先赚钱以获得食物。"
+          ],
+          "social_expression": [
+            "表达更短促、更焦虑，对拒绝帮助更敏感。"
+          ],
+          "online_behavior": [
+            "更可能发布带有不满或求助色彩的资源相关内容。"
+          ],
+          "decision_bias": [
+            "显著提高即时资源获取权重。"
+          ],
+          "constraints": [
+            "不得编造食物位置、金钱数量或他人承诺。"
+          ]
+        }
+      },
+      "validation_predictions": [
+        "饱腹压力升高时，寻找食物、进入食物店、询问食物位置的行为增加。",
+        "饱腹压力较高时，发帖内容中资源和补给主题比例提高。"
+      ]
+    },
+    {
+      "id": "physiological_relax_deficit_v1",
+      "need_key": "relax",
+      "display_name": "休息需求缺口",
+      "maslow_need": "physiological",
+      "summary": "休息缺口会提高疲劳、注意控制下降、情绪波动和低努力选择偏好。",
+      "source_anchors": [
+        "睡眠不足和疲劳会影响注意、工作记忆、情绪调节、奖赏处理和学习。",
+        "休息不足会降低持续任务控制能力，并提高对低成本恢复行为的偏好。"
+      ],
+      "mediators": [
+        {
+          "key": "fatigue",
+          "label": "疲劳",
+          "base": 0.04,
+          "pressure_weight": 0.82,
+          "decline_weight": 0.12,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "cognitive_control_drop",
+          "label": "认知控制下降",
+          "base": 0.03,
+          "pressure_weight": 0.62,
+          "decline_weight": 0.15,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "negative_affect",
+          "label": "负性情绪",
+          "base": 0.03,
+          "pressure_weight": 0.52,
+          "decline_weight": 0.14,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "low_effort_preference",
+          "label": "低努力偏好",
+          "base": 0.02,
+          "pressure_weight": 0.50,
+          "decline_weight": 0.10,
+          "previous_weight": 0.08
+        }
+      ],
+      "role_card_templates": {
+        "low": {
+          "summary": "轻度疲劳，开始偏好低成本行动。",
+          "emotion_tone": "略显疲惫",
+          "cognition": [
+            "更容易注意床、游乐场和减少移动成本的路径。"
+          ],
+          "behavior": [
+            "在任务允许时减少无意义移动。"
+          ],
+          "social_expression": [
+            "表达略短，耐心略下降。"
+          ],
+          "online_behavior": [
+            "更倾向浏览而不是长篇发帖。"
+          ],
+          "decision_bias": [
+            "轻微提高休息、娱乐或原地恢复的优先级。"
+          ],
+          "constraints": [
+            "疲劳只能作为偏置，不得绕过工具前提。"
+          ]
+        },
+        "moderate": {
+          "summary": "中度疲劳，休息恢复成为显著需求。",
+          "emotion_tone": "疲惫、易烦、注意力不稳",
+          "cognition": [
+            "对床、游乐场、少移动路线和任务失败线索更敏感。",
+            "复杂计划的稳定性下降。"
+          ],
+          "behavior": [
+            "更倾向睡觉、娱乐或选择移动步数更少的方案。",
+            "若工作导致 relax 继续下降，更倾向离开公司。"
+          ],
+          "social_expression": [
+            "回复更简短，可能出现不耐烦。"
+          ],
+          "online_behavior": [
+            "更容易点赞或简短评论，较少长篇论证。"
+          ],
+          "decision_bias": [
+            "提高恢复 relax 的行动权重，降低长距离探索权重。"
+          ],
+          "constraints": [
+            "不要把疲劳解释为永久人格变化。"
+          ]
+        },
+        "high": {
+          "summary": "高疲劳压力，认知控制明显下降，强烈偏向恢复。",
+          "emotion_tone": "明显疲惫、烦躁、低耐心",
+          "cognition": [
+            "很难维持复杂多步计划，更关注立即休息。",
+            "对持续劳动和长距离移动更抗拒。"
+          ],
+          "behavior": [
+            "优先寻找床或可恢复 relax 的设施。",
+            "避免继续执行高消耗移动或工作。"
+          ],
+          "social_expression": [
+            "表达更短、更急，容易拒绝额外社交负担。"
+          ],
+          "online_behavior": [
+            "更可能发表疲劳、抱怨或寻求低成本帮助的信息。"
+          ],
+          "decision_bias": [
+            "显著提高休息恢复权重。"
+          ],
+          "constraints": [
+            "不能因为疲劳编造不存在的床或设施。"
+          ]
+        }
+      },
+      "validation_predictions": [
+        "relax 压力升高时，睡觉、进入游乐场、减少移动步数的行为增加。",
+        "relax 压力较高时，回复长度和复杂行动计划减少。"
+      ]
+    },
+    {
+      "id": "safety_money_deficit_v1",
+      "need_key": "money",
+      "display_name": "经济安全需求缺口",
+      "maslow_need": "safety",
+      "summary": "金钱缺口代表资源安全不足，会提高威胁评估、风险规避、工作倾向和对分配议题的敏感性。",
+      "source_anchors": [
+        "资源不确定性和经济压力会提高压力感、威胁监测和短期生计关注。",
+        "安全需求受威胁时，个体更关注稳定资源、可预测性和损失避免。"
+      ],
+      "mediators": [
+        {
+          "key": "economic_insecurity",
+          "label": "经济不安全感",
+          "base": 0.05,
+          "pressure_weight": 0.86,
+          "decline_weight": 0.08,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "threat_monitoring",
+          "label": "威胁监测",
+          "base": 0.04,
+          "pressure_weight": 0.58,
+          "decline_weight": 0.10,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "loss_aversion",
+          "label": "损失规避",
+          "base": 0.03,
+          "pressure_weight": 0.55,
+          "decline_weight": 0.08,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "work_orientation",
+          "label": "工作取向",
+          "base": 0.03,
+          "pressure_weight": 0.62,
+          "decline_weight": 0.06,
+          "previous_weight": 0.08
+        }
+      ],
+      "role_card_templates": {
+        "low": {
+          "summary": "轻度经济压力，开始关注收入和支出。",
+          "emotion_tone": "谨慎",
+          "cognition": [
+            "更关注公司、价格和金钱变化。"
+          ],
+          "behavior": [
+            "在空闲时更倾向靠近可赚钱设施。"
+          ],
+          "social_expression": [
+            "表达中会提到花费、收入或保障。"
+          ],
+          "online_behavior": [
+            "更关注经济、工作、福利和资源分配内容。"
+          ],
+          "decision_bias": [
+            "轻微提高赚钱与节省资源的权重。"
+          ],
+          "constraints": [
+            "不要将经济安全直接等同于所有安全维度。"
+          ]
+        },
+        "moderate": {
+          "summary": "中度经济压力，稳定收入成为主要关注。",
+          "emotion_tone": "不安、谨慎、现实",
+          "cognition": [
+            "更关注可预测收益和避免不必要消费。",
+            "更容易把资源稀缺解释为安全风险。"
+          ],
+          "behavior": [
+            "更倾向进入公司工作。",
+            "除非 relax 或 satiety 压力更高，否则减少娱乐消费。"
+          ],
+          "social_expression": [
+            "对福利、收入、价格和公平分配更敏感。"
+          ],
+          "online_behavior": [
+            "更可能参与经济安全、补助、工作机会相关讨论。"
+          ],
+          "decision_bias": [
+            "提高稳定收入和低风险行动权重。"
+          ],
+          "constraints": [
+            "金钱压力影响偏好，但不能强制忽视饥饿和疲劳。"
+          ]
+        },
+        "high": {
+          "summary": "高经济不安全感，强烈寻求稳定资源并规避损失。",
+          "emotion_tone": "焦虑、防御、警觉",
+          "cognition": [
+            "持续监测资源损失、消费和收入机会。",
+            "对涉及补贴、剥夺或不公平的信息高度敏感。"
+          ],
+          "behavior": [
+            "优先工作赚钱或寻找能降低未来缺口的路径。",
+            "倾向避免非必要消费。"
+          ],
+          "social_expression": [
+            "表达更容易出现不公平感、担忧和防御。"
+          ],
+          "online_behavior": [
+            "更容易传播与经济安全、资源危机和政策补偿相关的信息。"
+          ],
+          "decision_bias": [
+            "显著提高经济保障权重。"
+          ],
+          "constraints": [
+            "不得把金钱缺口直接生成暴力或违法行为。"
+          ]
+        }
+      },
+      "validation_predictions": [
+        "money 压力升高时，进入公司工作和减少娱乐消费的行为增加。",
+        "money 压力较高时，经济安全相关发帖和评论增加。"
+      ]
+    },
+    {
+      "id": "safety_general_deficit_v1",
+      "need_key": "safety",
+      "display_name": "一般安全需求缺口",
+      "maslow_need": "safety",
+      "summary": "安全缺口会提高威胁监测、风险规避、寻求庇护和对稳定秩序的偏好。",
+      "source_anchors": [
+        "安全威胁会提高警觉、风险规避和对可预测环境的需求。",
+        "慢性威胁会通过压力负荷影响认知控制与社会判断。"
+      ],
+      "mediators": [
+        {
+          "key": "threat_monitoring",
+          "label": "威胁监测",
+          "base": 0.05,
+          "pressure_weight": 0.78,
+          "decline_weight": 0.08,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "risk_avoidance",
+          "label": "风险规避",
+          "base": 0.04,
+          "pressure_weight": 0.64,
+          "decline_weight": 0.06,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "control_seeking",
+          "label": "控制寻求",
+          "base": 0.03,
+          "pressure_weight": 0.52,
+          "decline_weight": 0.06,
+          "previous_weight": 0.10
+        }
+      ],
+      "role_card_templates": {
+        "low": {
+          "summary": "轻度不安全感，开始留意风险线索。",
+          "emotion_tone": "警觉",
+          "cognition": [
+            "更关注威胁、资源稳定性和陌生环境。"
+          ],
+          "behavior": [
+            "倾向靠近熟悉、稳定或有支持的地点。"
+          ],
+          "social_expression": [
+            "更谨慎地表达判断。"
+          ],
+          "online_behavior": [
+            "更关注安全、秩序和风险提示内容。"
+          ],
+          "decision_bias": [
+            "轻微提高低风险方案权重。"
+          ],
+          "constraints": [
+            "安全缺口必须来自系统记录的事件或状态。"
+          ]
+        },
+        "moderate": {
+          "summary": "中度不安全感，风险规避和控制寻求增强。",
+          "emotion_tone": "紧张、防御",
+          "cognition": [
+            "更容易把不确定事件评估为威胁。",
+            "更偏好可预测、可控制的行动。"
+          ],
+          "behavior": [
+            "减少探索，增加寻求庇护、资源和可信关系的行为。"
+          ],
+          "social_expression": [
+            "对他人建议更谨慎，可能要求更多证据。"
+          ],
+          "online_behavior": [
+            "更可能传播风险提示和求证信息。"
+          ],
+          "decision_bias": [
+            "提高保守行动和稳定资源权重。"
+          ],
+          "constraints": [
+            "不要把一般不安全感自动解释为敌意。"
+          ]
+        },
+        "high": {
+          "summary": "高安全压力，威胁监测占主导。",
+          "emotion_tone": "焦虑、警觉、防御",
+          "cognition": [
+            "持续扫描潜在威胁，对模糊信息作负面解释。"
+          ],
+          "behavior": [
+            "优先远离威胁、寻找安全地点或可信对象。"
+          ],
+          "social_expression": [
+            "表达中防御性更强，容易要求保证和解释。"
+          ],
+          "online_behavior": [
+            "更容易参与安全危机、秩序和保护性政策讨论。"
+          ],
+          "decision_bias": [
+            "显著提高风险规避权重。"
+          ],
+          "constraints": [
+            "不能编造威胁来源。"
+          ]
+        }
+      },
+      "validation_predictions": [
+        "安全压力升高时，探索行为下降，靠近稳定地点或可信关系的行为增加。",
+        "安全压力较高时，风险和秩序相关表达增加。"
+      ]
+    },
+    {
+      "id": "belonging_deficit_v1",
+      "need_key": "belonging",
+      "display_name": "归属需求缺口",
+      "maslow_need": "belonging",
+      "summary": "归属缺口会提高社会痛苦、孤独、拒绝敏感、社交监测、从众或报复倾向。",
+      "source_anchors": [
+        "社会排斥会威胁归属、自尊、控制和有意义存在等基本需要。",
+        "被排斥后个体可能出现负性情绪、社会线索监测增强、从众、亲社会补偿或攻击性反应。"
+      ],
+      "mediators": [
+        {
+          "key": "social_pain",
+          "label": "社会痛苦",
+          "base": 0.04,
+          "pressure_weight": 0.78,
+          "decline_weight": 0.06,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "loneliness",
+          "label": "孤独感",
+          "base": 0.04,
+          "pressure_weight": 0.70,
+          "decline_weight": 0.08,
+          "previous_weight": 0.14
+        },
+        {
+          "key": "rejection_sensitivity",
+          "label": "拒绝敏感",
+          "base": 0.03,
+          "pressure_weight": 0.66,
+          "decline_weight": 0.06,
+          "previous_weight": 0.14
+        },
+        {
+          "key": "conformity_tendency",
+          "label": "从众倾向",
+          "base": 0.02,
+          "pressure_weight": 0.48,
+          "decline_weight": 0.04,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "aggression_tendency",
+          "label": "攻击/报复倾向",
+          "base": 0.01,
+          "pressure_weight": 0.34,
+          "decline_weight": 0.04,
+          "previous_weight": 0.08
+        }
+      ],
+      "role_card_templates": {
+        "low": {
+          "summary": "轻度归属不满足，开始寻求回应和接纳。",
+          "emotion_tone": "不安、渴望连接",
+          "cognition": [
+            "更关注他人是否回应、接近或忽视自己。"
+          ],
+          "behavior": [
+            "更愿意主动对话、评论或靠近可信对象。"
+          ],
+          "social_expression": [
+            "语气更试探，更希望得到回应。"
+          ],
+          "online_behavior": [
+            "更可能点赞、评论或发布寻求互动的信息。"
+          ],
+          "decision_bias": [
+            "轻微提高社交互动权重。"
+          ],
+          "constraints": [
+            "不能把没有互动自动解释为恶意拒绝。"
+          ]
+        },
+        "moderate": {
+          "summary": "中度归属压力，社交监测和从众倾向增强。",
+          "emotion_tone": "孤独、不安、敏感",
+          "cognition": [
+            "更容易注意拒绝、忽视、评价和群体立场线索。",
+            "更倾向用他人的反应判断自身处境。"
+          ],
+          "behavior": [
+            "更倾向寻求回应、加入群体或迎合高信任对象。",
+            "若遭遇负反馈，可能转向退缩或防御。"
+          ],
+          "social_expression": [
+            "表达更在意对方态度，可能出现委屈或试探。"
+          ],
+          "online_behavior": [
+            "更可能转发能带来群体接纳的信息。"
+          ],
+          "decision_bias": [
+            "提高社交确认和同伴一致性权重。"
+          ],
+          "constraints": [
+            "从众只能影响倾向，不能直接覆盖观念更新规则。"
+          ]
+        },
+        "high": {
+          "summary": "高归属压力，社会痛苦和拒绝敏感占主导。",
+          "emotion_tone": "孤独、受伤、防御、渴望接纳",
+          "cognition": [
+            "对拒绝和忽视高度敏感，容易将模糊反馈解释为排斥。",
+            "更强烈监测群体态度和身份归属线索。"
+          ],
+          "behavior": [
+            "可能强烈寻求社交回应、迎合群体，或在反复拒绝后退缩/反击。"
+          ],
+          "social_expression": [
+            "表达更情绪化，可能带有受伤、防御或要求回应的语气。"
+          ],
+          "online_behavior": [
+            "更容易参与身份、群体、排斥和不公平相关话题。"
+          ],
+          "decision_bias": [
+            "显著提高归属修复和群体接纳权重。"
+          ],
+          "constraints": [
+            "攻击倾向必须由明确负面互动或持续拒绝共同支持，不能单独由孤独生成。"
+          ]
+        }
+      },
+      "validation_predictions": [
+        "归属压力升高时，主动对话、评论、点赞、寻求回应行为增加。",
+        "负面社交反馈叠加归属压力时，防御性表达和从众/退缩分化增加。"
+      ]
+    },
+    {
+      "id": "esteem_deficit_v1",
+      "need_key": "esteem",
+      "display_name": "尊重需求缺口",
+      "maslow_need": "esteem",
+      "summary": "尊重缺口会提高自我威胁、地位关注、认可寻求、防御性归因和表现动机。",
+      "source_anchors": [
+        "自尊和社会评价受威胁时，个体更关注认可、地位和能力证明。",
+        "评价威胁可引发防御、补偿性表现或回避失败情境。"
+      ],
+      "mediators": [
+        {
+          "key": "self_threat",
+          "label": "自我威胁",
+          "base": 0.04,
+          "pressure_weight": 0.72,
+          "decline_weight": 0.06,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "recognition_seeking",
+          "label": "认可寻求",
+          "base": 0.03,
+          "pressure_weight": 0.62,
+          "decline_weight": 0.04,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "status_sensitivity",
+          "label": "地位敏感",
+          "base": 0.03,
+          "pressure_weight": 0.56,
+          "decline_weight": 0.04,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "defensive_attribution",
+          "label": "防御性归因",
+          "base": 0.02,
+          "pressure_weight": 0.44,
+          "decline_weight": 0.04,
+          "previous_weight": 0.08
+        }
+      ],
+      "role_card_templates": {
+        "low": {
+          "summary": "轻度尊重不足，开始关注认可和表现。",
+          "emotion_tone": "希望被认可",
+          "cognition": [
+            "更关注点赞、评论、任务成功和他人评价。"
+          ],
+          "behavior": [
+            "更愿意完成可展示能力的任务。"
+          ],
+          "social_expression": [
+            "表达中更容易强调自己的努力或贡献。"
+          ],
+          "online_behavior": [
+            "更可能发布成果、观点或寻求反馈。"
+          ],
+          "decision_bias": [
+            "轻微提高能带来认可的行动权重。"
+          ],
+          "constraints": [
+            "认可寻求不得导致编造成就。"
+          ]
+        },
+        "moderate": {
+          "summary": "中度尊重压力，认可寻求和评价敏感增强。",
+          "emotion_tone": "敏感、较真、防御",
+          "cognition": [
+            "更关注自己是否被重视、被赞同或被轻视。",
+            "更容易把失败解释为他人不认可。"
+          ],
+          "behavior": [
+            "更倾向选择能证明能力、获得点赞或提升地位的行动。"
+          ],
+          "social_expression": [
+            "对批评更敏感，可能更强调自身理由。"
+          ],
+          "online_behavior": [
+            "更可能参与能展示观点能力或争取认可的讨论。"
+          ],
+          "decision_bias": [
+            "提高表现、证明和维护形象的权重。"
+          ],
+          "constraints": [
+            "防御性表达仍需保持事实一致。"
+          ]
+        },
+        "high": {
+          "summary": "高尊重压力，自我威胁和地位敏感占主导。",
+          "emotion_tone": "受挫、防御、渴望证明",
+          "cognition": [
+            "强烈监测轻视、失败和地位损失线索。",
+            "更可能将负面评价视为对自我的威胁。"
+          ],
+          "behavior": [
+            "可能强烈寻求认可、证明能力，或回避可能失败的任务。"
+          ],
+          "social_expression": [
+            "表达更防御、更强调自我价值和公平对待。"
+          ],
+          "online_behavior": [
+            "更容易参与争论、展示成果或回应批评。"
+          ],
+          "decision_bias": [
+            "显著提高形象维护和认可获取权重。"
+          ],
+          "constraints": [
+            "不能把尊重受挫直接转化为攻击行为，除非存在明确互动事件支持。"
+          ]
+        }
+      },
+      "validation_predictions": [
+        "尊重压力升高时，展示成果、争取认可、回应评价的行为增加。",
+        "负面评价叠加尊重压力时，防御性表达增加。"
+      ]
+    },
+    {
+      "id": "self_actualization_deficit_v1",
+      "need_key": "self_actualization",
+      "display_name": "自我实现需求缺口",
+      "maslow_need": "self_actualization",
+      "summary": "自我实现缺口会提高停滞感、意义寻求、自主目标追求和探索/成长动机。",
+      "source_anchors": [
+        "高层成长需求涉及自主目标、意义感、能力发展和价值一致行动。",
+        "长期缺少目标进展会提高停滞感，并改变探索、反思和计划行为。"
+      ],
+      "mediators": [
+        {
+          "key": "stagnation",
+          "label": "停滞感",
+          "base": 0.03,
+          "pressure_weight": 0.68,
+          "decline_weight": 0.05,
+          "previous_weight": 0.14
+        },
+        {
+          "key": "meaning_seeking",
+          "label": "意义寻求",
+          "base": 0.03,
+          "pressure_weight": 0.60,
+          "decline_weight": 0.04,
+          "previous_weight": 0.12
+        },
+        {
+          "key": "growth_motivation",
+          "label": "成长动机",
+          "base": 0.04,
+          "pressure_weight": 0.52,
+          "decline_weight": 0.03,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "autonomy_seeking",
+          "label": "自主寻求",
+          "base": 0.03,
+          "pressure_weight": 0.48,
+          "decline_weight": 0.03,
+          "previous_weight": 0.10
+        }
+      ],
+      "role_card_templates": {
+        "low": {
+          "summary": "轻度成长不足，开始希望做更有意义的事。",
+          "emotion_tone": "若有所失、想探索",
+          "cognition": [
+            "更关注长期目标、学习机会和新地点。"
+          ],
+          "behavior": [
+            "在基本需求满足后更愿意探索和反思。"
+          ],
+          "social_expression": [
+            "表达中更可能谈到目标、计划和意义。"
+          ],
+          "online_behavior": [
+            "更关注学习、成长、政策愿景和未来规划内容。"
+          ],
+          "decision_bias": [
+            "轻微提高探索和长期计划权重。"
+          ],
+          "constraints": [
+            "自我实现不应压倒严重生理和安全压力。"
+          ]
+        },
+        "moderate": {
+          "summary": "中度成长压力，意义寻求和自主目标追求增强。",
+          "emotion_tone": "不满足、想改变、反思",
+          "cognition": [
+            "更容易感到重复行动缺乏意义。",
+            "更关注是否能按自己的价值和目标行动。"
+          ],
+          "behavior": [
+            "在基本需求可控时，更倾向探索新地点、形成计划或尝试新社交话题。"
+          ],
+          "social_expression": [
+            "表达更偏反思、规划和价值判断。"
+          ],
+          "online_behavior": [
+            "更可能发表对未来、成长、制度改进的观点。"
+          ],
+          "decision_bias": [
+            "提高长期目标、学习和探索权重。"
+          ],
+          "constraints": [
+            "长期目标必须与当前可执行工具兼容。"
+          ]
+        },
+        "high": {
+          "summary": "高自我实现压力，停滞感明显，强烈寻求意义与突破。",
+          "emotion_tone": "压抑、焦躁、渴望突破",
+          "cognition": [
+            "强烈关注生活是否停滞、行动是否有意义。",
+            "更容易将环境限制解释为阻碍自我发展。"
+          ],
+          "behavior": [
+            "若低层需求稳定，优先探索、制定长期计划、寻找能表达价值的社交行动。"
+          ],
+          "social_expression": [
+            "表达更价值化，可能带有对现状的不满和改革愿望。"
+          ],
+          "online_behavior": [
+            "更容易参与理想、制度、未来和个人成长相关讨论。"
+          ],
+          "decision_bias": [
+            "显著提高价值一致行动和长期目标权重。"
+          ],
+          "constraints": [
+            "不能把自我实现受挫直接解释为临床症状。"
+          ]
+        }
+      },
+      "validation_predictions": [
+        "自我实现压力升高且低层需求稳定时，探索、长期计划和反思行为增加。",
+        "高层成长压力会提高价值表达和未来导向发帖比例。"
+      ]
+    }
+  ]
+}

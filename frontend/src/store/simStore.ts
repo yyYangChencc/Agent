@@ -1,18 +1,25 @@
 import { create } from 'zustand'
 
-// 与后端 serializer.py snapshot() 输出字段保持一致
+// 与后端 world/serializer.py 的 snapshot() 输出字段保持一致。
+// 如果后端新增/删除字段，需要同步更新这里的类型和 setWorldState 的历史采样逻辑。
 export interface AgentState {
   id: string
   pos: [number, number]       // [row, col]
-  role: string
   emotion: string
   task: string
   current_focus: string       // micro-reflect 更新的当前策略焦点
   salary: number              // 工资：公司自动交互时获得的 money 增量
-  satisfaction: Record<string, number>            // 客观需求，0→1
-  urgency: Record<string, number>          // 主观急迫度，1→0
+  satisfaction: Record<string, number>            // 客观需求；satiety/relax 为 0~100，money 无上限
+  urgency: Record<string, number>          // 主观急迫度，0~1
   satisfaction_threshold: Record<string, number> // 任务完成阈值
-  opinion: number             // 意见倾向，0~1
+  need_gap: Record<string, number>
+  pressure_memory: Record<string, number>
+  load_saturation: Record<string, number>
+  effective_pressure: Record<string, number>
+  last_psychological_assessment: Record<string, unknown> | null
+  opinion: number             // 对系统新闻主题的意见倾向，-1~1
+  opinion_scores: Record<string, number> // 系统新闻主题 score 镜像，用于展示和历史分析
+  last_opinion_assessment: Record<string, unknown> | null
   last_think: string          // 最近一次 <Think> 内容
   sleeping: boolean           // 是否处于睡眠状态
   sleep_ticks_remaining: number  // 剩余睡眠步数
@@ -102,6 +109,7 @@ export interface MovementState {
 
 export interface WorldState {
   time: number
+  simulation_step_limit: number
   map_size: [number, number]
   map_design: MapDesignState | null
   movements: MovementState[]
@@ -118,6 +126,8 @@ export interface AgentHistoryPoint {
   money: number
   satiety_urgency: number
   relax_urgency: number
+  satiety_pressure: number
+  relax_pressure: number
   emotion: string
 }
 
@@ -159,6 +169,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
     const prev = get().agentHistory
     const next: Record<string, AgentHistoryPoint[]> = { ...prev }
     for (const a of worldState.agents) {
+      // 趋势图只保留最近 MAX_HISTORY 个点，避免长时间运行后前端状态无限增长。
       const point: AgentHistoryPoint = {
         tick: worldState.time,
         opinion: a.opinion,
@@ -167,6 +178,8 @@ export const useSimStore = create<SimStore>((set, get) => ({
         money: a.satisfaction.money ?? 0,
         satiety_urgency: a.urgency.satiety ?? 0,
         relax_urgency: a.urgency.relax ?? 0,
+        satiety_pressure: a.effective_pressure?.satiety ?? 0,
+        relax_pressure: a.effective_pressure?.relax ?? 0,
         emotion: a.emotion,
       }
       const arr = prev[a.id] ?? []

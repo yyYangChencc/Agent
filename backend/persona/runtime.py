@@ -17,12 +17,17 @@ from persona.agents.prompt import (
 from persona.agents.parser import ActionParser
 from persona.reflect.reflect import Reflect
 from social_sys.platform.platform import SocialPlatform
-from persona.opinion.updater import OpinionUpdater
+from persona.opinion import OpinionAssessmentCoordinator
+from persona.psychology import PsychologicalAssessmentCoordinator
 
 
 @dataclass
 class SimulationRuntime:
-    """Composition root: holds every shared service; create once per simulation."""
+    """仿真的组合根。
+
+    所有共享服务都在这里创建并注入：LLM、记忆、世界、社交平台、各类 policy、
+    心理评测器和观念评测器。这样 reset 或创建 agent 时不会散落重复初始化逻辑。
+    """
     config: AgentConfig
     llm: LLMClient
     mem: MultiAgentMemoryManager
@@ -43,6 +48,8 @@ class SimulationRuntime:
         base_url: str | None = None,
         conversation_max_rounds: int = 2,
     ) -> SimulationRuntime:
+        """从环境变量和配置构建一套完整运行时。"""
+
         if config is None:
             config = AgentConfig()
         if api_key is None:
@@ -52,12 +59,18 @@ class SimulationRuntime:
         embedding_key = os.environ.get("EMBEDDING_KEY")
         embedding_base_url = os.environ.get("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
 
+        # LLM 客户端同时承担文本生成和 embedding；记忆、policy、评测器共享同一客户端。
         from persona.llm.openai_client import AsyncOpenAIClient
         llm = AsyncOpenAIClient(api_key=api_key, base_url=base_url, embedding_key=embedding_key, embedding_base_url=embedding_base_url, config=config)
         mem = MultiAgentMemoryManager(llm)
-        opinion_updater = OpinionUpdater(config)
+        opinion_assessor = OpinionAssessmentCoordinator(config, llm)
+        psychological_assessor = PsychologicalAssessmentCoordinator(config, llm)
         platform = SocialPlatform()
-        world = World(opinion_updater=opinion_updater, platform=platform)
+        world = World(
+            platform=platform,
+            psychological_assessor=psychological_assessor,
+            opinion_assessor=opinion_assessor,
+        )
         policy = LLMPolicy(llm, WorldPromptBuilder(), ActionParser())
         social_policy = LLMPolicy(llm, SocialPromptBuilder(), ActionParser())
         conv_policy = LLMPolicy(llm, ConversationPromptBuilder(), ActionParser())
@@ -80,9 +93,9 @@ class SimulationRuntime:
         )
 
     def create_agent(self, agent_id: str, position: list[int],
-                     role: str = "", speaking_style: str = "",
+                     speaking_style: str = "",
                      salary: float = 0.0) -> Agent:
-        """Create an agent wired to all runtime services and register it on the platform."""
+        """创建已接入全部服务的智能体，并注册到社交平台。"""
         agent = Agent(
             agent_id=agent_id,
             position=position,
@@ -93,7 +106,6 @@ class SimulationRuntime:
             platform=self.platform,
             social_policy=self.social_policy,
             config=self.config,
-            role=role,
             speaking_style=speaking_style,
             salary=salary,
         )
@@ -101,9 +113,14 @@ class SimulationRuntime:
         return agent
 
     def reset(self) -> None:
-        """Wipe memory and rebuild world and platform for a fresh run."""
+        """清空记忆并重建 world/platform，用于从干净状态重新开始实验。"""
+
         self.mem.reset_all()
         self.platform = SocialPlatform()
-        self.world = World(opinion_updater=OpinionUpdater(self.config), platform=self.platform)
+        self.world = World(
+            platform=self.platform,
+            psychological_assessor=PsychologicalAssessmentCoordinator(self.config, self.llm),
+            opinion_assessor=OpinionAssessmentCoordinator(self.config, self.llm),
+        )
         self.world.conversation_policy = self.conv_policy
         self.world.conversation_max_rounds = self.conversation_max_rounds

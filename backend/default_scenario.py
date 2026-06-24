@@ -43,31 +43,26 @@ def build_cli_demo_runtime(
         "agent_1": runtime.create_agent(
             "agent_1",
             [3, 3],
-            role="保守主义者，倾向于节约资源，不喜欢变化",
             speaking_style="沉稳、措辞谨慎",
         ),
         "agent_2": runtime.create_agent(
             "agent_2",
             [4, 2],
-            role="积极探索者，乐于尝试新事物并分享经验",
             speaking_style="热情、喜欢分享",
         ),
         "agent_3": runtime.create_agent(
             "agent_3",
             [6, 6],
-            role="中立观察者，善于倾听各方意见后再表态",
             speaking_style="理性、措辞中立",
         ),
         "agent_4": runtime.create_agent(
             "agent_4",
             [2, 8],
-            role="激进改革派，主张打破现有秩序追求效率",
             speaking_style="直接、充满激情",
         ),
         "agent_5": runtime.create_agent(
             "agent_5",
             [8, 4],
-            role="社区协调员，重视群体和谐与共识",
             speaking_style="温和、善于调解",
         ),
     }
@@ -107,46 +102,63 @@ def _create_default_agents(runtime: SimulationRuntime) -> dict[str, object]:
         "agent_1": runtime.create_agent(
             "agent_1",
             [3, 3],
-            role="保守主义者，倾向于节约资源，不喜欢变化",
             speaking_style="沉稳、措辞谨慎",
         ),
         "agent_2": runtime.create_agent(
             "agent_2",
             [4, 2],
-            role="积极探索者，乐于尝试新事物，遇到问题优先自己动手解决",
             speaking_style="热情、喜欢分享",
         ),
         "agent_3": runtime.create_agent(
             "agent_3",
             [6, 6],
-            role="中立观察者，善于独立分析后再做决定",
             speaking_style="理性、措辞中立",
         ),
         "agent_4": runtime.create_agent(
             "agent_4",
             [2, 9],
-            role="激进改革派，主张打破现有秩序追求效率",
             speaking_style="直接、充满激情",
         ),
         "agent_5": runtime.create_agent(
             "agent_5",
             [8, 4],
-            role="社区协调员，重视群体和谐，但优先以自身行动解决问题",
             speaking_style="温和、善于调解",
         ),
     }
 
 
-def _configure_opinions_and_money(agents: dict[str, object], initial_money: float | None = 200.0) -> None:
-    agents["agent_1"].opinion = 0.15
-    agents["agent_2"].opinion = 0.45
-    agents["agent_3"].opinion = 0.50
-    agents["agent_4"].opinion = 0.85
-    agents["agent_5"].opinion = 0.60
+_USE_DEFAULT_INITIAL_MONEY = object()
+
+DEFAULT_INITIAL_MONEY = {
+    "agent_1": 8.0,
+    "agent_2": 14.0,
+    "agent_3": 18.0,
+    "agent_4": 24.0,
+    "agent_5": 12.0,
+}
+
+
+def _configure_opinions_and_money(
+    agents: dict[str, object],
+    initial_money: float | dict[str, float] | None | object = _USE_DEFAULT_INITIAL_MONEY,
+) -> None:
+    agents["agent_1"].opinion = -0.65
+    agents["agent_2"].opinion = -0.20
+    agents["agent_3"].opinion = 0.00
+    agents["agent_4"].opinion = 0.65
+    agents["agent_5"].opinion = 0.25
+
+    if initial_money is _USE_DEFAULT_INITIAL_MONEY:
+        initial_money = DEFAULT_INITIAL_MONEY
 
     if initial_money is not None:
-        for agent in agents.values():
-            agent.satisfaction["money"] = initial_money
+        for agent_id, agent in agents.items():
+            target_money = (
+                initial_money.get(agent_id, 0.0)
+                if isinstance(initial_money, dict)
+                else initial_money
+            )
+            agent.update_satisfaction("money", target_money - agent.satisfaction.get("money", 0.0))
 
 
 def _configure_trust(agents: dict[str, object]) -> None:
@@ -199,13 +211,13 @@ def _place_default_objects(runtime: SimulationRuntime) -> None:
     bed("bed_4", [2, 8], world)
     bed("bed_5", [2, 10], world)
 
-    company("company_1", [20, 3], world, salary=10)
-    company("company_2", [22, 6], world, salary=15)
+    company("company_1", [20, 3], world, salary=8, relax_cost=8)
+    company("company_2", [22, 6], world, salary=12, relax_cost=12)
 
-    food_shop("shop_1", [2, 18], world, food_num=20, provide=30, price=5)
-    food_shop("shop_2", [4, 21], world, food_num=15, provide=20, price=3)
+    food_shop("shop_1", [2, 18], world, food_num=20, provide=30, price=6)
+    food_shop("shop_2", [4, 21], world, food_num=15, provide=20, price=4)
 
-    playground("playground_1", [20, 20], world, provide=20, price=3)
+    playground("playground_1", [20, 20], world, provide=18, price=5)
 
     food("food_1", 3, 20, [10, 8], world)
     food("food_2", 3, 20, [12, 14], world)

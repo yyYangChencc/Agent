@@ -10,6 +10,8 @@ from persona.logger import get_logger
 logger = get_logger(__name__)
 
 def register_operator_tools(operator):
+    """把 Operator 方法包装成 Tool，并生成给 LLM 使用的工具说明文本。"""
+
     tool_specs = operator.tool_specs
     tools = {}
     for name, spec in tool_specs.items():
@@ -40,6 +42,11 @@ def register_operator_tools(operator):
 
 
 class Operator:
+    """线下世界工具集合。
+
+    LLM 只输出工具 JSON；World.execute 再调用这里的方法改变地图、需求和对象状态。
+    """
+
     def __init__(self, world):
         self.world = world
         self.tool_specs = {
@@ -67,7 +74,7 @@ class Operator:
                 "returns": str,
             },
             "sleep": {
-                "description": "在指定ID的床上休息，立即恢复放松度，并进入睡眠状态；睡眠结束前不会行动",
+                "description": "在指定ID的床上休息，并进入睡眠状态；睡眠期间每个时间步恢复一部分放松度，睡眠结束前不会行动",
                 "args": {"ID": str},
                 "returns": str,
                 "constraint": "目标必须是床(bed)，且在欧氏距离√2范围内（即相邻格子）"
@@ -86,6 +93,17 @@ class Operator:
             }
         }
 
+    def _in_bounds(self, x: int, y: int) -> bool:
+        return 0 <= x < self.world.map.height and 0 <= y < self.world.map.width
+
+    def _adjacent_empty_cell(self, position: list[int]) -> list[int] | None:
+        bx, by = position
+        for dx, dy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]:
+            nx, ny = bx + dx, by + dy
+            if self._in_bounds(nx, ny) and self.world.map.is_empty(nx, ny):
+                return [nx, ny]
+        return None
+
     def social_step(self, operator_ID):
         logger.info("[%s] 正在查看帖子...", operator_ID)
         agent = self.world.agents[operator_ID]
@@ -100,6 +118,8 @@ class Operator:
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
     def _road_cells(self) -> set[tuple[int, int]]:
+        """读取地图设计中的道路格；道路在寻路中有更低移动成本。"""
+
         design = getattr(self.world, "map_design", None)
         if not isinstance(design, dict):
             return set()
@@ -151,12 +171,12 @@ class Operator:
         *,
         stop_within_distance_sq: float | None = None,
     ) -> list[list[int]]:
-        """Plan a route on the current grid.
+        """在当前网格上规划路径。
 
-        Occupied cells are treated as blocked, except for the moving agent's start cell.
-        If the exact target is blocked or unreachable, the route ends at the reachable
-        cell nearest to target.
+        除移动者起点外，占用格视为障碍。如果目标格被占用或不可达，
+        路径会停在最接近目标的可达格；若目标是可交互物品，可停在交互距离内。
         """
+
         road_cells = self._road_cells()
         distances: dict[tuple[int, int], float] = {start: 0.0}
         parents: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
@@ -178,6 +198,7 @@ class Operator:
                 heapq.heappush(heap, (next_cost, next_pos[0], next_pos[1], len(parents)))
 
         if stop_within_distance_sq is not None:
+            # 对食物等可交互目标，只要走到交互半径内即可，不要求踩到目标格。
             reachable_goals = [
                 pos for pos in distances
                 if self._distance_sq(pos, target) <= stop_within_distance_sq
@@ -221,7 +242,10 @@ class Operator:
 
         exit_msg = ""
         if agent.inside_building_id:
+            # 移动前必须先离开建筑，否则地图坐标和 inside_building_id 会不一致。
             exit_msg = self.exit_building(operator_ID)
+            if agent.inside_building_id:
+                return exit_msg
 
         old_x, old_y = agent.position
         if x == old_x and y == old_y:
@@ -238,6 +262,7 @@ class Operator:
             target_interactable = isinstance(target_obj, Interactable) and not isinstance(target_obj, building)
             stop_distance_sq = agent.config.eat_distance_sq if target_interactable else None
 
+            # 路径规划在锁内完成，避免并发 agent 同时占用同一个目标格。
             planned_path = self._find_path(
                 (old_x, old_y),
                 (x, y),
@@ -250,6 +275,8 @@ class Operator:
             steps = max(0, len(path) - 1)
 
             def _try_interact_at(cx: int, cy: int) -> None:
+                """移动过程中到达交互范围时，顺手触发目标物品的 interact。"""
+
                 nonlocal interact_msg
                 if not target_interactable or interact_msg:
                     return
@@ -328,6 +355,10 @@ class Operator:
         if operator_ID not in self.world.agents:
             return "智能体不存在"
         agent = self.world.agents[operator_ID]
+        if agent.sleeping:
+            return "已经在睡眠中"
+        if agent.inside_building_id:
+            return "当前在建筑内，需先离开建筑再睡觉"
         with self.world._world_lock:
             if ID not in self.world.objects:
                 return "物品不存在"
@@ -339,7 +370,8 @@ class Operator:
             if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
                 return "距离过远无法休息"
             result = target.interact(agent)
-        logger.info("[%s] 开始睡觉 → %s", operator_ID, ID)
+        if agent.sleeping:
+            logger.info("[%s] 开始睡觉 → %s", operator_ID, ID)
         return f"{operator_ID}{result}"
 
     def enter_building(self, operator_ID: str, ID: str):
@@ -348,6 +380,12 @@ class Operator:
         if operator_ID not in self.world.agents:
             return "智能体不存在"
         agent = self.world.agents[operator_ID]
+        if agent.sleeping:
+            return "睡眠中无法进入建筑"
+        if agent.inside_building_id:
+            if agent.inside_building_id == ID:
+                return f"已在建筑 {ID} 内"
+            return "当前已在其他建筑内，请先离开建筑"
         with self.world._world_lock:
             if ID not in self.world.objects:
                 return "物品不存在"
@@ -359,7 +397,11 @@ class Operator:
             a_pos = agent.get_position()
             if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
                 return "距离过远无法进入"
+            old_x, old_y = agent.position
             enter_result = target.enter(agent)
+            if self._in_bounds(old_x, old_y) and self.world.map.get_e(old_x, old_y) == agent.id:
+                self.world.map.remove(old_x, old_y)
+            agent.position = list(target.position)
         interact_result = self.world.interact_inside_building(agent, record_history=False, source="enter_building")
         result = f"{enter_result}; {interact_result}" if interact_result else enter_result
         logger.info("[%s] 进入建筑 %s", operator_ID, ID)
@@ -377,12 +419,26 @@ class Operator:
                 agent.inside_building_id = None
                 return "建筑不存在，已强制退出"
             target = self.world.objects[building_id]
+            exit_pos = self._adjacent_empty_cell(target.position)
+            if exit_pos is None:
+                return "建筑周围没有空位，无法离开"
             result = target.exit(agent)
+            old_x, old_y = agent.position
+            if self._in_bounds(old_x, old_y) and self.world.map.get_e(old_x, old_y) == agent.id:
+                self.world.map.remove(old_x, old_y)
+            self.world.map.place(exit_pos[0], exit_pos[1], agent.id)
+            agent.position = exit_pos
         logger.info("[%s] 离开建筑 %s", operator_ID, building_id)
         return result
 
 
 class SocialOperator:
+    """线上社交平台工具集合。
+
+    这里强制所有互动只能作用于当前 social_step 返回给智能体的帖子，避免 LLM
+    编造 post_id 或操作不可见帖子。
+    """
+
     def __init__(self, platform):
         self.platform = platform
         self.tool_specs = {
@@ -415,6 +471,8 @@ class SocialOperator:
         return list(getattr(agent, "_last_seen_posts", []) or [])
 
     def _resolve_visible_post(self, operator_ID: str, post_id):
+        """校验 post_id 是否是当前可互动帖子列表中的整数 ID。"""
+
         if isinstance(post_id, bool):
             logger.warning("[%s] 社交动作失败，post_id 非整数: %r", operator_ID, post_id)
             return None, None, "post_id 必须是当前可互动帖子ID列表中的整数"
@@ -445,6 +503,7 @@ class SocialOperator:
         return f"{operator_ID}对{ID}说:{content}"
 
     def send_post(self, operator_ID, content):
+        # 发帖时的 opinion_index 目前由 evaluate_opinion 占位函数给出。
         with self.platform._posts_lock:
             post_id = len(self.platform.posts) + 1
             new_post = Post(post_id, operator_ID, content)
@@ -480,6 +539,7 @@ class SocialOperator:
         agent = self.platform.get_agent(operator_ID)
         if agent is not None and post.author_id != operator_ID:
             cfg = agent.config
+            # 点赞被视作弱正反馈，只调整 online_trust，不直接更新观念分数。
             agent.online_trust[post.author_id] = min(
                 1.0,
                 agent.online_trust.get(post.author_id, cfg.default_online_trust) + 0.05
@@ -501,6 +561,7 @@ class SocialOperator:
         agent = self.platform.get_agent(operator_ID)
         if agent is not None and post.author_id != operator_ID:
             cfg = agent.config
+            # 点踩被视作弱负反馈，只调整 online_trust，不直接更新观念分数。
             agent.online_trust[post.author_id] = max(
                 0.0,
                 agent.online_trust.get(post.author_id, cfg.default_online_trust) - 0.05

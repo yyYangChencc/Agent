@@ -34,10 +34,39 @@ if "chromadb" not in sys.modules:
             self.collections.clear()
 
     class _Collection:
-        metadata = {}
+        def __init__(self):
+            self.ids: list[str] = []
+            self.documents: list[str] = []
+            self.metadatas: list[dict] = []
+            self.metadata = {}
 
         def count(self):
-            return 0
+            return len(self.ids)
+
+        def upsert(self, embeddings=None, documents=None, metadatas=None, ids=None):
+            for memory_id, document, metadata in zip(ids or [], documents or [], metadatas or []):
+                if memory_id in self.ids:
+                    index = self.ids.index(memory_id)
+                    self.documents[index] = document
+                    self.metadatas[index] = metadata
+                else:
+                    self.ids.append(memory_id)
+                    self.documents.append(document)
+                    self.metadatas.append(metadata)
+
+        def get(self, where=None, include=None):
+            indexes = range(len(self.ids))
+            if where and "agent_id" in where:
+                indexes = [
+                    index
+                    for index in indexes
+                    if self.metadatas[index].get("agent_id") == where["agent_id"]
+                ]
+            return {
+                "ids": [self.ids[index] for index in indexes],
+                "documents": [self.documents[index] for index in indexes],
+                "metadatas": [self.metadatas[index] for index in indexes],
+            }
 
     chromadb_stub.PersistentClient = _PersistentClient
     sys.modules["chromadb"] = chromadb_stub
@@ -84,6 +113,27 @@ class _QueryCollection:
     def query(self, **kwargs):
         self.query_calls.append(kwargs)
         return self.results
+
+
+class _ListCollection:
+    def __init__(self):
+        self.result = {
+            "ids": ["old", "new", "missing_time"],
+            "documents": ["old memory", "new memory", "memory without saved_at"],
+            "metadatas": [
+                {"agent_id": "agent_1", "saved_at": 1, "memory_type": "episodic"},
+                {"agent_id": "agent_1", "saved_at": 5, "memory_type": "semantic"},
+                {"agent_id": "agent_1", "memory_type": "reflective"},
+            ],
+        }
+        self.get_calls: list[dict] = []
+
+    def count(self):
+        return len(self.result["ids"])
+
+    def get(self, **kwargs):
+        self.get_calls.append(kwargs)
+        return self.result
 
 
 def _manager(llm: _LLM | None = None) -> MultiAgentMemoryManager:
@@ -209,6 +259,19 @@ class MemorySystemTest(unittest.TestCase):
         self.assertIn("当前任务: find_food", llm.embedded_texts[-1])
         self.assertEqual(collection.query_calls[0]["where"], {"agent_id": "agent_1"})
         self.assertIn("map memory", memories[0])
+
+    def test_list_agent_memories_returns_structured_rows_sorted_by_saved_at(self):
+        manager = _manager()
+        collection = _ListCollection()
+        manager.get_agent_collection = lambda agent_id: collection
+
+        rows = manager.list_agent_memories("agent_1")
+
+        self.assertEqual(collection.get_calls[0]["where"], {"agent_id": "agent_1"})
+        self.assertEqual(collection.get_calls[0]["include"], ["documents", "metadatas"])
+        self.assertEqual([row["id"] for row in rows], ["new", "old", "missing_time"])
+        self.assertEqual(rows[0]["document"], "new memory")
+        self.assertEqual(rows[0]["metadata"]["saved_at"], 5)
 
     def test_memory_prompt_adds_action_hints(self):
         block = BasePromptBuilder()._memory_block([

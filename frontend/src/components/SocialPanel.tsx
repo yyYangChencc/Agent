@@ -14,13 +14,19 @@ function agentColor(id: string): string {
 }
 
 function OpinionBar({ value }: { value: number }) {
-  const pct = Math.round(value * 100)
+  const clamped = Math.max(-1, Math.min(1, value))
+  const pct = Math.abs(clamped) * 50
+  const left = clamped >= 0 ? 50 : 50 - pct
   const color =
-    value < 0.35 ? 'bg-[#b94b4b]' : value > 0.65 ? 'bg-[#4f8f4d]' : 'bg-[#8a7356]'
+    clamped < -0.35 ? 'bg-[#b94b4b]' : clamped > 0.35 ? 'bg-[#4f8f4d]' : 'bg-[#8a7356]'
   return (
     <div className="flex items-center gap-1.5 mt-1">
       <div className="relative h-2 w-20 bg-[#d7b36a] border border-[#6c584c] rounded overflow-hidden">
-        <div className={`h-full rounded ${color}`} style={{ width: `${pct}%` }} />
+        <div className="absolute left-1/2 top-0 h-full w-px bg-[#25251c]/60" />
+        <div
+          className={`absolute top-0 h-full rounded ${color}`}
+          style={{ left: `${left}%`, width: `${pct}%` }}
+        />
       </div>
       <span className="text-[#6c584c] text-xs font-mono">{value.toFixed(2)}</span>
     </div>

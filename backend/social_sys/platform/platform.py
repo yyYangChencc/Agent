@@ -3,10 +3,17 @@ import threading
 from tools.operator_tools import SocialOperator, register_operator_tools
 from social_sys.post.post import Post
 from persona.logger import get_logger
+from persona.opinion.scale import OPINION_NEUTRAL, clamp_opinion
 
 logger = get_logger(__name__)
 
 class SocialPlatform:
+    """简化社交平台。
+
+    平台负责保存用户和帖子，并执行 SocialOperator 工具。帖子可见性由
+    give_post 控制：关注对象帖子和系统新闻对智能体可见。
+    """
+
     def __init__(self):
         self.agents = {}
         self.posts = []
@@ -25,6 +32,8 @@ class SocialPlatform:
         self.posts.append(post)
 
     def give_post(self, receiver_id):
+        """返回某个智能体本轮可见的帖子。"""
+
         res = []
         receiver = self.get_agent(receiver_id)
         if not receiver:
@@ -34,18 +43,19 @@ class SocialPlatform:
                 res.append(post)
         return res
 
-    def inject_news(self, tick: int, title: str, content: str, opinion_index: float = 0.5):
+    def inject_news(self, tick: int, title: str, content: str, opinion_index: float = OPINION_NEUTRAL):
         """投放真实新闻到社交平台，所有智能体自动可见（通过 is_news 标记）。"""
         post_id = len(self.posts) + 1
         news_post = Post(post_id, "system", f"【{title}】{content}", is_news=True)
-        news_post.opinion_index = opinion_index
+        news_post.opinion_index = clamp_opinion(opinion_index)
         news_post.time = tick
         self.posts.append(news_post)
         logger.info("[News] tick=%d 投放新闻: %s", tick, title)
         return news_post
 
     def execute(self, Operator_id, action_str):
-        #执行智能体调用的函数，具体逻辑在 tools/operator_tools.py 中定义，action_str 是一个 JSON 字符串，包含工具名称和参数
+        """解析社交动作 JSON，并调用 SocialOperator 中的具体工具。"""
+
         if not action_str:
             return ""
         try:

@@ -30,17 +30,87 @@ class BasePromptBuilder:
             status = "✓" if isinstance(threshold, (int, float)) and satisfaction_val > threshold else "✗"
             threshold_text = f"{threshold:.1f}" if isinstance(threshold, (int, float)) else "未配置"
             lines.append(
-                f"  {k}: satisfaction={satisfaction_val:.1f} urgency={urgency:.2f} threshold={threshold_text} {status}"
+                f"  {k}: satisfaction={satisfaction_val:.1f} urgency={urgency:.2f} "
+                f"threshold={threshold_text} gap={agent.need_gap.get(k, 0.0):.2f} "
+                f"load={agent.load_saturation.get(k, 0.0):.2f} "
+                f"pressure={agent.effective_pressure.get(k, 0.0):.2f} {status}"
             )
         return "\n".join(lines)
 
     def _persona_block(self, agent: "Agent") -> str:
         lines = []
-        if agent.role:
-            lines.append(f"- 角色：{agent.role}")
         if agent.speaking_style:
             lines.append(f"- 说话风格：{agent.speaking_style}")
         lines.append(f"- 当前情绪：{agent.emotion}")
+        return "\n".join(lines)
+
+    def _role_card_instruction(self) -> str:
+        return (
+            "- 必须按照“动态心理角色卡”调整本轮认知、表达、社交和行动倾向；"
+            "若角色卡与工具规则、地图观测或真实需求冲突，以工具规则、地图观测和真实需求为准\n"
+        )
+
+    def _psychological_role_card_block(self, agent: "Agent") -> str:
+        assessment = agent.last_psychological_assessment
+        if not isinstance(assessment, dict):
+            return "（暂无动态心理角色卡）"
+        role_card = assessment.get("role_card_delta")
+        if not isinstance(role_card, dict) or not role_card:
+            return "（暂无动态心理角色卡）"
+
+        lines = []
+        tick = assessment.get("tick")
+        if tick is not None:
+            lines.append(f"- 生成时间步：t={tick}")
+        status = assessment.get("status")
+        if status:
+            lines.append(f"- 评测状态：{status}")
+        activated_needs = role_card.get("activated_needs") or assessment.get("activated_needs")
+        if activated_needs:
+            lines.append(f"- 激活需求：{', '.join(str(x) for x in activated_needs)}")
+        dominant_need = role_card.get("dominant_need")
+        if dominant_need:
+            lines.append(f"- 主导需求：{dominant_need}")
+        summary = role_card.get("summary")
+        if summary:
+            lines.append(f"- 心理摘要：{summary}")
+        emotion_tone = role_card.get("emotion_tone")
+        if emotion_tone:
+            lines.append(f"- 情绪基调：{emotion_tone}")
+
+        field_labels = [
+            ("cognition", "认知偏置"),
+            ("behavior", "行为倾向"),
+            ("social_expression", "表达风格"),
+            ("online_behavior", "线上行为倾向"),
+            ("decision_bias", "决策偏置"),
+            ("constraints", "约束"),
+        ]
+        for field, label in field_labels:
+            values = role_card.get(field)
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, list) and values:
+                lines.append(f"- {label}：")
+                for value in values[:4]:
+                    lines.append(f"  · {value}")
+
+        mediator_focus = role_card.get("mediator_focus")
+        if isinstance(mediator_focus, list) and mediator_focus:
+            focus_text = []
+            for item in mediator_focus[:4]:
+                if isinstance(item, dict):
+                    key = item.get("key")
+                    value = item.get("value")
+                    need_key = item.get("need_key")
+                    if key is not None and value is not None:
+                        prefix = f"{need_key}." if need_key else ""
+                        focus_text.append(f"{prefix}{key}={value}")
+            if focus_text:
+                lines.append(f"- 主要心理中介：{'; '.join(focus_text)}")
+
+        if not lines:
+            return "（暂无动态心理角色卡）"
         return "\n".join(lines)
 
     def _action_format_block(self, action_schema: str, no_action_label: str) -> str:
@@ -90,7 +160,7 @@ class BasePromptBuilder:
         return memory
 
     def _opinion_block(self, agent: "Agent") -> str:
-        return f"- 当前观念倾向：{agent.opinion:.3f}（0=保守，1=激进）"
+        return f"- 当前观念倾向：{agent.opinion:.3f}（-1=强烈反对，0=中立/未知，1=强烈支持）"
 
     def _focus_block(self, agent: "Agent") -> str:
         if not agent.current_focus:
@@ -131,6 +201,7 @@ class WorldPromptBuilder(BasePromptBuilder):
             "  · 禁止：发帖询问你已知的信息（记忆中或观测到的建筑、食物、商店位置等）\n"
             "  · 任务为 none 且所有需求已满足时，可自由选择任意动作\n"
             "- 记忆中的位置信息是可靠的，直接使用，不需要反复确认\n\n"
+            f"{self._role_card_instruction()}"
             f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
             "<Think>\n"
@@ -149,6 +220,8 @@ class WorldPromptBuilder(BasePromptBuilder):
             f"{self._urgency_block(agent)}\n"
             f"{self._focus_block(agent)}"
             f"{self._opinion_block(agent)}\n\n"
+            "## 动态心理角色卡\n"
+            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 观测（半径5格）\n"
             f"{observation}\n\n"
             "## 近期历史\n"
@@ -185,6 +258,7 @@ class SocialPromptBuilder(BasePromptBuilder):
             "- 调用 comment_post / like_post / dislike_post 时，post_id 必须逐字复制“当前可互动帖子ID列表”或“帖子ID”字段中的整数\n"
             "- 禁止把发布时间、评论数量、列表顺序、作者编号、历史记忆中的帖子编号当成 post_id\n"
             "- 浏览时积极参与互动（点赞/评论），而非只看不发\n\n"
+            f"{self._role_card_instruction()}"
             f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
             "<Think>\n"
@@ -202,6 +276,8 @@ class SocialPromptBuilder(BasePromptBuilder):
             f"{self._urgency_block(agent)}\n"
             f"{self._focus_block(agent)}"
             f"{self._opinion_block(agent)}\n\n"
+            "## 动态心理角色卡\n"
+            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 你的发帖历史\n"
             f"{agent.get_post_history() or '（暂无发帖记录）'}\n\n"
             "## 当前浏览的帖子\n"
@@ -234,6 +310,7 @@ class ConversationPromptBuilder(BasePromptBuilder):
             "- 对话消息中若包含 session 或 intent，应优先围绕该会话线程和意图回复，避免混淆多个话题\n"
             "- 回答事实问题时，优先依据观察和记忆；不知道时直接说明不知道，不要编造坐标、对象ID或他人状态\n"
             "- 禁止执行移动、进食等非对话动作\n\n"
+            f"{self._role_card_instruction()}"
             f"{self._action_format_block('{\"tool\": \"speak\", \"args\": {\"content\": \"<回复内容>\", \"ID\": \"<对方ID>\", \"response_to\": \"<被回复的原文>\"}}', '沉默时：')}\n\n"
             "示例：\n"
             "<Think>\n"
@@ -247,6 +324,8 @@ class ConversationPromptBuilder(BasePromptBuilder):
         user = (
             "## 当前状态\n"
             f"{self._state_block(agent)}\n\n"
+            "## 动态心理角色卡\n"
+            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 收到的消息与对话历史\n"
             f"{observation}\n\n"
             "## 相关记忆\n"
@@ -269,13 +348,13 @@ class ReflectPromptBuilder(BasePromptBuilder):
     def task_decide_prompt(self, agent: "Agent") -> tuple[str, str]:
         system = (
             f"你是智能体 {agent.id} 的决策模块，当前没有进行中的任务。\n"
-            f"智能体角色：{agent.role or '无特定角色'}\n"
             "请根据当前需求状态，自由决定一个最合适的任务名称，并指定该任务所针对的需求键。\n\n"
             "决策原则：\n"
             "  1. 优先针对 satisfaction 值最低（客观最匮乏）的需求\n"
             "  2. satisfaction 相近时，选 urgency 值最高（主观最渴望）的需求\n"
             "  3. 任务名称应简洁描述智能体接下来要做的事（例如：'寻找食物'、'前往休息'、'赚钱打工'）\n"
-            "  4. 需求键必须是以下之一：satiety（饱腹度）、relax（放松度）、money（金钱）\n\n"
+            "  4. 需求键必须是以下之一：satiety（饱腹度）、relax（放松度）、money（金钱）\n"
+            "  5. 若存在动态心理角色卡，应按照其中的认知偏置、行为倾向和约束调整任务选择\n\n"
             "输出格式（必须严格遵守）：\n"
             "<Think>[分析各需求的 satisfaction/urgency 数值与紧迫程度，给出综合判断]</Think>\n"
             "<Task>任务名称</Task>\n"
@@ -285,6 +364,8 @@ class ReflectPromptBuilder(BasePromptBuilder):
             "## 当前状态\n"
             f"{self._state_block(agent)}\n"
             f"{self._urgency_block(agent)}\n\n"
+            "## 动态心理角色卡\n"
+            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 最近观测\n"
             f"{agent.history[-1] if agent.history else '（无）'}\n\n"
             "## 近期历史\n"
@@ -316,7 +397,7 @@ class ReflectPromptBuilder(BasePromptBuilder):
             urgency_info = "（无对应需求）"
 
         system = (
-            f"你是智能体 {agent.id}，角色：{agent.role or '无特定角色'}。\n"
+            f"你是智能体 {agent.id}。\n"
             f"你正在执行任务「{agent.task}」，但已连续多个时间步没有取得进展。\n"
             "请做一次简短的微反思：分析为何没有进展，并明确接下来最应该做什么。\n\n"
             "输出格式（必须严格遵守）：\n"
@@ -327,6 +408,8 @@ class ReflectPromptBuilder(BasePromptBuilder):
             f"当前任务：{agent.task}\n"
             f"当前需求值：{urgency_info}\n"
             f"当前焦点：{agent.current_focus or '（未设定）'}\n\n"
+            "动态心理角色卡：\n"
+            f"{self._psychological_role_card_block(agent)}\n\n"
             "近期行动历史：\n"
             + "\n".join(agent.history[-6:])
         )

@@ -15,13 +15,17 @@ export function ControlBar() {
 
   // 未收到任何 tick 时显示 0
   const tick = worldState?.time ?? 0
+  const maxTicks = worldState?.simulation_step_limit ?? 0
+  const limitReached = maxTicks > 0 && tick >= maxTicks
 
   return (
     <div className="flex items-center gap-3 px-4 py-2 bg-[#dde3c3] border-b-4 border-[#25251c] text-sm flex-shrink-0 text-[#243225]">
       <span className="font-extrabold text-[#243225]">Agent Sim</span>
       <span className="text-[#6c584c]">|</span>
       {/* 当前仿真时刻，与后端 world.time 同步 */}
-      <span className="text-[#3f4f37] font-mono">t={tick}</span>
+      <span className="text-[#3f4f37] font-mono">
+        t={tick}{maxTicks > 0 ? `/${maxTicks}` : ''}
+      </span>
       {/* 连接状态指示灯：绿色=已连接，红色=断开 */}
       <span
         className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-500'}`}
@@ -45,7 +49,7 @@ export function ControlBar() {
       {/* 单步：仅在暂停状态可用，每次触发后端执行一个 world.step() */}
       <button
         onClick={() => sendCmd({ cmd: 'step' })}
-        disabled={running || !connected}
+        disabled={running || !connected || limitReached}
         className="px-3 py-1 rounded bg-[#f8f5d8] hover:bg-[#f8c86b] disabled:opacity-40 disabled:cursor-not-allowed text-[#243225] text-xs"
       >
         单步
@@ -54,7 +58,7 @@ export function ControlBar() {
       {/* 继续/暂停：切换自动步进循环，颜色随状态变化提供反馈 */}
       <button
         onClick={() => sendCmd({ cmd: running ? 'pause' : 'resume' })}
-        disabled={!connected}
+        disabled={!connected || (!running && limitReached)}
         className={`px-3 py-1 rounded text-xs disabled:opacity-40 disabled:cursor-not-allowed ${
           running
             ? 'bg-[#f8c86b] hover:bg-[#ffd77f] text-[#243225]'

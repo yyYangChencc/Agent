@@ -10,6 +10,14 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/agent': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })

@@ -1,4 +1,9 @@
 class objects:
+    """地图对象基类。
+
+    对象创建时会自动注册到 world.objects 和地图；子类通过 kind 区分前端展示和交互逻辑。
+    """
+
     def __init__(self, id, num, position, world):
         self.id = id
         self.num = num
@@ -17,13 +22,13 @@ class objects:
 
 
 class Interactable(objects):
-    """Base class for objects that can be interacted with."""
+    """可交互对象基类。"""
 
     def interact(self, agent) -> str:
         raise NotImplementedError
 
 class Uninteractable(objects):
-    """Base class for objects that can not be interacted with."""
+    """不可交互对象基类。"""
 
 
 class food(Interactable):
@@ -36,6 +41,7 @@ class food(Interactable):
         return f"ID: {self.id}，类别：{self.kind}，功能：提供 {self.provide} 饱腹感，剩余数量 {self.num}"
         
     def interact(self, agent) -> str:
+        # 食物是一次性地图物品，交互后减少库存，库存归零则从地图和对象表移除。
         agent.update_satisfaction("satiety", self.provide)
         self.eaten()
         return f"吃到了{self.id}"
@@ -57,6 +63,7 @@ class building(Interactable):
         self.occupants: list[str] = []
 
     def interact(self, agent) -> str:
+        # 建筑交互通过 world.auto_interact_inside_buildings 每 tick 自动触发。
         return f"与建筑 {self.id} 互动（暂未实现具体效果）"
 
     def enter(self, agent) -> str:
@@ -78,18 +85,20 @@ class building(Interactable):
 class company(building):
     """公司：建筑子类，智能体进入并停留时自动获得工作效果。"""
 
-    def __init__(self, id: str, position: list, world, salary=10):
+    def __init__(self, id: str, position: list, world, salary=10, relax_cost=10):
         super().__init__(id, position, world)
         self.kind = "company"
         self.salary = salary  # 工作获得的工资
+        self.relax_cost = relax_cost
 
     def interact(self, agent) -> str:
+        # 公司是 money 获取渠道，同时用 relax 成本约束无限刷钱。
         agent.update_satisfaction("money", self.salary)
-        agent.update_satisfaction("relax", -10)
-        return f"在公司 {self.id} 工作，获得 {self.salary} 元工资，消耗 10 relax"
+        agent.update_satisfaction("relax", -self.relax_cost)
+        return f"在公司 {self.id} 工作，获得 {self.salary} 元工资，消耗 {self.relax_cost} relax"
     
     def get_desc(self) -> str:
-        return f"ID: {self.id}，类别: {self.kind}，功能：进入并停留时自动获得工资，每次获得 {self.salary} 元"
+        return f"ID: {self.id}，类别: {self.kind}，功能：进入并停留时自动获得工资，每次获得 {self.salary} 元，消耗 {self.relax_cost} relax"
 
 class bed(Interactable):
     """床：可交互物品，供智能体休息恢复 relax。"""
@@ -111,7 +120,8 @@ class bed(Interactable):
         old_x, old_y = agent.position
         agent.world.map.remove(old_x, old_y)
         agent.position = list(self.position)
-        return f"开始在床 {self.id} 上休息，已恢复 {agent.config.sleep_relax_recover} relax，将休息 {agent.sleep_ticks_remaining} 步"
+        per_tick = agent.config.sleep_relax_recover / max(1, agent.sleep_ticks_remaining)
+        return f"开始在床 {self.id} 上休息，每步恢复 {per_tick:.2f} relax，将休息 {agent.sleep_ticks_remaining} 步"
 
     def exit_bed(self, agent) -> str:
         if self.occupant_id == agent.id:
@@ -134,12 +144,15 @@ class food_shop(building):
         self.price = price  # 价格
 
     def interact(self, agent) -> str:
+        # 食品店必须先检查余额，避免库存减少但智能体没有实际付款。
         if self.food_num <= 0:
             return f"食品店 {self.id} 已售罄"
+        if agent.satisfaction.get("money", 0) < self.price:
+            return f"余额不足，无法在食品店 {self.id} 购买食物（需要 {self.price} 元）"
         self.food_num -= 1
         agent.update_satisfaction("satiety", self.provide)
         agent.update_satisfaction("money", -self.price)
-        return f"在食品店 {self.id}"
+        return f"在食品店 {self.id} 购买食物，花费 {self.price} 元，补充 {self.provide} satiety"
 
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}，功能：进入并停留时自动补充饱腹度，每次花费 {self.price} 元，提供 {self.provide} 饱腹感，剩余商品 {self.food_num}"
@@ -155,6 +168,7 @@ class playground(building):
         self.price = price  # 价格
 
     def interact(self, agent) -> str:
+        # 游乐场是付费 relax 恢复渠道，余额不足时不改变任何需求。
         if agent.satisfaction.get("money", 0) < self.price:
             return f"余额不足，无法在游乐场 {self.id} 娱乐（需要 {self.price} 元）"
         agent.update_satisfaction("money", -self.price)

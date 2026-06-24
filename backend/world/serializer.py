@@ -31,7 +31,6 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
         {
             "id": a.id,
             "pos": a.position,          # [row, col]，前端 pos[0]→sy（垂直），pos[1]→sx（水平）
-            "role": a.role,
             "emotion": a.emotion,
             "task": a.task,
             "current_focus": a.current_focus,
@@ -39,7 +38,14 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             "satisfaction": dict(a.satisfaction),               # 客观满足度：satiety/relax 为 [0,100]，money 无上限
             "urgency": dict(a.urgency),           # 主观急迫度，通常为 [0,1]
             "satisfaction_threshold": dict(a.satisfaction_threshold),  # 任务完成判定线
+            "need_gap": dict(a.need_gap),
+            "pressure_memory": dict(a.pressure_memory),
+            "load_saturation": dict(a.load_saturation),
+            "effective_pressure": dict(a.effective_pressure),
+            "last_psychological_assessment": a.last_psychological_assessment,
             "opinion": round(a.opinion, 3),
+            "opinion_scores": dict(a.opinion_scores),
+            "last_opinion_assessment": a.last_opinion_assessment,
             "last_think": _extract_last_think(a.history),
             "sleeping": a.sleeping,
             "sleep_ticks_remaining": a.sleep_ticks_remaining,
@@ -91,6 +97,7 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
         ]
     return {
         "time": world.time,
+        "simulation_step_limit": world.agents and next(iter(world.agents.values())).config.simulation_step_limit or 0,
         "map_size": [world.map.width, world.map.height],
         "map_design": serialize_map_design(getattr(world, "map_design", None)),
         "movements": list(getattr(world, "movements", [])),

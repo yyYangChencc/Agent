@@ -9,7 +9,7 @@ test_spatial.py — 测试 bed/building 进出的空间逻辑，不需要 LLM。
 脚本化序列（每步间隔 1.5 秒，可通过前端 step/pause 控制）：
   步骤 0  : 初始状态
   步骤 1  : agent_1 进入 bed_1 睡觉（圆圈消失）
-  步骤 2-8: 睡眠 tick（sleep_time=8，relax 自然衰减）
+  步骤 2-8: 睡眠 tick（sleep_time=8，relax 分步恢复）
   步骤 9  : agent_1 醒来，出现在 bed_1 旁边的空格
   步骤 10 : agent_2 进入 building_1（圆圈消失，建筑显示占用数）
   步骤 11 : agent_2 离开 building_1（圆圈出现在建筑旁边）
@@ -20,15 +20,24 @@ import asyncio
 import json
 import sys
 import os
+import unittest
 
 # 确保 backend/ 在 sys.path 中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
 from pathlib import Path
-from fastapi.staticfiles import StaticFiles
+try:
+    import uvicorn
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi.responses import JSONResponse
+    from fastapi.staticfiles import StaticFiles
+except ModuleNotFoundError as exc:
+    if __name__ != "__main__":
+        raise unittest.SkipTest(f"spatial demo web dependency is not installed: {exc.name}")
+    raise SystemExit(
+        f"Missing dependency: {exc.name}. Install project dependencies with: "
+        "python -m pip install -r requirements.txt"
+    ) from exc
 
 from persona.logger import setup_logging, get_logger
 from persona.config import AgentConfig
@@ -37,7 +46,6 @@ from world.world import World
 from world.objects import bed, building, food_shop
 from world.serializer import snapshot
 from tools.operator_tools import Operator
-from persona.opinion.updater import OpinionUpdater
 
 logger = get_logger(__name__)
 
@@ -71,8 +79,7 @@ class _StubPlatform:
 
 def _build_world() -> tuple[World, Operator]:
     config = AgentConfig(sleep_time=4, sleep_relax_recover=50.0)
-    updater = OpinionUpdater(config)
-    world = World(opinion_updater=updater)
+    world = World()
     op = Operator(world)
 
     stub_mem = _StubMem()
@@ -122,7 +129,7 @@ def _manual_tick(world: World) -> None:
     for agent in world.agents.values():
         if agent.sleeping:
             agent.sleep_ticks_remaining -= 1
-            agent.tick_satisfaction()
+            agent.tick_sleep_recovery()
             if agent.sleep_ticks_remaining <= 0:
                 bed_obj = world.objects.get(agent.sleeping_on_bed_id)
                 agent.wakeup(bed_obj)

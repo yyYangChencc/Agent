@@ -132,19 +132,189 @@ function ObjectDetail({ object }: { object: ObjectState }) {
 // 点击智能体后展开的详情面板，包含 satisfaction/urgency 仪表盘和思考内容
 const EMPTY_HISTORY: AgentHistoryPoint[] = []
 
+function formatUnknown(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number') return value.toFixed(3)
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (Array.isArray(value)) return value.map(formatUnknown).join('、')
+  if (value === null || value === undefined) return ''
+  return JSON.stringify(value)
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>
+  }
+  return null
+}
+
+function formatStringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(formatUnknown).filter(Boolean)
+  if (typeof value === 'string' && value) return [value]
+  return []
+}
+
+function OpinionAssessmentBlock({ agent }: { agent: AgentState }) {
+  const assessment = agent.last_opinion_assessment
+  if (!assessment) {
+    return null
+  }
+  const topic = formatUnknown(assessment.topic)
+  const score = typeof assessment.score === 'number' ? assessment.score.toFixed(3) : formatUnknown(assessment.score)
+  const confidence =
+    typeof assessment.confidence === 'number'
+      ? assessment.confidence.toFixed(2)
+      : formatUnknown(assessment.confidence)
+  const source = formatUnknown(assessment.source)
+  const reason = formatUnknown(assessment.reason)
+  const evidence = Array.isArray(assessment.evidence) ? assessment.evidence.map(formatUnknown) : []
+  const topicScores = Object.entries(agent.opinion_scores ?? {})
+
+  return (
+    <div className="text-xs text-gray-400 bg-gray-900/60 rounded p-2 space-y-1">
+      <div className="text-gray-300 font-semibold">系统新闻主题观念评测</div>
+      <div>
+        主题：<span className="text-blue-300">{topic || 'general'}</span>
+        &nbsp;|&nbsp;分数：<span className="text-yellow-300 font-mono">{score}</span>
+      </div>
+      <div>
+        来源：<span className="text-gray-300">{source}</span>
+        {confidence && (
+          <>
+            &nbsp;|&nbsp;置信度：<span className="text-gray-300">{confidence}</span>
+          </>
+        )}
+      </div>
+      {reason && <div className="leading-relaxed">理由：{reason}</div>}
+      {evidence.length > 0 && (
+        <div className="leading-relaxed">证据：{evidence.slice(0, 3).join('；')}</div>
+      )}
+      {topicScores.length > 0 && (
+        <div className="flex flex-wrap gap-1 pt-1">
+          {topicScores.slice(0, 4).map(([topicKey, value]) => (
+            <span key={topicKey} className="bg-gray-700 rounded px-1 font-mono text-gray-300">
+              {topicKey}: {typeof value === 'number' ? value.toFixed(3) : formatUnknown(value)}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function PsychologicalRoleCardBlock({ agent }: { agent: AgentState }) {
+  const assessment = asRecord(agent.last_psychological_assessment)
+  const roleCard = asRecord(assessment?.role_card_delta)
+  if (!assessment || !roleCard) {
+    return (
+      <div className="text-xs text-gray-500 bg-gray-900/60 rounded p-2" data-testid="dynamic-role-card-empty">
+        动态心理角色卡：暂无
+      </div>
+    )
+  }
+
+  const status = formatUnknown(assessment.status)
+  const tick = formatUnknown(assessment.tick)
+  // 单需求评测通常只有 source_need；多需求裁判结果才会有 dominant_need。
+  const dominantNeed = formatUnknown(roleCard.dominant_need ?? roleCard.source_need)
+  const sourceNeed = formatUnknown(roleCard.source_need)
+  const severity = formatUnknown(roleCard.severity)
+  const pressure = formatUnknown(roleCard.pressure)
+  const summary = formatUnknown(roleCard.summary)
+  const emotionTone = formatUnknown(roleCard.emotion_tone)
+  const activatedNeeds = formatStringList(roleCard.activated_needs ?? assessment.activated_needs)
+  const sections: Array<[string, string[]]> = [
+    ['认知偏置', formatStringList(roleCard.cognition)],
+    ['行为倾向', formatStringList(roleCard.behavior)],
+    ['表达风格', formatStringList(roleCard.social_expression)],
+    ['线上行为', formatStringList(roleCard.online_behavior)],
+    ['决策偏置', formatStringList(roleCard.decision_bias)],
+    ['约束', formatStringList(roleCard.constraints)],
+  ]
+  const mediatorFocus = Array.isArray(roleCard.mediator_focus)
+    ? roleCard.mediator_focus
+        .map((item) => {
+          const record = asRecord(item)
+          if (!record) return ''
+          const needKey = formatUnknown(record.need_key)
+          const key = formatUnknown(record.key)
+          const value = formatUnknown(record.value)
+          if (!key || value === '') return ''
+          return `${needKey ? `${needKey}.` : ''}${key}=${value}`
+        })
+        .filter(Boolean)
+    : []
+
+  return (
+    <div className="text-xs text-gray-400 bg-gray-900/60 rounded p-2 space-y-1" data-testid="dynamic-role-card">
+      <div className="text-gray-300 font-semibold">动态心理角色卡</div>
+      <div>
+        状态：<span className="text-gray-300">{status || 'unknown'}</span>
+        {tick && (
+          <>
+            &nbsp;|&nbsp;t=<span className="text-gray-300">{tick}</span>
+          </>
+        )}
+      </div>
+      {activatedNeeds.length > 0 && (
+        <div>激活需求：<span className="text-blue-300">{activatedNeeds.join('、')}</span></div>
+      )}
+      {dominantNeed && <div>主导需求：<span className="text-blue-300">{dominantNeed}</span></div>}
+      {sourceNeed && sourceNeed !== dominantNeed && (
+        <div>来源需求：<span className="text-blue-300">{sourceNeed}</span></div>
+      )}
+      {(severity || pressure) && (
+        <div>
+          {severity && <>强度：<span className="text-gray-300">{severity}</span></>}
+          {severity && pressure && <>&nbsp;|&nbsp;</>}
+          {pressure && <>压力：<span className="text-gray-300">{pressure}</span></>}
+        </div>
+      )}
+      {summary && <div className="leading-relaxed">摘要：{summary}</div>}
+      {emotionTone && <div className="leading-relaxed">情绪基调：{emotionTone}</div>}
+      {mediatorFocus.length > 0 && (
+        <div className="leading-relaxed">主要中介：{mediatorFocus.slice(0, 4).join('；')}</div>
+      )}
+      {sections.map(([label, values]) => (
+        values.length > 0 && (
+          <div key={label} className="leading-relaxed">
+            {label}：{values.slice(0, 3).join('；')}
+          </div>
+        )
+      ))}
+    </div>
+  )
+}
+
 function AgentDetail({ agent }: { agent: AgentState }) {
   // last_think 内容可能很长，默认折叠
   const [thinkOpen, setThinkOpen] = useState(false)
   const [chartOpen, setChartOpen] = useState(false)
   const history = useSimStore((s) => s.agentHistory[agent.id] ?? EMPTY_HISTORY)
   const stableHistory = useMemo(() => history, [history])
+  const openAgentWindow = (kind: 'memories' | 'trajectory') => {
+    window.open(`/agent/${encodeURIComponent(agent.id)}/${kind}`, '_blank', 'noopener,noreferrer')
+  }
 
   return (
     <div className="p-3 space-y-2">
       <div className="text-sm font-semibold text-gray-200">{agent.id}</div>
+      <div className="flex gap-2">
+        <button
+          className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600"
+          onClick={() => openAgentWindow('memories')}
+        >
+          记忆
+        </button>
+        <button
+          className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600"
+          onClick={() => openAgentWindow('trajectory')}
+        >
+          轨迹
+        </button>
+      </div>
       <div className="text-xs text-gray-400">
-        role: <span className="text-gray-200">{agent.role}</span>
-        &nbsp;|&nbsp;emotion: <span className="text-gray-200">{agent.emotion}</span>
+        emotion: <span className="text-gray-200">{agent.emotion}</span>
       </div>
       <div className="text-xs text-gray-400">
         task: <span className="text-yellow-400">{agent.task}</span>
@@ -181,8 +351,10 @@ function AgentDetail({ agent }: { agent: AgentState }) {
         <span className="text-gray-500"> · urgency {((agent.urgency.money ?? 1) * 100).toFixed(0)}%</span>
       </div>
 
-      {/* opinion 范围 0~1，越高代表越支持正向立场 */}
-      <div className="text-xs text-gray-400">opinion: {agent.opinion.toFixed(3)}</div>
+      {/* opinion 是智能体对系统新闻主题的当前立场；评测 score 会写回该字段 */}
+      <div className="text-xs text-gray-400">opinion [-1,1]: {agent.opinion.toFixed(3)}</div>
+      <PsychologicalRoleCardBlock agent={agent} />
+      <OpinionAssessmentBlock agent={agent} />
 
       {/* last_think 从 agent.history 中提取最近一次 <Think> 标签内容 */}
       {agent.last_think && (

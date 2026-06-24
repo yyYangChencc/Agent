@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import html
 import json
 import time
 from contextlib import asynccontextmanager
@@ -8,7 +9,7 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from default_scenario import build_default_runtime
@@ -34,6 +35,28 @@ clients: set[WebSocket] = set()
 sim_state: dict = {"running": False, "speed": 1.0}
 # 自动步进 asyncio Task 引用，pause/reset 时用于取消
 _sim_task: asyncio.Task | None = None
+
+
+def _simulation_step_limit() -> int:
+    if rt is None:
+        return 0
+    return max(0, int(rt.config.simulation_step_limit))
+
+
+def _limit_reached() -> bool:
+    limit = _simulation_step_limit()
+    return bool(rt is not None and limit > 0 and rt.world.time >= limit)
+
+
+def _status_payload(*, limit_reached: bool | None = None) -> dict:
+    reached = _limit_reached() if limit_reached is None else limit_reached
+    return {
+        "type": "status",
+        "running": sim_state["running"],
+        "speed": sim_state["speed"],
+        "max_ticks": _simulation_step_limit(),
+        "limit_reached": reached,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +102,11 @@ async def do_step() -> float:
     world.astep() 使用 AsyncOpenAI 实现真正异步 I/O，
     LLM 调用期间释放事件循环，不会阻塞 WebSocket 心跳。
     """
+    if _limit_reached():
+        sim_state["running"] = False
+        await broadcast(_status_payload(limit_reached=True))
+        return 0.0
+
     start = time.perf_counter()
     await rt.world.astep()
     world_elapsed = time.perf_counter() - start
@@ -90,6 +118,10 @@ async def do_step() -> float:
     broadcast_start = time.perf_counter()
     await broadcast({"type": "tick", "state": state})
     broadcast_elapsed = time.perf_counter() - broadcast_start
+
+    if _limit_reached():
+        sim_state["running"] = False
+        await broadcast(_status_payload(limit_reached=True))
 
     total_elapsed = time.perf_counter() - start
     logger.info(
@@ -107,6 +139,10 @@ async def do_step() -> float:
 async def _sim_loop() -> None:
     """自动步进循环，以 speed 倍率持续执行，直到 running 被置为 False。"""
     while sim_state["running"]:
+        if _limit_reached():
+            sim_state["running"] = False
+            await broadcast(_status_payload(limit_reached=True))
+            break
         elapsed = await do_step()
         target_interval = 1.0 / sim_state["speed"]
         sleep_seconds = max(0.0, target_interval - elapsed)
@@ -147,6 +183,138 @@ async def serve_index():
     return JSONResponse({"message": "Frontend not built. Run: cd frontend && npm run build"})
 
 
+def _agent_or_error(agent_id: str):
+    if rt is None:
+        return None, JSONResponse({"error": "simulation runtime is not initialized"}, status_code=503)
+    agent = rt.world.agents.get(agent_id)
+    if agent is None:
+        return None, JSONResponse({"error": f"agent not found: {agent_id}"}, status_code=404)
+    return agent, None
+
+
+@app.get("/api/agents/{agent_id}/memories")
+async def agent_memories(agent_id: str):
+    agent, error = _agent_or_error(agent_id)
+    if error is not None:
+        return error
+    memories = rt.mem.list_agent_memories(agent.id)
+    return {
+        "agent_id": agent.id,
+        "count": len(memories),
+        "memories": memories,
+    }
+
+
+@app.get("/api/agents/{agent_id}/trajectory")
+async def agent_trajectory(agent_id: str):
+    agent, error = _agent_or_error(agent_id)
+    if error is not None:
+        return error
+    trajectory = list(agent.trajectory_buffer)
+    return {
+        "agent_id": agent.id,
+        "count": len(trajectory),
+        "trajectory": trajectory,
+    }
+
+
+def _agent_data_page(agent_id: str, data_kind: str) -> HTMLResponse:
+    titles = {
+        "memories": "智能体记忆",
+        "trajectory": "智能体轨迹",
+    }
+    if data_kind not in titles:
+        return HTMLResponse("unknown agent data page", status_code=404)
+
+    safe_title = html.escape(titles[data_kind])
+    safe_agent_id = html.escape(agent_id)
+    agent_id_json = json.dumps(agent_id, ensure_ascii=False)
+    data_kind_json = json.dumps(data_kind, ensure_ascii=False)
+    title_json = json.dumps(titles[data_kind], ensure_ascii=False)
+    page = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{safe_title} - {safe_agent_id}</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111827;
+      color: #e5e7eb;
+    }}
+    body {{ margin: 0; padding: 24px; }}
+    h1 {{ margin: 0 0 8px; font-size: 22px; }}
+    .meta, #status {{ color: #9ca3af; font-size: 13px; }}
+    #status {{ margin: 16px 0; }}
+    button {{
+      margin-top: 12px;
+      background: #374151;
+      color: #e5e7eb;
+      border: 1px solid #4b5563;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }}
+    button:hover {{ background: #4b5563; }}
+    pre {{
+      background: #1f2937;
+      border: 1px solid #374151;
+      border-radius: 10px;
+      padding: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.55;
+    }}
+    .error {{ color: #f87171; }}
+  </style>
+</head>
+<body>
+  <h1>{safe_title}</h1>
+  <div class="meta">agent_id: {safe_agent_id}</div>
+  <button type="button" onclick="location.reload()">刷新</button>
+  <div id="status">加载中...</div>
+  <pre id="content"></pre>
+  <script>
+    const agentId = {agent_id_json};
+    const dataKind = {data_kind_json};
+    const title = {title_json};
+    const endpoint = `/api/agents/${{encodeURIComponent(agentId)}}/${{dataKind}}`;
+    const statusEl = document.getElementById('status');
+    const contentEl = document.getElementById('content');
+
+    fetch(endpoint)
+      .then(async (response) => {{
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || response.statusText);
+        return payload;
+      }})
+      .then((payload) => {{
+        const rows = dataKind === 'memories' ? payload.memories : payload.trajectory;
+        statusEl.textContent = `${{title}}：${{payload.count ?? rows.length}} 条`;
+        contentEl.textContent = JSON.stringify(payload, null, 2);
+      }})
+      .catch((error) => {{
+        statusEl.classList.add('error');
+        statusEl.textContent = `加载失败：${{error.message}}`;
+      }});
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(page)
+
+
+@app.get("/agent/{agent_id}/memories")
+async def agent_memories_page(agent_id: str):
+    return _agent_data_page(agent_id, "memories")
+
+
+@app.get("/agent/{agent_id}/trajectory")
+async def agent_trajectory_page(agent_id: str):
+    return _agent_data_page(agent_id, "trajectory")
+
+
 # ---------------------------------------------------------------------------
 # WebSocket 端点
 # ---------------------------------------------------------------------------
@@ -163,6 +331,8 @@ async def ws_endpoint(websocket: WebSocket):
             "state": snapshot(rt.world, rt.platform),
             "running": sim_state["running"],
             "speed": sim_state["speed"],
+            "max_ticks": _simulation_step_limit(),
+            "limit_reached": _limit_reached(),
         }, ensure_ascii=False))
         async for text in websocket.iter_text():
             try:
@@ -183,26 +353,31 @@ async def _handle_cmd(msg: dict) -> None:
 
     if cmd == "step":
         # 仅在暂停时允许手动单步，防止与自动步进并发执行
-        if not sim_state["running"]:
+        if not sim_state["running"] and not _limit_reached():
             await do_step()
+        elif _limit_reached():
+            await broadcast(_status_payload(limit_reached=True))
 
     elif cmd == "resume":
-        if not sim_state["running"]:
+        if _limit_reached():
+            sim_state["running"] = False
+            await broadcast(_status_payload(limit_reached=True))
+        elif not sim_state["running"]:
             sim_state["running"] = True
             _sim_task = asyncio.create_task(_sim_loop())
-            await broadcast({"type": "status", "running": True, "speed": sim_state["speed"]})
+            await broadcast(_status_payload(limit_reached=False))
 
     elif cmd == "pause":
         sim_state["running"] = False
         if _sim_task:
             _sim_task.cancel()
             _sim_task = None
-        await broadcast({"type": "status", "running": False, "speed": sim_state["speed"]})
+        await broadcast(_status_payload(limit_reached=_limit_reached()))
 
     elif cmd == "set_speed":
         # 限制最低速度防止无限快速步进
         sim_state["speed"] = max(0.1, float(msg.get("value", 1.0)))
-        await broadcast({"type": "status", "running": sim_state["running"], "speed": sim_state["speed"]})
+        await broadcast(_status_payload(limit_reached=_limit_reached()))
 
     elif cmd == "reset":
         sim_state["running"] = False
@@ -217,6 +392,8 @@ async def _handle_cmd(msg: dict) -> None:
             "state": snapshot(rt.world, rt.platform),
             "running": False,
             "speed": sim_state["speed"],
+            "max_ticks": _simulation_step_limit(),
+            "limit_reached": False,
         })
 
 

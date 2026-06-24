@@ -23,6 +23,12 @@ CONTEXT_MEMORY_TYPES = {
 
 
 class MultiAgentMemoryManager:
+    """多智能体长期记忆管理器。
+
+    每个智能体对应一个 ChromaDB collection；存储时写入 embedding 和元数据，
+    检索时先做向量召回，再按任务、需求急迫度、重要性和时间等因素重排。
+    """
+
     def __init__(self, llm_client, persist_directory: str = "./chroma_agents"):
         self.client = chromadb.PersistentClient(
             path=persist_directory,
@@ -100,7 +106,7 @@ class MultiAgentMemoryManager:
         n_results: int = 3,
         context: str = "world",
     ) -> list[str]:
-        """Build a deterministic retrieval query, then retrieve task-relevant memories."""
+        """构造确定性检索查询，再召回与当前任务相关的记忆。"""
         query = self._build_retrieval_query(observation, task, urgency, satisfaction_threshold)
         result = self.retrieve_agent_memories(
             agent_id,
@@ -124,12 +130,18 @@ class MultiAgentMemoryManager:
         urgency: dict | None = None,
         **kwargs,
     ) -> list[str]:
+        """同步向量检索入口。
+
+        先扩大召回数量，再通过 _memory_score 重新排序，避免单纯向量距离忽略任务和需求。
+        """
+
         started_at = time.perf_counter()
         collection = self.get_agent_collection(agent_id)
 
         count = collection.count()
         if count == 0:
             return []
+        # 先多取一批，再在本地用任务/需求/重要性重排，提升与当前状态的匹配度。
         fetch_n = min(max(n_results * 4, n_results), count)
 
         allowed_memory_types = self._memory_types_for_context(context)
@@ -186,6 +198,8 @@ class MultiAgentMemoryManager:
         )
 
     def _build_retrieval_query(self, observation, task, urgency, satisfaction_threshold) -> str:
+        """把观察、当前任务和高急迫需求合并成检索文本。"""
+
         parts = [observation]
         if task and task != "none":
             parts.append(f"当前任务: {task}")
@@ -207,6 +221,8 @@ class MultiAgentMemoryManager:
         urgency: dict | None = None,
         **kwargs,
     ) -> list[str]:
+        """异步向量检索入口，与同步路径保持同样的召回和重排逻辑。"""
+
         started_at = time.perf_counter()
         collection = self.get_agent_collection(agent_id)
 
@@ -248,6 +264,48 @@ class MultiAgentMemoryManager:
         )
         return out
 
+    def list_agent_memories(self, agent_id: str) -> list[dict[str, Any]]:
+        """列出某个智能体的全部原始记忆，供前端记忆窗口展示。"""
+
+        collection = self.get_agent_collection(agent_id)
+        if collection.count() == 0:
+            return []
+
+        try:
+            result = collection.get(
+                where={"agent_id": agent_id},
+                include=["documents", "metadatas"],
+            )
+        except Exception as e:
+            logger.error("[%s] 列出记忆失败: %s", agent_id, e, exc_info=True)
+            return []
+
+        ids = result.get("ids", [])
+        documents = result.get("documents", [])
+        metadatas = result.get("metadatas", [])
+        row_count = max(len(ids), len(documents), len(metadatas))
+        rows: list[dict[str, Any]] = []
+        for index in range(row_count):
+            metadata = metadatas[index] if index < len(metadatas) else {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            rows.append({
+                "id": ids[index] if index < len(ids) else "",
+                "document": documents[index] if index < len(documents) else "",
+                "metadata": metadata,
+            })
+
+        def sort_key(row: dict[str, Any]) -> tuple[float, str]:
+            metadata = row.get("metadata") or {}
+            try:
+                saved_at = float(metadata.get("saved_at", -1))
+            except (TypeError, ValueError):
+                saved_at = -1.0
+            return (-saved_at, str(row.get("id", "")))
+
+        rows.sort(key=sort_key)
+        return rows
+
     def get_all_agents_stats(self) -> dict:
         stats = {}
         for collection_info in self.client.list_collections():
@@ -263,6 +321,8 @@ class MultiAgentMemoryManager:
         return stats
 
     def _get_embedding(self, text: str) -> list[float]:
+        """同步获取 embedding，并按原文缓存，减少重复 API 调用。"""
+
         with self._embedding_cache_lock:
             cached = self._embedding_cache.get(text)
         if cached is not None:
@@ -278,6 +338,8 @@ class MultiAgentMemoryManager:
         return embedding
 
     async def _aget_embedding(self, text: str) -> list[float]:
+        """异步获取 embedding，并复用同一份进程内缓存。"""
+
         with self._embedding_cache_lock:
             cached = self._embedding_cache.get(text)
         if cached is not None:
@@ -293,6 +355,8 @@ class MultiAgentMemoryManager:
         return embedding
 
     def _normalize_metadata(self, agent_id: str, world_time: int, metadata: dict[str, Any]) -> dict[str, Any]:
+        """统一记忆元数据字段，并把旧类型名映射到当前类型体系。"""
+
         raw_type = metadata.pop("memory_type", metadata.pop("type", DEFAULT_MEMORY_TYPE))
         memory_type = MEMORY_TYPE_ALIASES.get(str(raw_type), str(raw_type))
         full_metadata = {
@@ -308,6 +372,8 @@ class MultiAgentMemoryManager:
         return self._sanitize_metadata(full_metadata)
 
     def _sanitize_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        """ChromaDB metadata 只接受标量；列表和复杂对象在这里转成字符串。"""
+
         sanitized: dict[str, str | int | float | bool] = {}
         for key, value in metadata.items():
             if value is None:
@@ -341,6 +407,8 @@ class MultiAgentMemoryManager:
         urgency: dict,
         allowed_memory_types: set[str] | None = None,
     ) -> list[str]:
+        """过滤不适合当前上下文的记忆类型，并返回重排后的文本。"""
+
         docs = results.get("documents", [[]])[0]
         metas = results.get("metadatas", [[]])[0]
         distances = results.get("distances", [[]])[0]
@@ -362,6 +430,12 @@ class MultiAgentMemoryManager:
         task: str,
         urgency: dict,
     ) -> float:
+        """记忆重排分数。
+
+        分数综合向量相似度、重要性、任务匹配、时间、置信度和当前需求急迫度。
+        repetition_penalty 用来降低和查询高度重复但信息量低的记忆。
+        """
+
         similarity = 1.0 / (1.0 + max(0.0, float(distance)))
         importance = float(meta.get("importance", 0.5) or 0.5)
         confidence = float(meta.get("confidence", 0.5) or 0.5)
