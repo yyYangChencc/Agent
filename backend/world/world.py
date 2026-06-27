@@ -3,7 +3,7 @@ import json
 import threading
 import time
 from persona.conversation import ConversationManager
-from world.event import Event
+from world.event import Event, SpeakingEvent
 from world.map import Map, build_default_map_design
 from tools.operator_tools import register_operator_tools, Operator
 from world.observer import observe
@@ -224,8 +224,12 @@ class World:
             self.history_recorder.record(self.time, list(self.agents.values()))
         history_elapsed = time.perf_counter() - phase_start
 
+        phase_start = time.perf_counter()
+        self._maintain_agent_memories()
+        memory_maintenance_elapsed = time.perf_counter() - phase_start
+
         logger.info(
-            "[Perf] tick=%d world_total=%.3fs building=%.3fs act=%.3fs reflect=%.3fs conversation=%.3fs news=%.3fs psychology=%.3fs opinion_assessment=%.3fs history=%.3fs agents=%d",
+            "[Perf] tick=%d world_total=%.3fs building=%.3fs act=%.3fs reflect=%.3fs conversation=%.3fs news=%.3fs psychology=%.3fs opinion_assessment=%.3fs history=%.3fs memory_maintenance=%.3fs agents=%d",
             self.time,
             time.perf_counter() - step_start,
             building_elapsed,
@@ -236,6 +240,7 @@ class World:
             psychology_elapsed,
             opinion_assessment_elapsed,
             history_elapsed,
+            memory_maintenance_elapsed,
             len(agents),
         )
 
@@ -246,10 +251,27 @@ class World:
             self.conversation_max_rounds,
         )
 
+    def _maintain_agent_memories(self) -> None:
+        """每个 tick 末执行轻量记忆维护。
+
+        当前维护只做低价值原始事件失效和未解决冲突统计，不在世界主循环里触发
+        重型 LLM consolidation。
+        """
+
+        for agent in self.agents.values():
+            mem = getattr(agent, "mem", None)
+            if mem is None or not hasattr(mem, "maintain_agent_memory"):
+                continue
+            try:
+                mem.maintain_agent_memory(agent.id, current_time=self.time)
+            except Exception as exc:
+                logger.debug("[World] memory maintenance failed for %s: %s", agent.id, exc)
+
     def execute(self, agent, action_str):
-        """解析 LLM 动作 JSON 并调用对应工具。
+        """解析 LLM 决策 JSON 中的 action 并调用对应工具。
 
         工具调用失败不会中断整个 tick；成功后会生成事件并通知可感知范围内的智能体。
+        记忆写入放在这里，是因为只有 execute 才知道动作是否实际执行、反馈和 reward。
         """
 
         old_satisfaction = agent.satisfaction.copy()
@@ -257,18 +279,23 @@ class World:
         if not action_str:
             return
         try:
-            data = json.loads(action_str)
+            decision = json.loads(action_str)
         except json.JSONDecodeError:
             logger.error("[World] JSON 解析失败，原始内容: %r", action_str)
             return
 
+        data, think = self._action_from_decision(decision)
+        if think:
+            agent.add_history("decision_think", think)
         if not data or "tool" not in data:
             logger.debug("[%s] 本轮选择不行动", agent.id)
+            self._store_action_memory(agent, decision, "", None)
             return
 
         tool = self.tools.get(data["tool"])
         if not tool:
             logger.warning("[World] 未知工具: %s", data.get("tool"))
+            self._store_action_memory(agent, decision, "tool not found", None)
             return
 
         args = data.get("args", {})
@@ -277,15 +304,29 @@ class World:
             feedback = tool.run(**args)
         except Exception as e:
             logger.error("[World] 工具 %s 执行失败 (agent=%s): %s", data["tool"], agent.id, e, exc_info=True)
+            self._store_action_memory(agent, decision, "tool execution failed", None)
             return
         agent.add_history("feedback: ", feedback)
-        event = Event(
-            type=data["tool"],
-            actor=agent.id,
-            info=feedback,
-            time=self.time,
-            position=agent.position
-        )
+        acted = self._acted_from_action(data["tool"], args)
+        if data["tool"] == "speak":
+            event = SpeakingEvent(
+                type=data["tool"],
+                actor=agent.id,
+                info=feedback,
+                time=self.time,
+                response_to=args.get("response_to"),
+                position=agent.position,
+                acted=acted,
+            )
+        else:
+            event = Event(
+                type=data["tool"],
+                actor=agent.id,
+                info=feedback,
+                time=self.time,
+                position=agent.position,
+                acted=acted,
+            )
 
         for other in self.agents.values():
             if other.id != agent.id and other.can_perceive(event):
@@ -306,4 +347,33 @@ class World:
             for k in agent.satisfaction
         )
         agent.add_history("reward: ", reward)
+        self._store_action_memory(agent, decision, feedback, reward)
         return reward
+
+    def _store_action_memory(self, agent, decision: dict, feedback, reward: float | None) -> None:
+        """把已执行或失败的动作结果写入记忆系统。"""
+
+        mem = getattr(agent, "mem", None)
+        if mem is None or not hasattr(mem, "store_action_result"):
+            return
+        mem.store_action_result(
+            agent.id,
+            decision=decision,
+            feedback=feedback,
+            reward=reward,
+            world_time=self.time,
+        )
+
+    def _acted_from_action(self, tool_name: str, args: dict):
+        if tool_name == "social_step":
+            return "social_platform"
+        return args.get("ID") or args.get("post_id")
+
+    def _action_from_decision(self, decision):
+        if not isinstance(decision, dict):
+            return {}, ""
+        think = str(decision.get("think", "") or "")
+        action = decision.get("action", {})
+        if not isinstance(action, dict):
+            return {}, think
+        return action, think

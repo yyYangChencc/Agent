@@ -36,7 +36,7 @@ def register_operator_tools(operator):
         if "constraint" in spec:
             lines.append(f"   约束：{spec['constraint']}")
         lines.append("")
-    lines.append("工具调用 JSON 的形状如下：")
+    lines.append("外层决策 JSON 的 action 字段中，工具调用 JSON 的形状如下：")
     lines.append('{\n  "tool": "<工具名>",\n  "args": { "<参数名>": <参数值> }\n}')
     return tools, '\n'.join(lines)
 
@@ -44,7 +44,7 @@ def register_operator_tools(operator):
 class Operator:
     """线下世界工具集合。
 
-    LLM 只输出工具 JSON；World.execute 再调用这里的方法改变地图、需求和对象状态。
+    LLM 输出包含 think 和 action 的决策 JSON；World.execute 取出 action 后调用这里的方法改变地图、需求和对象状态。
     """
 
     def __init__(self, world):

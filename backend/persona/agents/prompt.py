@@ -115,17 +115,15 @@ class BasePromptBuilder:
 
     def _action_format_block(self, action_schema: str, no_action_label: str) -> str:
         return (
-            "输出格式（必须严格遵守，必须输出完整成对的<Think></Think>与<Action></Action>标签）：\n"
-            "<Think>\n"
-            "[分析过程]\n"
-            "</Think>\n"
-            "<Action>\n"
-            f"{action_schema}\n"
-            "</Action>\n"
-            f"{no_action_label}\n"
-            "<Action>\n"
-            "{}\n"
-            "</Action>"
+            "输出格式（必须严格遵守）：\n"
+            "- 只输出一个合法 JSON 对象字符串\n"
+            "- 不要输出 Markdown、额外解释、<Think> 或 <Action> 标签\n"
+            "- 顶层必须包含 think 与 action 字段\n"
+            "- think 必须说明本次选择动作的思考过程和理由\n"
+            "- 可执行动作格式：\n"
+            f'{{"think": "<思考过程和选择理由>", "action": {action_schema}}}\n'
+            f"- {no_action_label}\n"
+            '{"think": "<不行动的思考过程和理由>", "action": {}}\n'
         )
 
     def _history_block(self, agent: "Agent", max_n: int = 5) -> str:
@@ -172,6 +170,58 @@ class BasePromptBuilder:
 
 
 # ---------------------------------------------------------------------------
+# Memory planning
+# ---------------------------------------------------------------------------
+
+class MemoryPlannerPromptBuilder(BasePromptBuilder):
+    """为行动前的记忆查询计划生成 prompt。"""
+
+    def build(self, agent: "Agent", observation: str, context: str = "world") -> tuple[str, str]:
+        system = (
+            f"你是自主智能体 {agent.id} 的记忆查询规划器，只负责决定本轮要查询哪些记忆。\n"
+            "你不是行动决策器，禁止输出 move、eat、speak、social_step、sleep、enter_building、exit_building 等世界动作。\n"
+            "你不能输出 SQL、数据库语句、表扫描请求或任何未列出的查询类型。\n"
+            "当前 observe 或当前浏览内容已经包含的信息不要重复查询：\n"
+            "- 当前看见的物品/建筑已经有最新位置，不要为这些可见物品查询 entity_state。\n"
+            "- 当前看见的人可以查询 person_profile，因为 observe 只提供位置，不提供印象和历史。\n"
+            "- 当前看不见但任务或需求需要的目标，可以查询 entity_state。\n"
+            "- 需要过去经验、任务流程、反思、地图背景时，使用 semantic 查询 Chroma 长期记忆。\n"
+            "只输出一个合法 JSON 对象字符串，不要输出 Markdown、额外解释或标签。\n"
+            "输出 schema：\n"
+            "{\n"
+            '  "think": "为什么本轮需要查询这些记忆",\n'
+            f'  "context": "{context}",\n'
+            '  "queries": [\n'
+            '    {"type": "person_profile", "intent": "understand_person", "target_agent_ids": ["agent_2"], "limit": 2},\n'
+            '    {"type": "entity_state", "intent": "find_unseen_need_target", "entity_type": "object", "kinds": ["food"], "exclude_visible": true, "limit": 5},\n'
+            '    {"type": "event_history", "intent": "avoid_failed_actions", "entity_ids": ["food_1"], "source_types": ["action_result"], "limit": 3},\n'
+            '    {"type": "social_post", "intent": "inspect_known_posts", "post_ids": [1], "limit": 3},\n'
+            '    {"type": "derived_memory", "intent": "reuse_task_summary", "memory_types": ["episodic", "procedural"], "limit": 3},\n'
+            '    {"type": "semantic", "intent": "recall_similar_experience", "query": "自然语言检索文本", "memory_types": ["episodic", "procedural", "reflective", "semantic"], "limit": 3}\n'
+            "  ]\n"
+            "}\n"
+            "queries 最多 5 条，每条 limit 最大 5。"
+        )
+        user = (
+            "## 当前状态\n"
+            f"{self._state_block(agent)}\n"
+            f"- inside_building_id: {agent.inside_building_id or 'none'}\n"
+            f"- 任务：{agent.task}\n"
+            f"{self._urgency_block(agent)}\n"
+            f"{self._focus_block(agent)}"
+            f"{self._opinion_block(agent)}\n\n"
+            "## 动态心理角色卡\n"
+            f"{self._psychological_role_card_block(agent)}\n\n"
+            f"## 当前上下文类型\n{context}\n\n"
+            "## 当前输入\n"
+            f"{observation}\n\n"
+            "## 近期历史\n"
+            f"{self._history_block(agent)}"
+        )
+        return system, user
+
+
+# ---------------------------------------------------------------------------
 # World interaction (replaces PromptBuilder + MemPromptBuilder)
 # ---------------------------------------------------------------------------
 
@@ -201,15 +251,12 @@ class WorldPromptBuilder(BasePromptBuilder):
             "  · 禁止：发帖询问你已知的信息（记忆中或观测到的建筑、食物、商店位置等）\n"
             "  · 任务为 none 且所有需求已满足时，可自由选择任意动作\n"
             "- 记忆中的位置信息是可靠的，直接使用，不需要反复确认\n\n"
-            f"{self._role_card_instruction()}"
+            "- 必须按照“动态心理角色卡”调整本轮认知、表达、社交和行动倾向；"
+            "若角色卡与工具规则、地图观测或真实需求冲突，以工具规则、地图观测和真实需求为准\n"
             f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
-            "<Think>\n"
-            "任务 eat something，satiety=10 未满足。记忆中 food_1 位于 (7,5)，当前位置 (3,5)，使用 move 前往。move 工具满足前提。\n"
-            "</Think>\n"
-            "<Action>\n"
-            '{"tool": "move", "args": {"x": 7, "y": 5}}\n'
-            "</Action>"
+            '{"think": "任务 eat something，satiety=10 未满足。记忆中 food_1 位于 (7,5)，当前位置 (3,5)，使用 move 前往。move 工具满足前提。", '
+            '"action": {"tool": "move", "args": {"x": 7, "y": 5}}}'
         )
 
         user = (
@@ -261,12 +308,8 @@ class SocialPromptBuilder(BasePromptBuilder):
             f"{self._role_card_instruction()}"
             f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
-            "<Think>\n"
-            "帖子讨论的是食物话题，与我的记忆相关。我想分享自己的见解，适合发帖。\n"
-            "</Think>\n"
-            "<Action>\n"
-            '{"tool": "send_post", "args": {"content": "今天发现了一种新食材，味道很不错！"}}\n'
-            "</Action>"
+            '{"think": "帖子讨论的是食物话题，与我的记忆相关。我想分享自己的见解，适合发帖。", '
+            '"action": {"tool": "send_post", "args": {"content": "今天发现了一种新食材，味道很不错！"}}}'
         )
 
         user = (
@@ -313,12 +356,8 @@ class ConversationPromptBuilder(BasePromptBuilder):
             f"{self._role_card_instruction()}"
             f"{self._action_format_block('{\"tool\": \"speak\", \"args\": {\"content\": \"<回复内容>\", \"ID\": \"<对方ID>\", \"response_to\": \"<被回复的原文>\"}}', '沉默时：')}\n\n"
             "示例：\n"
-            "<Think>\n"
-            "对方询问食物位置，剩余 2 轮，目的未达成，应回复。\n"
-            "</Think>\n"
-            "<Action>\n"
-            '{"tool": "speak", "args": {"content": "食物在东边三格", "ID": "agent_2", "response_to": "你知道食物在哪吗"}}\n'
-            "</Action>"
+            '{"think": "对方询问食物位置，剩余 2 轮，目的未达成，应回复。", '
+            '"action": {"tool": "speak", "args": {"content": "食物在东边三格", "ID": "agent_2", "response_to": "你知道食物在哪吗"}}}'
         )
 
         user = (

@@ -59,7 +59,14 @@ class ConversationManager:
                         if session.status == "active":
                             session.mark_resolved("speaker_opted_out")
                         continue
-                    data = json.loads(action)
+                    decision = json.loads(action)
+                    data = self._action_from_decision(decision)
+                    if not data:
+                        if self._session_has_pending_inbox(session, agents):
+                            continue
+                        if session.status == "active":
+                            session.mark_resolved("speaker_opted_out")
+                        continue
                     if data.get("tool") != "speak":
                         continue
                     self.world.execute(agent, action)
@@ -337,3 +344,11 @@ class ConversationManager:
         if len(text) <= 40:
             return text or "未命名话题"
         return text[:40] + "..."
+
+    def _action_from_decision(self, decision) -> dict:
+        if not isinstance(decision, dict):
+            return {}
+        action = decision.get("action", {})
+        if not isinstance(action, dict):
+            return {}
+        return action

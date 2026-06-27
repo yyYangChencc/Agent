@@ -39,3 +39,27 @@ class Post:
 
     def add_dislike(self, agent_id):
         self.dislikes += 1
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "author_id": self.author_id,
+            "content": self.content,
+            "time": self.time,
+            "likes": self.likes,
+            "dislikes": self.dislikes,
+            "reposts": self.reposts,
+            "comments_count": self.comments,
+            "opinion_index": self.opinion_index,
+            "is_news": self.is_news,
+            "is_rumor": self.is_rumor,
+            "comments": [
+                comment.to_dict() if hasattr(comment, "to_dict") else {
+                    "id": getattr(comment, "id", ""),
+                    "author_id": getattr(comment, "author_id", ""),
+                    "content": getattr(comment, "content", ""),
+                    "time": getattr(comment, "time", None),
+                }
+                for comment in self.comments_list
+            ],
+        }

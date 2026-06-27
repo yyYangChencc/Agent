@@ -67,6 +67,10 @@ class OpinionAssessmentCoordinator:
         # opinion_scores 保留为前端展示和历史分析用的镜像；真实状态以 agent.opinion 为准。
         agent.opinion_scores[topic] = score
         agent.opinion_assessment_history.append(assessment)
+        mem = getattr(agent, "mem", None)
+        if mem is not None and hasattr(mem, "store_opinion_assessment"):
+            # 观念评测的 reason/evidence 是后续 opinion 查询的重要证据，写入 reflective 记忆。
+            mem.store_opinion_assessment(agent.id, assessment)
         max_history = max(1, self.config.opinion_assessment_history_limit)
         if len(agent.opinion_assessment_history) > max_history:
             agent.opinion_assessment_history = agent.opinion_assessment_history[-max_history:]
@@ -273,7 +277,8 @@ class OpinionAssessmentCoordinator:
         memory_query = self._memory_query(topic, recent_history, recent_social)
         memories = []
         try:
-            memories = agent.recall(memory_query, context="social")
+            # 使用 opinion_assessment 场景召回，优先取社交、对话和历史观念证据。
+            memories = agent.recall(memory_query, context="opinion_assessment")
         except Exception as exc:
             logger.debug(
                 "[OpinionAssessment] memory recall failed for %s topic=%s: %s",

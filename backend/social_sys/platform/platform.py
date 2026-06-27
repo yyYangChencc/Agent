@@ -1,5 +1,6 @@
 import json
 import threading
+
 from tools.operator_tools import SocialOperator, register_operator_tools
 from social_sys.post.post import Post
 from persona.logger import get_logger
@@ -7,12 +8,9 @@ from persona.opinion.scale import OPINION_NEUTRAL, clamp_opinion
 
 logger = get_logger(__name__)
 
-class SocialPlatform:
-    """简化社交平台。
 
-    平台负责保存用户和帖子，并执行 SocialOperator 工具。帖子可见性由
-    give_post 控制：关注对象帖子和系统新闻对智能体可见。
-    """
+class SocialPlatform:
+    """Social platform state and action execution."""
 
     def __init__(self):
         self.agents = {}
@@ -31,50 +29,145 @@ class SocialPlatform:
     def add_post(self, post):
         self.posts.append(post)
 
-    def give_post(self, receiver_id):
-        """返回某个智能体本轮可见的帖子。"""
-
-        res = []
+    def get_visible_posts(self, receiver_id):
         receiver = self.get_agent(receiver_id)
         if not receiver:
-            return res
-        for post in self.posts:
-            if post.author_id in receiver.followers or post.is_news:
-                res.append(post)
-        return res
+            return []
+        return [
+            post
+            for post in self.posts
+            if post.author_id in receiver.followers or post.is_news
+        ]
 
-    def inject_news(self, tick: int, title: str, content: str, opinion_index: float = OPINION_NEUTRAL):
-        """投放真实新闻到社交平台，所有智能体自动可见（通过 is_news 标记）。"""
+    def give_post(self, receiver_id):
+        posts = self.get_visible_posts(receiver_id)
+        return {
+            "schema_version": 1,
+            "type": "social_browse",
+            "receiver_id": receiver_id,
+            "time": self.time,
+            "visible_post_ids": [post.id for post in posts],
+            "posts": [post.to_dict() for post in posts],
+        }
+
+    def inject_news(
+        self,
+        tick: int,
+        title: str,
+        content: str,
+        opinion_index: float = OPINION_NEUTRAL,
+    ):
         post_id = len(self.posts) + 1
         news_post = Post(post_id, "system", f"【{title}】{content}", is_news=True)
         news_post.opinion_index = clamp_opinion(opinion_index)
         news_post.time = tick
         self.posts.append(news_post)
-        logger.info("[News] tick=%d 投放新闻: %s", tick, title)
+        logger.info("[News] tick=%d inject news: %s", tick, title)
         return news_post
 
     def execute(self, Operator_id, action_str):
-        """解析社交动作 JSON，并调用 SocialOperator 中的具体工具。"""
-
         if not action_str:
-            return ""
+            return {
+                "ok": True,
+                "action": None,
+                "feedback": "",
+            }
         try:
-            data = json.loads(action_str)
+            decision = json.loads(action_str)
         except json.JSONDecodeError:
-            logger.error("[SocialPlatform] JSON 解析失败，原始内容: %r", action_str)
-            return ""
+            logger.error("[SocialPlatform] invalid JSON action: %r", action_str)
+            return {
+                "ok": False,
+                "action": None,
+                "think": "",
+                "feedback": "invalid social action JSON",
+            }
+        data, think = self._action_from_decision(decision)
         if not data or "tool" not in data:
-            logger.debug("[SocialPlatform] %s 本轮选择不行动", Operator_id)
-            return ""
+            logger.debug("[SocialPlatform] %s selected no action", Operator_id)
+            return {
+                "ok": True,
+                "action": None,
+                "think": think,
+                "feedback": "",
+            }
         tool = self.tools.get(data["tool"], None)
-        if tool:
-            args = data.get("args", {})
-            args["operator_ID"] = Operator_id
-            try:
-                feedback = tool.run(**args)
-            except Exception as e:
-                logger.error("[SocialPlatform] 工具 %s 执行失败 (operator=%s): %s", data["tool"], Operator_id, e, exc_info=True)
-                return "error: tool execution failed"
+        if not tool:
+            logger.warning("[SocialPlatform] unknown tool: %s", data.get("tool"))
+            return {
+                "ok": False,
+                "action": data.get("tool"),
+                "think": think,
+                "feedback": "tool not found",
+            }
+
+        args = data.get("args", {})
+        args["operator_ID"] = Operator_id
+        try:
+            feedback = tool.run(**args)
+        except Exception as e:
+            logger.error(
+                "[SocialPlatform] tool execution failed (tool=%s operator=%s): %s",
+                data["tool"],
+                Operator_id,
+                e,
+                exc_info=True,
+            )
+            return {
+                "ok": False,
+                "action": data["tool"],
+                "think": think,
+                "feedback": "tool execution failed",
+            }
+        if isinstance(feedback, dict):
+            feedback.setdefault("think", think)
             return feedback
-        logger.warning("[SocialPlatform] 未知工具: %s", data.get("tool"))
-        return "error: tool not found"
+        return self._structured_feedback(data["tool"], Operator_id, args, feedback, think)
+
+    def _structured_feedback(self, action: str, operator_id: str, args: dict, feedback, think: str = ""):
+        post = self._post_from_action(action, operator_id, args)
+        ok = not (isinstance(feedback, str) and feedback.startswith("error:"))
+        if action in {"comment_post", "like_post", "dislike_post"} and post is None:
+            ok = False
+        result = {
+            "ok": ok,
+            "action": action,
+            "think": think,
+            "feedback": feedback or "",
+        }
+        if post is not None:
+            result["post_id"] = post.id
+            result["post"] = post.to_dict()
+        elif "post_id" in args:
+            result["post_id"] = args.get("post_id")
+        return result
+
+    def _post_from_action(self, action: str, operator_id: str, args: dict):
+        if action == "send_post":
+            for post in reversed(self.posts):
+                if post.author_id == operator_id:
+                    return post
+            return None
+        post_id = args.get("post_id")
+        if post_id is None:
+            return None
+        if isinstance(post_id, bool):
+            return None
+        if isinstance(post_id, int):
+            normalized_post_id = post_id
+        elif isinstance(post_id, str) and post_id.strip().isdigit():
+            normalized_post_id = int(post_id.strip())
+        else:
+            return None
+        agent = self.get_agent(operator_id)
+        visible_posts = list(getattr(agent, "_last_seen_posts", []) or []) if agent is not None else []
+        return next((post for post in visible_posts if post.id == normalized_post_id), None)
+
+    def _action_from_decision(self, decision):
+        if not isinstance(decision, dict):
+            return {}, ""
+        think = str(decision.get("think", "") or "")
+        action = decision.get("action", {})
+        if not isinstance(action, dict):
+            return {}, think
+        return action, think

@@ -3,8 +3,11 @@ import chromadb
 import hashlib
 import threading
 import time
+from pathlib import Path
 from typing import Any
 from chromadb.config import Settings
+from persona.agent_memory.controller import MemoryController
+from persona.agent_memory.structured_store import StructuredMemoryStore
 from persona.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,7 +32,7 @@ class MultiAgentMemoryManager:
     检索时先做向量召回，再按任务、需求急迫度、重要性和时间等因素重排。
     """
 
-    def __init__(self, llm_client, persist_directory: str = "./chroma_agents"):
+    def __init__(self, llm_client, persist_directory: str = "./chroma_agents", structured_db_path: str | None = None):
         self.client = chromadb.PersistentClient(
             path=persist_directory,
             settings=Settings(allow_reset=True),
@@ -39,6 +42,11 @@ class MultiAgentMemoryManager:
         self._collection_lock = threading.Lock()
         self._embedding_cache: dict[str, list[float]] = {}
         self._embedding_cache_lock = threading.Lock()
+        if structured_db_path is None:
+            structured_db_path = str(Path(persist_directory) / "structured_memory.sqlite3")
+        # SQLite 负责结构化状态和证据；MemoryController 负责把业务 payload 分流到 SQLite/Chroma。
+        self.structured_store = StructuredMemoryStore(structured_db_path)
+        self.controller = MemoryController(self.structured_store, self)
 
     def _get_collection_name(self, agent_id: str) -> str:
         return f"agent_{agent_id}_memory"
@@ -64,7 +72,18 @@ class MultiAgentMemoryManager:
                 logger.info("为智能体 %s 初始化记忆存储", agent_id)
         return self.agent_collections[agent_id]["collection"]
 
+    def close(self) -> None:
+        structured_store = getattr(self, "structured_store", None)
+        if structured_store is not None:
+            structured_store.close()
+
     def store_agent_memory(self, agent_id: str, memory_text: str, world_time: int = 0, **metadata) -> str:
+        """写入长期语义记忆。
+
+        文本进入 Chroma 参与语义召回，同时双写到 SQLite 的 derived_memories，便于
+        后续 API 展示、访问统计和冲突调解。
+        """
+
         collection = self.get_agent_collection(agent_id)
         full_metadata = self._normalize_metadata(agent_id, world_time, metadata)
         memory_id = f"{agent_id}_{hashlib.md5(memory_text.encode()).hexdigest()[:10]}"
@@ -78,9 +97,12 @@ class MultiAgentMemoryManager:
             metadatas=[full_metadata],
             ids=[memory_id],
         )
+        self._record_derived_memory(agent_id, memory_id, memory_text, world_time, full_metadata)
         return memory_id
 
     async def astore_agent_memory(self, agent_id: str, memory_text: str, world_time: int = 0, **metadata) -> str:
+        """异步写入长期语义记忆，并保持与同步路径相同的 SQLite 双写行为。"""
+
         collection = self.get_agent_collection(agent_id)
         full_metadata = self._normalize_metadata(agent_id, world_time, metadata)
         memory_id = f"{agent_id}_{hashlib.md5(memory_text.encode()).hexdigest()[:10]}"
@@ -94,7 +116,219 @@ class MultiAgentMemoryManager:
             metadatas=[full_metadata],
             ids=[memory_id],
         )
+        self._record_derived_memory(agent_id, memory_id, memory_text, world_time, full_metadata)
         return memory_id
+
+    def store_observation(self, agent_id: str, observation: Any) -> None:
+        """兼容旧调用的 observe 写入入口，实际分类逻辑在 MemoryController 中。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_observation(agent_id, observation)
+
+    def store_action_result(
+        self,
+        agent_id: str,
+        *,
+        decision: Any,
+        feedback: Any,
+        reward: float | None,
+        world_time: int,
+    ) -> None:
+        """兼容旧调用的动作结果写入入口，记录已执行动作而不是未执行计划。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_action_result(
+                agent_id,
+                decision=decision,
+                feedback=feedback,
+                reward=reward,
+                world_time=world_time,
+            )
+
+    def store_social_browse(self, agent_id: str, browse_payload: Any) -> None:
+        """写入社交平台浏览结果，保留为 manager 方法以减少业务模块依赖。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_social_browse(agent_id, browse_payload)
+
+    def store_social_feedback(self, agent_id: str, feedback_payload: Any, *, world_time: int | None = None) -> None:
+        """写入社交操作反馈，实际帖子快照和事件拆分由控制层完成。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_social_feedback(agent_id, feedback_payload, world_time=world_time)
+
+    def store_conversation(
+        self,
+        agent_id: str,
+        *,
+        messages: list[dict[str, Any]] | None = None,
+        reply: Any = None,
+        observation: str = "",
+        world_time: int = 0,
+    ) -> None:
+        """写入对话消息和回复，保持 Agent 侧只提交结构化 payload。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_conversation(
+                agent_id,
+                messages=messages,
+                reply=reply,
+                observation=observation,
+                world_time=world_time,
+            )
+
+    def store_opinion_assessment(self, agent_id: str, assessment: Any) -> None:
+        """写入观念评测结果，作为 reflective 记忆证据。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_opinion_assessment(agent_id, assessment)
+
+    def retrieve_context(
+        self,
+        agent_id: str,
+        observation: Any,
+        task: str,
+        urgency: dict,
+        satisfaction_threshold: dict,
+        n_results: int = 3,
+        context: str = "world",
+    ) -> list[str]:
+        """统一检索入口。
+
+        新路径先经过 MemoryController 做结构化召回；若测试替身或旧对象没有
+        controller，则退回原来的 smart_retrieve，保证既有调用兼容。
+        """
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return self.smart_retrieve(
+                agent_id,
+                observation if isinstance(observation, str) else str(observation),
+                task,
+                urgency,
+                satisfaction_threshold,
+                n_results=n_results,
+                context=context,
+            )
+        return controller.retrieve_context(
+            agent_id,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results=n_results,
+            context=context,
+        )
+
+    async def aretrieve_context(
+        self,
+        agent_id: str,
+        observation: Any,
+        task: str,
+        urgency: dict,
+        satisfaction_threshold: dict,
+        n_results: int = 3,
+        context: str = "world",
+    ) -> list[str]:
+        """异步统一检索入口，兼容没有结构化控制层的旧测试对象。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return await self.asmart_retrieve(
+                agent_id,
+                observation if isinstance(observation, str) else str(observation),
+                task,
+                urgency,
+                satisfaction_threshold,
+                n_results=n_results,
+                context=context,
+            )
+        return await controller.aretrieve_context(
+            agent_id,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results=n_results,
+            context=context,
+        )
+
+    def execute_query_plan(
+        self,
+        agent_id: str,
+        query_plan: Any,
+        observation: Any,
+        task: str,
+        urgency: dict,
+        satisfaction_threshold: dict,
+        n_results: int = 3,
+        context: str = "world",
+    ) -> list[str]:
+        """执行 LLM planner 输出的受控记忆查询计划；旧对象退回自动召回。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return self.smart_retrieve(
+                agent_id,
+                observation if isinstance(observation, str) else str(observation),
+                task,
+                urgency,
+                satisfaction_threshold,
+                n_results=n_results,
+                context=context,
+            )
+        return controller.execute_query_plan(
+            agent_id,
+            query_plan,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results=n_results,
+            context=context,
+        )
+
+    async def aexecute_query_plan(
+        self,
+        agent_id: str,
+        query_plan: Any,
+        observation: Any,
+        task: str,
+        urgency: dict,
+        satisfaction_threshold: dict,
+        n_results: int = 3,
+        context: str = "world",
+    ) -> list[str]:
+        """异步执行 LLM planner 输出的受控记忆查询计划。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            obs_text = observation if isinstance(observation, str) else str(observation)
+            return await self.asmart_retrieve(
+                agent_id,
+                obs_text,
+                task,
+                urgency,
+                satisfaction_threshold,
+                n_results=n_results,
+                context=context,
+            )
+        return await controller.aexecute_query_plan(
+            agent_id,
+            query_plan,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results=n_results,
+            context=context,
+        )
 
     def smart_retrieve(
         self,
@@ -105,9 +339,11 @@ class MultiAgentMemoryManager:
         satisfaction_threshold: dict,
         n_results: int = 3,
         context: str = "world",
+        memory_types: list[str] | None = None,
     ) -> list[str]:
         """构造确定性检索查询，再召回与当前任务相关的记忆。"""
         query = self._build_retrieval_query(observation, task, urgency, satisfaction_threshold)
+        where = self._memory_type_where(memory_types)
         result = self.retrieve_agent_memories(
             agent_id,
             query,
@@ -115,6 +351,7 @@ class MultiAgentMemoryManager:
             context=context,
             task=task,
             urgency=urgency,
+            where=where,
         )
         logger.debug("[%s] 记忆检索结果: %s", agent_id, result)
         return result
@@ -186,8 +423,10 @@ class MultiAgentMemoryManager:
         satisfaction_threshold: dict,
         n_results: int = 3,
         context: str = "world",
+        memory_types: list[str] | None = None,
     ) -> list[str]:
         query = self._build_retrieval_query(observation, task, urgency, satisfaction_threshold)
+        where = self._memory_type_where(memory_types)
         return await self.aretrieve_agent_memories(
             agent_id,
             query,
@@ -195,6 +434,7 @@ class MultiAgentMemoryManager:
             context=context,
             task=task,
             urgency=urgency,
+            where=where,
         )
 
     def _build_retrieval_query(self, observation, task, urgency, satisfaction_threshold) -> str:
@@ -306,6 +546,48 @@ class MultiAgentMemoryManager:
         rows.sort(key=sort_key)
         return rows
 
+    def list_agent_structured_memories(self, agent_id: str) -> dict[str, list[dict[str, Any]]]:
+        """列出 SQLite 结构化记忆；controller 不存在时返回空结构保持 API 兼容。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return {}
+        return controller.list_structured_memory(agent_id)
+
+    def maintain_agent_memory(
+        self,
+        agent_id: str,
+        *,
+        current_time: int,
+        raw_event_retention: int = 50,
+    ) -> dict[str, Any]:
+        """执行每 tick 轻量维护；旧测试对象没有 controller 时返回空维护结果。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return {"agent_id": agent_id, "pruned_low_value_events": 0, "unresolved_conflicts": 0}
+        return controller.maintain_agent_memory(
+            agent_id,
+            current_time=current_time,
+            raw_event_retention=raw_event_retention,
+        )
+
+    def update_person_profiles_from_reflection(self, agent_id: str, *, current_time: int, llm=None) -> dict[str, Any]:
+        """reflect 阶段的人物档案更新入口。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return {"agent_id": agent_id, "updated_person_profiles": 0}
+        return controller.update_person_profiles_from_reflection(agent_id, current_time=current_time, llm=llm)
+
+    async def aupdate_person_profiles_from_reflection(self, agent_id: str, *, current_time: int, llm=None) -> dict[str, Any]:
+        """异步 reflect 阶段的人物档案更新入口。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return {"agent_id": agent_id, "updated_person_profiles": 0}
+        return await controller.aupdate_person_profiles_from_reflection(agent_id, current_time=current_time, llm=llm)
+
     def get_all_agents_stats(self) -> dict:
         stats = {}
         for collection_info in self.client.list_collections():
@@ -398,6 +680,21 @@ class MultiAgentMemoryManager:
             return filters[0]
         return {"$and": filters}
 
+    def _memory_type_where(self, memory_types: list[str] | None) -> dict | None:
+        """把 planner 指定的 Chroma 记忆类型转换为 metadata 过滤条件。"""
+
+        values = []
+        for value in memory_types or []:
+            text = str(value or "").strip()
+            if text:
+                values.append(MEMORY_TYPE_ALIASES.get(text, text))
+        values = sorted(set(values))
+        if not values:
+            return None
+        if len(values) == 1:
+            return {"memory_type": values[0]}
+        return {"memory_type": {"$in": values}}
+
     def _format_ranked_results(
         self,
         results: dict,
@@ -473,9 +770,30 @@ class MultiAgentMemoryManager:
             parts.append(f"object={object_id}")
         return f"{' '.join(parts)}] {doc}"
 
+    def _record_derived_memory(
+        self,
+        agent_id: str,
+        memory_id: str,
+        memory_text: str,
+        world_time: int,
+        metadata: dict[str, Any],
+    ) -> None:
+        """把 Chroma 成功写入的长期记忆同步登记到 SQLite。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is None:
+            return
+        try:
+            controller.record_derived_memory(agent_id, memory_id, memory_text, world_time, dict(metadata))
+        except Exception as exc:
+            logger.debug("[%s] structured derived memory write failed: %s", agent_id, exc)
+
     def reset_all(self) -> None:
-        """清空所有智能体的记忆（ChromaDB reset）。"""
+        """清空所有智能体的记忆，包括 Chroma 语义索引和 SQLite 结构化记忆。"""
         self.client.reset()
+        structured_store = getattr(self, "structured_store", None)
+        if structured_store is not None:
+            structured_store.reset_all()
         self.agent_collections.clear()
         with self._embedding_cache_lock:
             self._embedding_cache.clear()

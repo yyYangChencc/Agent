@@ -22,6 +22,7 @@ class Reflect:
         self.config = config
 
     def step(self, agent: "Agent") -> None:
+        self._update_person_profiles(agent)
         if agent.task == "done":
             return
         if agent.task == "none":
@@ -149,6 +150,7 @@ class Reflect:
             logger.warning("[%s] 微反思未能解析 Focus，保持原焦点", agent.id)
 
     async def astep(self, agent: "Agent") -> None:
+        await self._aupdate_person_profiles(agent)
         if agent.task == "done":
             return
         if agent.task == "none":
@@ -196,3 +198,30 @@ class Reflect:
         logger.debug("[%s] 任务未完成：%s satisfaction=%.2f <= 阈值 %.2f",
                      agent.id, urgency_key, current_satisfaction, threshold)
         return 0
+
+    def _update_person_profiles(self, agent: "Agent") -> None:
+        """在 reflect 阶段根据新增事实更新人物档案。"""
+
+        mem = getattr(agent, "mem", None)
+        world = getattr(agent, "world", None)
+        if mem is None or world is None or not hasattr(mem, "update_person_profiles_from_reflection"):
+            return
+        try:
+            mem.update_person_profiles_from_reflection(agent.id, current_time=world.time, llm=self.llm)
+        except Exception as exc:
+            logger.debug("[%s] 更新人物档案失败: %s", agent.id, exc)
+
+    async def _aupdate_person_profiles(self, agent: "Agent") -> None:
+        """异步 reflect 阶段的人物档案更新。"""
+
+        mem = getattr(agent, "mem", None)
+        world = getattr(agent, "world", None)
+        if mem is None or world is None:
+            return
+        try:
+            if hasattr(mem, "aupdate_person_profiles_from_reflection"):
+                await mem.aupdate_person_profiles_from_reflection(agent.id, current_time=world.time, llm=self.llm)
+            elif hasattr(mem, "update_person_profiles_from_reflection"):
+                mem.update_person_profiles_from_reflection(agent.id, current_time=world.time, llm=self.llm)
+        except Exception as exc:
+            logger.debug("[%s] 异步更新人物档案失败: %s", agent.id, exc)

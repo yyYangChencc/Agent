@@ -1,3 +1,5 @@
+import json
+
 from social_sys.post.post import Post
 from social_sys.platform.platform import SocialPlatform
 from persona.logger import get_logger
@@ -31,13 +33,9 @@ class SocialAgent:
         return "\n".join([post.show() for post in self.post_history])
 
     def receive_post(self):
-        posts = self.platform.give_post(self.id)
-        if len(posts) == 0:
-            logger.info("[%s] 没有收到任何帖子", self.id)
-            return [], f"{self.id}暂时没有收到任何帖子"
-        visible_ids = "、".join(str(post.id) for post in posts)
-        posts_text = "\n".join([post.show() for post in posts])
-        return posts, f"当前可互动帖子ID列表：{visible_ids}\n{posts_text}"
+        posts = self.platform.get_visible_posts(self.id)
+        posts_info = self.platform.give_post(self.id)
+        return posts, json.dumps(posts_info, ensure_ascii=False, indent=2)
 
     def recall(self, obs):
         return self.mem.retrieve_agent_memories(self.id, obs, n_results=3)

@@ -198,10 +198,15 @@ async def agent_memories(agent_id: str):
     if error is not None:
         return error
     memories = rt.mem.list_agent_memories(agent.id)
+    structured = {}
+    if hasattr(rt.mem, "list_agent_structured_memories"):
+        # 保留旧 memories 字段给现有前端，同时追加 SQLite 分表结果供新记忆窗口使用。
+        structured = rt.mem.list_agent_structured_memories(agent.id)
     return {
         "agent_id": agent.id,
         "count": len(memories),
         "memories": memories,
+        "structured": structured,
     }
 
 

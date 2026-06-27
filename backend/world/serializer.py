@@ -1,5 +1,4 @@
 from __future__ import annotations
-import re
 from typing import TYPE_CHECKING
 from world.map import serialize_map_design
 
@@ -9,15 +8,14 @@ if TYPE_CHECKING:
 
 
 def _extract_last_think(history: list[str]) -> str:
-    """从智能体历史记录中反向搜索，返回最近一次 <Think> 标签的内容。
+    """从智能体历史记录中反向搜索，返回最近一次 decision_think 内容。
 
-    history 中每条记录可能包含多轮对话，倒序遍历保证取到最新的思考片段。
     未找到时返回空字符串，前端按空字符串判断是否渲染思考区域。
     """
     for h in reversed(history):
-        m = re.search(r"<Think>(.*?)</Think>", h, re.DOTALL)
-        if m:
-            return m.group(1).strip()
+        prefix = "decision_think:"
+        if h.startswith(prefix):
+            return h[len(prefix):].strip()
     return ""
 
 

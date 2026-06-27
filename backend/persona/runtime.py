@@ -7,14 +7,15 @@ from persona.llm.interface import LLMClient
 from persona.agent_memory.mem import MultiAgentMemoryManager
 from world.world import World
 from persona.agents.agent import Agent
-from persona.agents.policy import LLMPolicy
+from persona.agents.policy import LLMPolicy, LLMMemoryPlannerPolicy
 from persona.agents.prompt import (
     WorldPromptBuilder,
     SocialPromptBuilder,
     ConversationPromptBuilder,
     ReflectPromptBuilder,
+    MemoryPlannerPromptBuilder,
 )
-from persona.agents.parser import ActionParser
+from persona.agents.parser import ActionParser, MemoryQueryPlanParser
 from persona.reflect.reflect import Reflect
 from social_sys.platform.platform import SocialPlatform
 from persona.opinion import OpinionAssessmentCoordinator
@@ -36,6 +37,7 @@ class SimulationRuntime:
     policy: LLMPolicy
     social_policy: LLMPolicy
     conv_policy: LLMPolicy
+    memory_planner: LLMMemoryPlannerPolicy
     reflect: Reflect
     conversation_max_rounds: int = field(default=2)
 
@@ -74,6 +76,7 @@ class SimulationRuntime:
         policy = LLMPolicy(llm, WorldPromptBuilder(), ActionParser())
         social_policy = LLMPolicy(llm, SocialPromptBuilder(), ActionParser())
         conv_policy = LLMPolicy(llm, ConversationPromptBuilder(), ActionParser())
+        memory_planner = LLMMemoryPlannerPolicy(llm, MemoryPlannerPromptBuilder(), MemoryQueryPlanParser())
         reflect = Reflect(llm, ReflectPromptBuilder(), config)
 
         world.conversation_policy = conv_policy
@@ -88,6 +91,7 @@ class SimulationRuntime:
             policy=policy,
             social_policy=social_policy,
             conv_policy=conv_policy,
+            memory_planner=memory_planner,
             reflect=reflect,
             conversation_max_rounds=conversation_max_rounds,
         )
@@ -105,6 +109,7 @@ class SimulationRuntime:
             reflect=self.reflect,
             platform=self.platform,
             social_policy=self.social_policy,
+            memory_planner=self.memory_planner,
             config=self.config,
             speaking_style=speaking_style,
             salary=salary,

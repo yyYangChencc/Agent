@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import math
 from typing import TYPE_CHECKING
 from persona.logger import get_logger
@@ -33,6 +34,7 @@ class Agent:
         reflect: "Reflect",
         platform,
         social_policy: "Policy",
+        memory_planner,
         config: "AgentConfig",
         speaking_style: str = "",
         salary: float = 0.0,
@@ -44,6 +46,7 @@ class Agent:
         self.reflect = reflect
         self.platform = platform
         self.social_policy = social_policy
+        self.memory_planner = memory_planner
         self.next_action: str | None = None
         self.history: list[str] = []
         self.trajectory_buffer: list[dict] = []  # 当前任务内的 obs/action/reward 轨迹
@@ -109,17 +112,29 @@ class Agent:
     # Core decision cycle
     # ------------------------------------------------------------------
 
-    def step(self, observation: str) -> str:
-        self.add_history("observation", observation)
-        mem_info = self.recall(observation)
-        action = self.policy.decide(self, observation, mem_info)
+    def step(self, observation: str | dict | list | None) -> str:
+        """同步决策入口。
+
+        observe 和社交平台现在返回结构化 JSON；Agent 只在送入 prompt 前转成字符串，
+        原始结构仍交给记忆系统分类写入。
+        """
+
+        observation_text = self._format_structured_context(observation)
+        self.add_history("observation", observation_text)
+        self._store_observation_memory(observation)
+        mem_info = self._planned_recall(observation, observation_text, context="world")
+        action = self.policy.decide(self, observation_text, mem_info)
         self.add_history("action", action)
         return action
 
-    async def astep(self, observation: str) -> str:
-        self.add_history("observation", observation)
-        mem_info = await self.arecall(observation)
-        action = await self.policy.adecide(self, observation, mem_info)
+    async def astep(self, observation: str | dict | list | None) -> str:
+        """异步决策入口，与同步路径保持相同的结构化观察处理。"""
+
+        observation_text = self._format_structured_context(observation)
+        self.add_history("observation", observation_text)
+        self._store_observation_memory(observation)
+        mem_info = await self._aplanned_recall(observation, observation_text, context="world")
+        action = await self.policy.adecide(self, observation_text, mem_info)
         self.add_history("action", action)
         return action
 
@@ -133,21 +148,20 @@ class Agent:
         logger.info("[%s] 正在查看帖子...", self.id)
         posts, posts_info = self._receive_post()
         self._last_seen_posts = posts
-        logger.debug("[%s] 收到帖子内容: %s", self.id, posts_info)
-        mem_info = self.recall(posts_info, context="social")
-        raw = self.social_policy.decide(self, posts_info, mem_info)
+        # 社交浏览结果先以 JSON 写入记忆，再转成 prompt 字符串交给社交 policy。
+        self._store_social_browse_memory(posts_info)
+        posts_text = self._format_structured_context(posts_info)
+        logger.debug("[%s] 收到帖子内容: %s", self.id, posts_text)
+        mem_info = self._planned_recall(posts_info, posts_text, context="social")
+        raw = self.social_policy.decide(self, posts_text, mem_info)
         feedback = self.platform.execute(self.id, raw)
+        self._store_social_feedback_memory(feedback)
         logger.debug("[%s] 社交平台反馈: %s", self.id, feedback)
-        return feedback
+        return self._format_structured_context(feedback)
 
-    def _receive_post(self) -> tuple[list, str]:
-        posts = self.platform.give_post(self.id)
-        if not posts:
-            logger.info("[%s] 没有收到任何帖子", self.id)
-            return [], f"{self.id}暂时没有收到任何帖子"
-        visible_ids = "、".join(str(post.id) for post in posts)
-        posts_text = "\n".join([post.show() for post in posts])
-        return posts, f"当前可互动帖子ID列表：{visible_ids}\n{posts_text}"
+    def _receive_post(self) -> tuple[list, dict]:
+        posts = self.platform.get_visible_posts(self.id)
+        return posts, self.platform.give_post(self.id)
 
     def get_post_history(self) -> str:
         return "\n".join([post.show() for post in self.post_history])
@@ -179,25 +193,151 @@ class Agent:
             top_k = max(2, top_k - 2)
         return min(top_k, self.config.memory_max_top_k)
 
-    def recall(self, obs: str, context: str = "world") -> list[str]:
+    def recall(self, obs: str | dict | list | None, context: str = "world") -> list[str]:
+        """按场景召回记忆，返回 list[str] 以保持现有 prompt 兼容。"""
+
+        top_k = self._memory_top_k_for(context)
+        if hasattr(self.mem, "retrieve_context"):
+            return self.mem.retrieve_context(
+                self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
+                n_results=top_k,
+                context=context,
+            )
+        obs_text = self._format_structured_context(obs)
         return self.mem.smart_retrieve(
-            self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
-            n_results=self._memory_top_k_for(context),
+            self.id, obs_text, self.task, self.urgency, self.satisfaction_threshold,
+            n_results=top_k,
             context=context,
         )
 
-    async def arecall(self, obs: str, context: str = "world") -> list[str]:
+    async def arecall(self, obs: str | dict | list | None, context: str = "world") -> list[str]:
+        """异步记忆召回；优先使用结构化控制层，旧接口作为兜底。"""
+
+        top_k = self._memory_top_k_for(context)
+        if hasattr(self.mem, "aretrieve_context"):
+            return await self.mem.aretrieve_context(
+                self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
+                n_results=top_k,
+                context=context,
+            )
+        obs_text = self._format_structured_context(obs)
         return await self.mem.asmart_retrieve(
-            self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
-            n_results=self._memory_top_k_for(context),
+            self.id, obs_text, self.task, self.urgency, self.satisfaction_threshold,
+            n_results=top_k,
             context=context,
         )
+
+    def _planned_recall(self, obs: str | dict | list | None, observation_text: str, context: str = "world") -> list[str]:
+        """先由 LLM planner 生成查询计划，再执行受控记忆召回。"""
+
+        planner = getattr(self, "memory_planner", None)
+        if planner is None or not hasattr(planner, "plan") or not hasattr(self.mem, "execute_query_plan"):
+            return self.recall(obs, context=context)
+        try:
+            plan = planner.plan(self, observation_text, context=context)
+            self.add_history("memory_query", self._memory_query_history_summary(plan))
+            return self.mem.execute_query_plan(
+                self.id,
+                plan,
+                obs,
+                self.task,
+                self.urgency,
+                self.satisfaction_threshold,
+                n_results=self._memory_top_k_for(context),
+                context=context,
+            )
+        except Exception as exc:
+            logger.warning("[%s] 记忆查询计划执行失败，退回自动召回: %s", self.id, exc)
+            return self.recall(obs, context=context)
+
+    async def _aplanned_recall(self, obs: str | dict | list | None, observation_text: str, context: str = "world") -> list[str]:
+        """异步 planner 召回；失败时保留旧召回路径。"""
+
+        planner = getattr(self, "memory_planner", None)
+        if planner is None or not hasattr(planner, "aplan") or not hasattr(self.mem, "aexecute_query_plan"):
+            return await self.arecall(obs, context=context)
+        try:
+            plan = await planner.aplan(self, observation_text, context=context)
+            self.add_history("memory_query", self._memory_query_history_summary(plan))
+            return await self.mem.aexecute_query_plan(
+                self.id,
+                plan,
+                obs,
+                self.task,
+                self.urgency,
+                self.satisfaction_threshold,
+                n_results=self._memory_top_k_for(context),
+                context=context,
+            )
+        except Exception as exc:
+            logger.warning("[%s] 异步记忆查询计划执行失败，退回自动召回: %s", self.id, exc)
+            return await self.arecall(obs, context=context)
+
+    def _memory_query_history_summary(self, plan: str) -> str:
+        """短期 history 只记录本轮查询摘要，避免完整 planner JSON 挤占历史窗口。"""
+
+        try:
+            data = json.loads(plan)
+        except (TypeError, json.JSONDecodeError):
+            return str(plan)[:180]
+        queries = data.get("queries") if isinstance(data.get("queries"), list) else []
+        types = []
+        for query in queries[:5]:
+            if isinstance(query, dict) and query.get("type"):
+                types.append(str(query.get("type")))
+        think = str(data.get("think") or "")[:120]
+        return f"context={data.get('context', 'world')} query_types={','.join(types) or 'none'} think={think}"
+
+    def _format_structured_context(self, value: str | dict | list | None) -> str:
+        """把结构化 JSON 转成 prompt 文本；拼接工作集中在 Agent 层完成。"""
+
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, indent=2)
 
     def remember(self, info: str, **metadata) -> None:
         self.mem.store_agent_memory(self.id, info, world_time=self.world.time, **metadata)
 
     async def aremember(self, info: str, **metadata) -> None:
         await self.mem.astore_agent_memory(self.id, info, world_time=self.world.time, **metadata)
+
+    def _store_observation_memory(self, observation: str | dict | list | None) -> None:
+        """把 observe 原始 JSON 交给记忆控制层，Agent 不在这里拆字段。"""
+
+        if hasattr(self.mem, "store_observation"):
+            self.mem.store_observation(self.id, observation)
+
+    def _store_social_browse_memory(self, posts_info: dict) -> None:
+        """把社交平台返回的 JSON 浏览结果写入记忆系统。"""
+
+        if hasattr(self.mem, "store_social_browse"):
+            self.mem.store_social_browse(self.id, posts_info)
+
+    def _store_social_feedback_memory(self, feedback: dict | str | None) -> None:
+        """把社交平台执行反馈写入记忆系统，时间以当前 world.time 为准。"""
+
+        if hasattr(self.mem, "store_social_feedback"):
+            self.mem.store_social_feedback(self.id, feedback, world_time=self.world.time)
+
+    def _store_conversation_memory(
+        self,
+        *,
+        messages: list[dict] | None = None,
+        reply: str | None = None,
+        observation: str = "",
+    ) -> None:
+        """把对话消息和回复作为结构化 payload 交给记忆系统。"""
+
+        if hasattr(self.mem, "store_conversation"):
+            self.mem.store_conversation(
+                self.id,
+                messages=messages,
+                reply=reply,
+                observation=observation,
+                world_time=self.world.time,
+            )
 
     def append_trajectory(self, obs: str, action: str, reward: float | None) -> None:
         """把当前任务中的一步执行结果暂存，等任务结束后再总结入长期记忆。"""
@@ -236,6 +376,18 @@ class Agent:
             importance=0.7,
             confidence=0.7,
         )
+        if hasattr(self.mem, "store_action_result"):
+            # 轨迹总结本身是任务完成证据，也写入结构化事件供后续 world 检索使用。
+            self.mem.store_action_result(
+                self.id,
+                decision={
+                    "think": "task trajectory completed",
+                    "action": {"tool": "task_summary", "args": {"task": task, "need_key": need_key}},
+                },
+                feedback=summary,
+                reward=None,
+                world_time=self.world.time,
+            )
         logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
         self.trajectory_buffer.clear()
 
@@ -266,6 +418,18 @@ class Agent:
             importance=0.7,
             confidence=0.7,
         )
+        if hasattr(self.mem, "store_action_result"):
+            # 异步轨迹总结与同步路径保持一致，也写入结构化任务完成事件。
+            self.mem.store_action_result(
+                self.id,
+                decision={
+                    "think": "task trajectory completed",
+                    "action": {"tool": "task_summary", "args": {"task": task, "need_key": need_key}},
+                },
+                feedback=summary,
+                reward=None,
+                world_time=self.world.time,
+            )
         logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
         self.trajectory_buffer.clear()
 
@@ -338,6 +502,7 @@ class Agent:
         else:
             history_block = "[本时间步对话历史]\n（暂无）"
 
+        inbox_messages = list(self.inbox)
         msgs = "\n".join([
             (
                 f"{m['sender']} 对你说"
@@ -346,7 +511,7 @@ class Agent:
                 f"{m['content']}"
             ) +
             (f"（回复的是: {m['response_to']}）" if m.get("response_to") else "")
-            for m in self.inbox
+            for m in inbox_messages
         ])
         observation = (
             f"{history_block}\n\n"
@@ -355,8 +520,9 @@ class Agent:
         )
         self.inbox.clear()
         self.add_history("conversation", observation)
-        mem_info = self.recall(observation, context="conversation")
+        mem_info = self._planned_recall(observation, observation, context="conversation")
         action = policy.decide(self, observation, mem_info)
+        self._store_conversation_memory(messages=inbox_messages, reply=action, observation=observation)
         if action:
             self.add_history("conversation_reply", action)
         else:
