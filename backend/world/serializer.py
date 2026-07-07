@@ -4,7 +4,7 @@ from world.map import serialize_map_design
 
 if TYPE_CHECKING:
     from world.world import World
-    from social_sys.platform.platform import SocialPlatform
+    from social_sys.platform import SocialPlatform
 
 
 def _extract_last_think(history: list[str]) -> str:
@@ -76,17 +76,22 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             {
                 "id": p.id,
                 "author_id": p.author_id,
+                "topic": getattr(p, "topic", ""),
                 "content": p.content,
                 "time": p.time,
                 "likes": p.likes,
                 "dislikes": p.dislikes,
                 "opinion_index": round(p.opinion_index, 3),
+                "is_news": getattr(p, "is_news", False),
+                "is_rumor": getattr(p, "is_rumor", False),
+                "source_type": getattr(p, "source_type", "agent"),
                 "comments": [
                     {
                         "id": c.id,
                         "author_id": c.author_id,
                         "content": c.content,
                         "time": c.time,
+                        "agreement_to_post": getattr(c, "agreement_to_post", 0.0),
                     }
                     for c in p.comments_list
                 ],
@@ -95,6 +100,7 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
         ]
     return {
         "time": world.time,
+        "scenario_name": getattr(world, "scenario_name", "default_town"),
         "simulation_step_limit": world.agents and next(iter(world.agents.values())).config.simulation_step_limit or 0,
         "map_size": [world.map.width, world.map.height],
         "map_design": serialize_map_design(getattr(world, "map_design", None)),

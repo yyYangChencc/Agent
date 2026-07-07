@@ -1,4 +1,5 @@
 import { useSimStore } from '../store/simStore'
+import { useEffect, useState } from 'react'
 
 // 支持的仿真速度倍率，对应后端 sim_state["speed"]
 const SPEEDS = [1, 2, 5]
@@ -7,16 +8,26 @@ const SPEEDS = [1, 2, 5]
 export function ControlBar() {
   const running = useSimStore((s) => s.running)
   const speed = useSimStore((s) => s.speed)
+  const scenarioName = useSimStore((s) => s.scenarioName)
+  const scenarios = useSimStore((s) => s.scenarios)
+  const archivedRun = useSimStore((s) => s.archivedRun)
   const connected = useSimStore((s) => s.connected)
   const worldState = useSimStore((s) => s.worldState)
   const showMapRegions = useSimStore((s) => s.showMapRegions)
   const toggleMapRegions = useSimStore((s) => s.toggleMapRegions)
   const sendCmd = useSimStore((s) => s.sendCmd)
+  const [selectedScenario, setSelectedScenario] = useState(scenarioName)
 
   // 未收到任何 tick 时显示 0
   const tick = worldState?.time ?? 0
   const maxTicks = worldState?.simulation_step_limit ?? 0
   const limitReached = maxTicks > 0 && tick >= maxTicks
+  const activeScenario = scenarioName || worldState?.scenario_name || 'default_town'
+  const scenarioOptions = scenarios.length > 0 ? scenarios : [activeScenario]
+
+  useEffect(() => {
+    setSelectedScenario(activeScenario)
+  }, [activeScenario])
 
   return (
     <div className="flex items-center gap-3 px-4 py-2 bg-[#dde3c3] border-b-4 border-[#25251c] text-sm flex-shrink-0 text-[#243225]">
@@ -26,6 +37,10 @@ export function ControlBar() {
       <span className="text-[#3f4f37] font-mono">
         t={tick}{maxTicks > 0 ? `/${maxTicks}` : ''}
       </span>
+      <span className="text-[#6c584c]">|</span>
+      <span className="text-[#3f4f37] text-xs">
+        场景：<span className="font-mono">{activeScenario}</span>
+      </span>
       {/* 连接状态指示灯：绿色=已连接，红色=断开 */}
       <span
         className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400' : 'bg-red-500'}`}
@@ -34,6 +49,25 @@ export function ControlBar() {
 
       {/* 弹性空白，将操作按钮推到右侧 */}
       <div className="flex-1" />
+
+      <select
+        value={selectedScenario}
+        onChange={(event) => setSelectedScenario(event.target.value)}
+        disabled={!connected || running}
+        className="px-2 py-1 rounded bg-[#f8f5d8] border border-[#6c584c] text-[#243225] text-xs disabled:opacity-40"
+        title="选择要重新加载的场景"
+      >
+        {scenarioOptions.map((name) => (
+          <option key={name} value={name}>{name}</option>
+        ))}
+      </select>
+      <button
+        onClick={() => sendCmd({ cmd: 'reset', scenario: selectedScenario })}
+        disabled={!connected || running}
+        className="px-3 py-1 rounded bg-[#4f8fc0] hover:bg-[#66a7d8] text-[#f8f5d8] text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        加载场景
+      </button>
 
       <button
         onClick={toggleMapRegions}
@@ -78,6 +112,36 @@ export function ControlBar() {
       </button>
 
       <span className="text-[#6c584c]">|</span>
+
+      {archivedRun && (
+        <>
+          <span className="text-[#3f4f37] text-xs">
+            已归档：<span className="font-mono">{archivedRun.run_name}</span>
+            （{archivedRun.tick_count} tick）
+          </span>
+          {archivedRun.summary_url && (
+            <a
+              href={archivedRun.summary_url}
+              target="_blank"
+              rel="noreferrer"
+              className="px-2 py-1 rounded bg-[#f8f5d8] hover:bg-[#f8c86b] text-[#243225] text-xs border border-[#6c584c]"
+            >
+              摘要
+            </a>
+          )}
+          {archivedRun.charts?.map((chart) => (
+            <a
+              key={chart.name}
+              href={chart.url}
+              target="_blank"
+              rel="noreferrer"
+              className="px-2 py-1 rounded bg-[#f8f5d8] hover:bg-[#f8c86b] text-[#243225] text-xs border border-[#6c584c]"
+            >
+              {chart.name.replace('.svg', '')}
+            </a>
+          ))}
+        </>
+      )}
 
       {/* 速度按钮：当前倍率高亮，点击后后端调整 asyncio.sleep 间隔 */}
       {SPEEDS.map((s) => (

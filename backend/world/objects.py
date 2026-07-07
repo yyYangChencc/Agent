@@ -1,3 +1,6 @@
+from persona.need_events import apply_need_delta
+
+
 class objects:
     """地图对象基类。
 
@@ -42,7 +45,14 @@ class food(Interactable):
         
     def interact(self, agent) -> str:
         # 食物是一次性地图物品，交互后减少库存，库存归零则从地图和对象表移除。
-        agent.update_satisfaction("satiety", self.provide)
+        apply_need_delta(
+            agent,
+            "satiety",
+            self.provide,
+            source="physiological",
+            reason="吃地图食物补充饱腹度",
+            evidence={"object_id": self.id, "kind": self.kind},
+        )
         self.eaten()
         return f"吃到了{self.id}"
 
@@ -93,8 +103,33 @@ class company(building):
 
     def interact(self, agent) -> str:
         # 公司是 money 获取渠道，同时用 relax 成本约束无限刷钱。
-        agent.update_satisfaction("money", self.salary)
-        agent.update_satisfaction("relax", -self.relax_cost)
+        agent.did_work_this_tick = True
+        if hasattr(agent, "remember_action_tool"):
+            agent.remember_action_tool("company")
+        apply_need_delta(
+            agent,
+            "money",
+            self.salary,
+            source="economic",
+            reason="在公司工作获得收入",
+            evidence={"building_id": self.id, "kind": self.kind},
+        )
+        apply_need_delta(
+            agent,
+            "relax",
+            -self.relax_cost,
+            source="physiological",
+            reason="在公司工作消耗 relax",
+            evidence={"building_id": self.id, "kind": self.kind},
+        )
+        apply_need_delta(
+            agent,
+            "esteem",
+            agent.config.work_esteem_delta,
+            source="economic",
+            reason="完成工作带来胜任感反馈",
+            evidence={"building_id": self.id, "kind": self.kind},
+        )
         return f"在公司 {self.id} 工作，获得 {self.salary} 元工资，消耗 {self.relax_cost} relax"
     
     def get_desc(self) -> str:
@@ -150,8 +185,24 @@ class food_shop(building):
         if agent.satisfaction.get("money", 0) < self.price:
             return f"余额不足，无法在食品店 {self.id} 购买食物（需要 {self.price} 元）"
         self.food_num -= 1
-        agent.update_satisfaction("satiety", self.provide)
-        agent.update_satisfaction("money", -self.price)
+        if hasattr(agent, "remember_action_tool"):
+            agent.remember_action_tool("food_shop")
+        apply_need_delta(
+            agent,
+            "satiety",
+            self.provide,
+            source="physiological",
+            reason="在食品店购买食物补充饱腹度",
+            evidence={"building_id": self.id, "kind": self.kind},
+        )
+        apply_need_delta(
+            agent,
+            "money",
+            -self.price,
+            source="economic",
+            reason="在食品店购买食物消耗金钱",
+            evidence={"building_id": self.id, "kind": self.kind},
+        )
         return f"在食品店 {self.id} 购买食物，花费 {self.price} 元，补充 {self.provide} satiety"
 
     def get_desc(self) -> str:
@@ -171,8 +222,24 @@ class playground(building):
         # 游乐场是付费 relax 恢复渠道，余额不足时不改变任何需求。
         if agent.satisfaction.get("money", 0) < self.price:
             return f"余额不足，无法在游乐场 {self.id} 娱乐（需要 {self.price} 元）"
-        agent.update_satisfaction("money", -self.price)
-        agent.update_satisfaction("relax", self.provide)
+        if hasattr(agent, "remember_action_tool"):
+            agent.remember_action_tool("playground")
+        apply_need_delta(
+            agent,
+            "money",
+            -self.price,
+            source="economic",
+            reason="在游乐场放松消耗金钱",
+            evidence={"building_id": self.id, "kind": self.kind},
+        )
+        apply_need_delta(
+            agent,
+            "relax",
+            self.provide,
+            source="physiological",
+            reason="在游乐场放松恢复 relax",
+            evidence={"building_id": self.id, "kind": self.kind},
+        )
         return f"在游乐场 {self.id} 放松，花费 {self.price} 元，恢复 {self.provide} relax"
     
     def get_desc(self) -> str:

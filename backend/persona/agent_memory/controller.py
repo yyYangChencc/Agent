@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any
 
 from persona.agent_memory.structured_store import StructuredMemoryStore
+from persona.llm.interface import JSON_OBJECT_RESPONSE_FORMAT
+from persona.llm.json_utils import parse_json_object
 from persona.logger import get_logger
 
 logger = get_logger(__name__)
@@ -487,12 +491,17 @@ class MemoryController:
         *,
         n_results: int,
         context: str,
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """同步检索入口：先按场景查 SQLite，再用剩余预算查 Chroma。"""
 
+        started_at = time.perf_counter()
         payload = _as_dict(observation)
         query_text = observation if isinstance(observation, str) else _as_text(observation)
         structured = self._retrieve_structured(agent_id, payload, query_text, task, context, n_results)
+        if self._retrieval_timed_out(started_at, timeout_seconds):
+            # 结构化 SQLite 已有结果时，超时后不再继续 Chroma，避免慢 embedding 阻塞 tick。
+            return self._dedupe(structured)[:n_results]
         semantic_budget = max(1, n_results - len(structured))
         semantic = self.semantic_manager.smart_retrieve(
             agent_id,
@@ -515,14 +524,19 @@ class MemoryController:
         *,
         n_results: int,
         context: str,
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """异步检索入口；结构化查询是本地 SQLite，语义查询走异步 Chroma 路径。"""
 
+        started_at = time.perf_counter()
         payload = _as_dict(observation)
         query_text = observation if isinstance(observation, str) else _as_text(observation)
         structured = self._retrieve_structured(agent_id, payload, query_text, task, context, n_results)
+        if self._retrieval_timed_out(started_at, timeout_seconds):
+            # 结构化 SQLite 已有结果时，超时后不再继续 Chroma，避免慢 embedding 阻塞 tick。
+            return self._dedupe(structured)[:n_results]
         semantic_budget = max(1, n_results - len(structured))
-        semantic = await self.semantic_manager.asmart_retrieve(
+        semantic_call = self.semantic_manager.asmart_retrieve(
             agent_id,
             query_text,
             task,
@@ -531,6 +545,15 @@ class MemoryController:
             n_results=semantic_budget,
             context=context,
         )
+        remaining_timeout = self._remaining_timeout(started_at, timeout_seconds)
+        try:
+            if remaining_timeout is None:
+                semantic = await semantic_call
+            else:
+                semantic = await asyncio.wait_for(semantic_call, timeout=remaining_timeout)
+        except asyncio.TimeoutError:
+            logger.warning("[%s] memory semantic retrieval timeout context=%s", agent_id, context)
+            semantic = []
         return self._dedupe(structured + semantic)[:n_results]
 
     def execute_query_plan(
@@ -544,6 +567,7 @@ class MemoryController:
         *,
         n_results: int,
         context: str,
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """执行 LLM planner 生成的受控记忆查询计划。
 
@@ -563,6 +587,7 @@ class MemoryController:
                 satisfaction_threshold,
                 n_results=n_results,
                 context=context,
+                timeout_seconds=timeout_seconds,
             )
         return self._execute_query_plan_sync(
             agent_id,
@@ -574,6 +599,8 @@ class MemoryController:
             satisfaction_threshold,
             n_results=n_results,
             context=context,
+            started_at=time.perf_counter(),
+            timeout_seconds=timeout_seconds,
         )
 
     async def aexecute_query_plan(
@@ -587,6 +614,7 @@ class MemoryController:
         *,
         n_results: int,
         context: str,
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """异步执行受控记忆查询计划；语义查询走异步 Chroma。"""
 
@@ -602,6 +630,7 @@ class MemoryController:
                 satisfaction_threshold,
                 n_results=n_results,
                 context=context,
+                timeout_seconds=timeout_seconds,
             )
         return await self._execute_query_plan_async(
             agent_id,
@@ -613,6 +642,8 @@ class MemoryController:
             satisfaction_threshold,
             n_results=n_results,
             context=context,
+            started_at=time.perf_counter(),
+            timeout_seconds=timeout_seconds,
         )
 
     def list_structured_memory(self, agent_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -715,7 +746,7 @@ class MemoryController:
                 rows.append(("social_post", self._format_social_post(row), row.get("post_id")))
             for row in self.store.get_recent_events(
                 agent_id,
-                source_types=["social_feedback", "social_browse", "opinion_assessment"],
+                source_types=["social_feedback", "social_browse"],
                 memory_types=SOCIAL_STRUCTURED_TYPES,
                 entity_ids=entity_ids,
                 post_ids=post_ids,
@@ -742,7 +773,7 @@ class MemoryController:
             # 观念评测不依赖单个实体 id，侧重近期社交/对话/评测证据。
             for row in self.store.get_recent_events(
                 agent_id,
-                source_types=["opinion_assessment", "social_feedback", "social_browse", "conversation"],
+                source_types=["social_feedback", "social_browse", "conversation"],
                 memory_types=OPINION_STRUCTURED_TYPES,
                 limit=12,
             ):
@@ -806,14 +837,22 @@ class MemoryController:
         *,
         n_results: int,
         context: str,
+        started_at: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """同步执行 planner 查询计划。"""
 
         rows = []
         visible = self._visible_refs(payload)
         world_time = int(payload.get("time") or 0) if payload else 0
+        started_at = time.perf_counter() if started_at is None else started_at
         for query in self._limited_queries(plan):
+            if self._retrieval_timed_out(started_at, timeout_seconds):
+                # 超时后保留已经取得的结构化/语义结果，不继续发起新的检索。
+                break
             if query.get("type") == "semantic":
+                if self._retrieval_timed_out(started_at, timeout_seconds):
+                    break
                 semantic_query = self._semantic_query_text(query, query_text, task)
                 results = self.semantic_manager.smart_retrieve(
                     agent_id,
@@ -845,16 +884,22 @@ class MemoryController:
         *,
         n_results: int,
         context: str,
+        started_at: float | None = None,
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """异步执行 planner 查询计划，保留 Chroma 语义召回入口。"""
 
         rows = []
         visible = self._visible_refs(payload)
         world_time = int(payload.get("time") or 0) if payload else 0
+        started_at = time.perf_counter() if started_at is None else started_at
         for query in self._limited_queries(plan):
+            if self._retrieval_timed_out(started_at, timeout_seconds):
+                # 超时后保留已经取得的结构化/语义结果，不继续发起新的检索。
+                break
             if query.get("type") == "semantic":
                 semantic_query = self._semantic_query_text(query, query_text, task)
-                results = await self.semantic_manager.asmart_retrieve(
+                semantic_call = self.semantic_manager.asmart_retrieve(
                     agent_id,
                     semantic_query,
                     task,
@@ -864,6 +909,15 @@ class MemoryController:
                     context=context,
                     memory_types=self._list_value(query.get("memory_types")),
                 )
+                remaining_timeout = self._remaining_timeout(started_at, timeout_seconds)
+                try:
+                    if remaining_timeout is None:
+                        results = await semantic_call
+                    else:
+                        results = await asyncio.wait_for(semantic_call, timeout=remaining_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning("[%s] memory planner semantic query timeout context=%s", agent_id, context)
+                    results = []
                 for text in results:
                     rows.append(("semantic", text, semantic_query))
                 continue
@@ -911,7 +965,7 @@ class MemoryController:
         elif query_type == "event_history":
             for row in self.store.get_recent_events(
                 agent_id,
-                source_types=self._list_value(query.get("source_types")),
+                source_types=self._source_types_for_query(query, context),
                 memory_types=self._list_value(query.get("memory_types")) or self._event_types_for_context(context),
                 entity_ids=self._query_ids(query, "entity_ids", "entity_id"),
                 post_ids=self._query_ids(query, "post_ids", "post_id"),
@@ -1019,6 +1073,20 @@ class MemoryController:
         queries = plan.get("queries") if isinstance(plan.get("queries"), list) else []
         return [query for query in queries[:5] if isinstance(query, dict)]
 
+    def _retrieval_timed_out(self, started_at: float, timeout_seconds: float | None) -> bool:
+        """记忆检索超过预算后停止追加慢查询，避免单个 tick 被拖住。"""
+
+        if timeout_seconds is None or timeout_seconds <= 0:
+            return False
+        return time.perf_counter() - started_at >= timeout_seconds
+
+    def _remaining_timeout(self, started_at: float, timeout_seconds: float | None) -> float | None:
+        """计算异步 Chroma 查询还能等待多久。"""
+
+        if timeout_seconds is None or timeout_seconds <= 0:
+            return None
+        return max(0.001, timeout_seconds - (time.perf_counter() - started_at))
+
     def _limit(self, query: dict[str, Any]) -> int:
         try:
             number = int(query.get("limit", 3))
@@ -1043,6 +1111,18 @@ class MemoryController:
         if value is None:
             return []
         return [_text_id(value)]
+
+    def _source_types_for_query(self, query: dict[str, Any], context: str) -> list[str]:
+        """观念评测查询固定排除旧评测结果，避免自我强化回音。"""
+
+        values = self._list_value(query.get("source_types"))
+        if context == "opinion_assessment":
+            allowed = ["social_feedback", "social_browse", "conversation"]
+            if not values:
+                return allowed
+            values = [value for value in values if value in allowed]
+            return values or allowed
+        return values
 
     def _event_types_for_context(self, context: str) -> list[str]:
         if context == "social":
@@ -1140,38 +1220,11 @@ class MemoryController:
         fallback = self._rule_person_profile_summary(profile, facts)
         if llm is None or not facts:
             return fallback
-        system = (
-            "你是沙盒智能体的记忆整理模块。请根据某个目标人物的新事实，更新当前智能体对他的档案印象。"
-            "只输出 JSON，不要输出额外文字。不要输出 evidence_event_ids。"
-        )
-        user = json.dumps(
-            {
-                "target_agent_id": profile.get("target_agent_id"),
-                "old_profile": {
-                    "actions_impression": profile.get("actions_impression", ""),
-                    "opinion_impression": profile.get("opinion_impression", ""),
-                    "relationship_impression": profile.get("relationship_impression", ""),
-                    "recent_post_summary": profile.get("recent_post_summary", ""),
-                },
-                "new_facts": [self._fact_text(row) for row in facts],
-                "output_schema": {
-                    "actions_impression": "此人做过什么的中文短总结",
-                    "opinion_impression": "此人持有什么观念或立场的中文短总结",
-                    "relationship_impression": "当前智能体对他的总体印象",
-                    "confidence": "float in [0,1]",
-                },
-            },
-            ensure_ascii=False,
-        )
+        system, user = self._person_profile_prompt(profile, facts)
         try:
-            raw = llm.generate(system, user)
+            raw = llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             data = self._parse_json_object(raw)
-            return {
-                "actions_impression": _short(data.get("actions_impression") or fallback["actions_impression"], 240),
-                "opinion_impression": _short(data.get("opinion_impression") or fallback["opinion_impression"], 240),
-                "relationship_impression": _short(data.get("relationship_impression") or fallback["relationship_impression"], 240),
-                "confidence": self._clamp01(data.get("confidence", fallback["confidence"])),
-            }
+            return self._person_profile_summary_from_payload(data, fallback)
         except Exception as exc:
             logger.debug("person profile LLM summary failed: %s", exc)
             return fallback
@@ -1182,6 +1235,18 @@ class MemoryController:
         fallback = self._rule_person_profile_summary(profile, facts)
         if llm is None or not facts or not hasattr(llm, "agenerate"):
             return fallback
+        system, user = self._person_profile_prompt(profile, facts)
+        try:
+            raw = await llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            data = self._parse_json_object(raw)
+            return self._person_profile_summary_from_payload(data, fallback)
+        except Exception as exc:
+            logger.debug("async person profile LLM summary failed: %s", exc)
+            return fallback
+
+    def _person_profile_prompt(self, profile: dict[str, Any], facts: list[dict[str, Any]]) -> tuple[str, str]:
+        """构造人物档案摘要 prompt，供同步和异步路径复用。"""
+
         system = (
             "你是沙盒智能体的记忆整理模块。请根据某个目标人物的新事实，更新当前智能体对他的档案印象。"
             "只输出 JSON，不要输出额外文字。不要输出 evidence_event_ids。"
@@ -1205,18 +1270,17 @@ class MemoryController:
             },
             ensure_ascii=False,
         )
-        try:
-            raw = await llm.agenerate(system, user)
-            data = self._parse_json_object(raw)
-            return {
-                "actions_impression": _short(data.get("actions_impression") or fallback["actions_impression"], 240),
-                "opinion_impression": _short(data.get("opinion_impression") or fallback["opinion_impression"], 240),
-                "relationship_impression": _short(data.get("relationship_impression") or fallback["relationship_impression"], 240),
-                "confidence": self._clamp01(data.get("confidence", fallback["confidence"])),
-            }
-        except Exception as exc:
-            logger.debug("async person profile LLM summary failed: %s", exc)
-            return fallback
+        return system, user
+
+    def _person_profile_summary_from_payload(self, data: dict[str, Any], fallback: dict[str, Any]) -> dict[str, Any]:
+        """把 LLM 摘要 JSON 标准化为人物档案字段。"""
+
+        return {
+            "actions_impression": _short(data.get("actions_impression") or fallback["actions_impression"], 240),
+            "opinion_impression": _short(data.get("opinion_impression") or fallback["opinion_impression"], 240),
+            "relationship_impression": _short(data.get("relationship_impression") or fallback["relationship_impression"], 240),
+            "confidence": self._clamp01(data.get("confidence", fallback["confidence"])),
+        }
 
     def _rule_person_profile_summary(self, profile: dict[str, Any], facts: list[dict[str, Any]]) -> dict[str, Any]:
         """规则兜底：用事实类型和摘要拼出人物档案印象。"""
@@ -1234,8 +1298,10 @@ class MemoryController:
                 action_texts.append(summary or f"{target_id} 参与过 {event_type}")
             if source in {"social_browse", "social_feedback"}:
                 opinion = payload.get("opinion_index")
+                topic = _text_id(payload.get("topic"))
                 content = payload.get("content") or payload.get("feedback") or summary
-                opinion_texts.append(f"{_short(content, 80)} opinion_index={opinion}")
+                topic_text = f"topic={topic} " if topic else ""
+                opinion_texts.append(f"{topic_text}{_short(content, 80)} opinion_index={opinion}")
             if source == "conversation":
                 relation_texts.append(summary)
         if not action_texts and profile.get("actions_impression"):
@@ -1252,17 +1318,7 @@ class MemoryController:
         }
 
     def _parse_json_object(self, raw: str) -> dict[str, Any]:
-        """兼容纯 JSON 和 fenced JSON block。"""
-
-        text = str(raw or "").strip()
-        if text.startswith("```"):
-            text = text.removeprefix("```json").removeprefix("```").strip()
-            if text.endswith("```"):
-                text = text[:-3].strip()
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError("person profile summary is not a JSON object")
-        return data
+        return parse_json_object(raw, context="person profile summary")
 
     def _clamp01(self, value: Any) -> float:
         try:
@@ -1278,8 +1334,10 @@ class MemoryController:
         )
 
     def _post_profile_summary(self, post: dict[str, Any]) -> str:
+        topic = _text_id(post.get("topic"))
+        topic_text = f" topic={topic}" if topic else ""
         return (
-            f"posted: {_short(post.get('content', ''), 120)} "
+            f"posted:{topic_text} {_short(post.get('content', ''), 120)} "
             f"opinion_index={post.get('opinion_index')}"
         )
 
@@ -1414,10 +1472,12 @@ class MemoryController:
         )
 
     def _format_social_post(self, row: dict[str, Any]) -> str:
+        topic = f" topic={row.get('topic')}" if row.get("topic") else ""
         return (
-            f"[social t={row.get('last_seen_at')} post={row.get('post_id')} confidence={row.get('confidence')}] "
+            f"[social t={row.get('last_seen_at')} post={row.get('post_id')}{topic} confidence={row.get('confidence')}] "
             f"author={row.get('author_id')} likes={row.get('likes')} dislikes={row.get('dislikes')} "
-            f"comments={row.get('comments_count')} content={_short(row.get('content', ''))}"
+            f"comments={row.get('comments_count')} opinion_index={row.get('opinion_index')} "
+            f"content={_short(row.get('content', ''))}"
         )
 
     def _format_event(self, row: dict[str, Any]) -> str:

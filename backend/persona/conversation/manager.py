@@ -7,9 +7,12 @@ from persona.conversation.session import (
     ConversationIntent,
     ConversationMessage,
     ConversationSession,
-    infer_conversation_intent,
+    normalize_conversation_intent,
+    normalize_social_valence,
+    normalize_topic_stance,
 )
 from persona.logger import get_logger
+from persona.need_events import apply_conversation_need_event
 
 if TYPE_CHECKING:
     from persona.agents.agent import Agent
@@ -81,8 +84,12 @@ class ConversationManager:
                         target,
                         content,
                         response_to,
+                        args.get("intent"),
+                        args.get("social_valence"),
+                        args.get("topic"),
+                        args.get("topic_stance"),
                     )
-                    session.add_message(message)
+                    self._finalize_message(session, message, agents)
                     round_history.append(message.to_history_entry())
                     logger.info(
                         "[Conversation] session=%s round=%d %s -> %s intent=%s",
@@ -129,7 +136,14 @@ class ConversationManager:
                 key = self._session_key(sender, target)
                 session = session_by_pair.get(key)
                 if session is None:
-                    session = self._new_session(sender, target, msg.get("content", ""), msg.get("response_to"), max_rounds)
+                    session = self._new_session(
+                        sender,
+                        target,
+                        msg.get("content", ""),
+                        msg.get("response_to"),
+                        max_rounds,
+                        msg.get("intent"),
+                    )
                     session_by_pair[key] = session
                     seeded.append(session)
                 if not self._session_has_seed_message(session, sender, target, str(msg.get("content", ""))):
@@ -140,8 +154,12 @@ class ConversationManager:
                         target,
                         str(msg.get("content", "")),
                         msg.get("response_to"),
+                        msg.get("intent"),
+                        msg.get("social_valence"),
+                        msg.get("topic"),
+                        msg.get("topic_stance"),
                     )
-                    session.add_message(message)
+                    self._finalize_message(session, message, agents)
                 msg["session_id"] = session.session_id
                 msg["intent"] = session.intent.value
         if seeded:
@@ -270,10 +288,11 @@ class ConversationManager:
         content: str,
         response_to: str | None,
         max_rounds: int,
+        intent_value=None,
     ) -> ConversationSession:
         self._session_counter += 1
         session_id = f"conv_{self.world.time}_{self._session_counter}"
-        intent = infer_conversation_intent(content, response_to)
+        intent = normalize_conversation_intent(intent_value, content, response_to)
         participants = [sender]
         if target == "<all>":
             participants.extend(agent_id for agent_id in self.world.agents if agent_id != sender)
@@ -302,8 +321,16 @@ class ConversationManager:
         target: str,
         content: str,
         response_to: str | None,
+        intent_value=None,
+        social_valence=None,
+        topic=None,
+        topic_stance=None,
     ) -> ConversationMessage:
         self._message_counter += 1
+        default_topic = self._default_opinion_topic(sender)
+        normalized_topic = str(topic or "").strip()
+        if normalized_topic != default_topic:
+            normalized_topic = ""
         return ConversationMessage(
             message_id=f"{session.session_id}_m{self._message_counter}",
             session_id=session.session_id,
@@ -311,10 +338,80 @@ class ConversationManager:
             sender=sender,
             target=target,
             content=content,
-            intent=infer_conversation_intent(content, response_to),
+            intent=normalize_conversation_intent(intent_value, content, response_to),
             response_to=response_to,
             time=self.world.time,
+            social_valence=normalize_social_valence(social_valence),
+            topic=normalized_topic,
+            topic_stance=normalize_topic_stance(normalized_topic, topic_stance, default_topic),
         )
+
+    def _default_opinion_topic(self, sender: str) -> str:
+        """读取发送者配置中的系统新闻主题，用于校验 topic_stance。"""
+
+        agent = self.world.agents.get(sender)
+        config = getattr(agent, "config", None)
+        return str(getattr(config, "default_opinion_topic", "") or "")
+
+    def _finalize_message(
+        self,
+        session: ConversationSession,
+        message: ConversationMessage,
+        agents: list["Agent"],
+    ) -> None:
+        """统一落地对话消息、历史日志和需求事件。"""
+
+        session.add_message(message)
+        agent_by_id = {agent.id: agent for agent in agents}
+        self._stamp_pending_inbox(message, agent_by_id)
+        self._record_conversation_message(message, agent_by_id)
+        apply_conversation_need_event(message, session, agent_by_id)
+
+    def _record_conversation_message(
+        self,
+        message: ConversationMessage,
+        agent_by_id: dict[str, "Agent"],
+    ) -> None:
+        """把结构化对话消息写入参与者运行时日志，供 HistoryRecorder 导出。"""
+
+        entry = message.to_history_entry()
+        receiver_ids: set[str] = {message.sender}
+        if message.target == "<all>":
+            receiver_ids.update(agent_by_id.keys())
+        else:
+            receiver_ids.add(message.target)
+        for agent_id in receiver_ids:
+            agent = agent_by_id.get(agent_id)
+            if agent is None:
+                continue
+            agent.conversation_event_log.append(dict(entry))
+            if len(agent.conversation_event_log) > 500:
+                agent.conversation_event_log = agent.conversation_event_log[-500:]
+
+    def _stamp_pending_inbox(
+        self,
+        message: ConversationMessage,
+        agent_by_id: dict[str, "Agent"],
+    ) -> None:
+        """把刚落地的会话元数据回填到接收者 inbox，保证下一轮能按 session 继续。"""
+
+        if message.target == "<all>":
+            target_ids = [agent_id for agent_id in agent_by_id if agent_id != message.sender]
+        else:
+            target_ids = [message.target]
+        for agent_id in target_ids:
+            agent = agent_by_id.get(agent_id)
+            if agent is None:
+                continue
+            for item in getattr(agent, "inbox", []) or []:
+                if item.get("sender") != message.sender or item.get("content") != message.content:
+                    continue
+                item["session_id"] = message.session_id
+                item["intent"] = message.intent.value
+                item["social_valence"] = message.social_valence
+                item["topic"] = message.topic
+                item["topic_stance"] = message.topic_stance
+                item["target"] = message.target
 
     def _history_from_sessions(self, sessions: list[ConversationSession]) -> list[dict]:
         history = []

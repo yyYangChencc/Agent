@@ -8,6 +8,23 @@ class Event:
         self.acted = acted        # 行动对象
 
 class SpeakingEvent(Event):
-    def __init__(self,type, actor, info, time,response_to, position=None, acted=None):
+    def __init__(
+        self,
+        type,
+        actor,
+        info,
+        time,
+        response_to,
+        position=None,
+        acted=None,
+        intent=None,
+        social_valence=None,
+        topic="",
+        topic_stance=None,
+    ):
         super().__init__(type, actor, info, time, position, acted)
         self.response_to = response_to
+        self.intent = intent
+        self.social_valence = social_valence
+        self.topic = topic
+        self.topic_stance = topic_stance

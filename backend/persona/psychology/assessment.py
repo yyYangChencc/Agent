@@ -12,11 +12,12 @@ from __future__ import annotations
 """
 
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from persona.llm.interface import JSON_OBJECT_RESPONSE_FORMAT
+from persona.llm.json_utils import parse_json_object
 from persona.logger import get_logger
 
 if TYPE_CHECKING:
@@ -393,19 +394,7 @@ class LLMTheoryCardNeedEvaluator:
         try:
             return self._assess_with_llm(agent=agent, window=window, previous_result=previous_result)
         except Exception as exc:
-            if not self.fallback_to_rule:
-                raise
-            logger.warning(
-                "[Psychology] LLM assessment failed for %s need=%s: %s; fallback to theory card",
-                agent.id,
-                self.need_key,
-                exc,
-            )
-            return self.fallback_evaluator.assess(
-                agent=agent,
-                window=window,
-                previous_result=previous_result,
-            )
+            return self._fallback_after_llm_error(agent, window, previous_result, exc, async_mode=False)
 
     async def aassess(
         self,
@@ -418,19 +407,7 @@ class LLMTheoryCardNeedEvaluator:
         try:
             return await self._aassess_with_llm(agent=agent, window=window, previous_result=previous_result)
         except Exception as exc:
-            if not self.fallback_to_rule:
-                raise
-            logger.warning(
-                "[Psychology] async LLM assessment failed for %s need=%s: %s; fallback to theory card",
-                agent.id,
-                self.need_key,
-                exc,
-            )
-            return self.fallback_evaluator.assess(
-                agent=agent,
-                window=window,
-                previous_result=previous_result,
-            )
+            return self._fallback_after_llm_error(agent, window, previous_result, exc, async_mode=True)
 
     def recover(
         self,
@@ -458,9 +435,8 @@ class LLMTheoryCardNeedEvaluator:
         previous_result: dict | None,
     ) -> dict:
         system, user = self._build_prompt(agent, window, previous_result)
-        raw = self.llm.generate(system, user)
-        payload = self._parse_llm_json(raw)
-        return self._build_result_from_payload(agent, window, previous_result, payload)
+        raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        return self._build_result_from_raw(agent, window, previous_result, raw)
 
     async def _aassess_with_llm(
         self,
@@ -470,9 +446,60 @@ class LLMTheoryCardNeedEvaluator:
         previous_result: dict | None,
     ) -> dict:
         system, user = self._build_prompt(agent, window, previous_result)
-        raw = await self.llm.agenerate(system, user)
+        raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        return self._build_result_from_raw(agent, window, previous_result, raw)
+
+    def _fallback_after_llm_error(
+        self,
+        agent: "Agent",
+        window: AssessmentWindow,
+        previous_result: dict | None,
+        exc: Exception,
+        *,
+        async_mode: bool,
+    ) -> dict:
+        """LLM 输出异常时统一执行规则回退。"""
+
+        if not self.fallback_to_rule:
+            raise exc
+        mode = "async LLM" if async_mode else "LLM"
+        logger.warning(
+            "[Psychology] %s assessment failed for %s need=%s: %s; fallback to theory card",
+            mode,
+            agent.id,
+            self.need_key,
+            exc,
+        )
+        return self.fallback_evaluator.assess(
+            agent=agent,
+            window=window,
+            previous_result=previous_result,
+        )
+
+    def _build_result_from_raw(
+        self,
+        agent: "Agent",
+        window: AssessmentWindow,
+        previous_result: dict | None,
+        raw: str,
+    ) -> dict:
+        """统一解析 LLM 原文并转成标准评测结果。"""
+
         payload = self._parse_llm_json(raw)
         return self._build_result_from_payload(agent, window, previous_result, payload)
+
+    def _pressure_snapshot(self, window: AssessmentWindow) -> dict:
+        """统一生成本需求在窗口内的压力快照。"""
+
+        pressure_max = window.effective_pressure_max.get(self.need_key, 0.0)
+        pressure_last = window.effective_pressure_last.get(self.need_key, 0.0)
+        pressure = _clamp01(max(pressure_max, pressure_last))
+        return {
+            "max": pressure_max,
+            "last": pressure_last,
+            "pressure": pressure,
+            "level": _pressure_level(pressure),
+        }
 
     def _build_prompt(
         self,
@@ -482,10 +509,7 @@ class LLMTheoryCardNeedEvaluator:
     ) -> tuple[str, str]:
         # prompt 保留在本模块内，以匹配项目已有 LLM 调用风格：
         # system 文本 + JSON user payload，然后调用 llm.generate/agenerate。
-        pressure_max = window.effective_pressure_max.get(self.need_key, 0.0)
-        pressure_last = window.effective_pressure_last.get(self.need_key, 0.0)
-        pressure = _clamp01(max(pressure_max, pressure_last))
-        level = _pressure_level(pressure)
+        pressure_snapshot = self._pressure_snapshot(window)
         need_change = window.need_changes().get(self.need_key, 0.0)
         recent_history = list(getattr(agent, "history", []) or [])[-8:]
         system = (
@@ -518,9 +542,9 @@ class LLMTheoryCardNeedEvaluator:
                     "recent_history": recent_history,
                     "need_change": need_change,
                     "effective_pressure": {
-                        "max": pressure_max,
-                        "last": pressure_last,
-                        "level": level,
+                        "max": pressure_snapshot["max"],
+                        "last": pressure_snapshot["last"],
+                        "level": pressure_snapshot["level"],
                     },
                 },
                 "theory_card": self.card,
@@ -555,15 +579,17 @@ class LLMTheoryCardNeedEvaluator:
     ) -> dict:
         # 将 LLM 原始 JSON 转换为与确定性理论卡评测器一致的结果结构。
         # 下游代码不需要关心结果来自 LLM 还是规则评测器。
-        pressure_max = window.effective_pressure_max.get(self.need_key, 0.0)
-        pressure_last = window.effective_pressure_last.get(self.need_key, 0.0)
-        pressure = _clamp01(max(pressure_max, pressure_last))
-        level = _pressure_level(pressure)
+        pressure_snapshot = self._pressure_snapshot(window)
         need_change = window.need_changes().get(self.need_key, 0.0)
         mediators = self._validated_mediators(payload.get("mediators"))
         if not mediators:
             raise ValueError("LLM psychological assessment output has no valid mediators")
-        role_card = self._validated_role_card(payload.get("role_card_delta"), level, pressure, mediators)
+        role_card = self._validated_role_card(
+            payload.get("role_card_delta"),
+            pressure_snapshot["level"],
+            pressure_snapshot["pressure"],
+            mediators,
+        )
         reason = payload.get("reason", "")
         if not isinstance(reason, str) or not reason:
             reason = "LLM 根据理论卡和窗口上下文完成心理评测。"
@@ -586,9 +612,9 @@ class LLMTheoryCardNeedEvaluator:
             "experiences": list(window.experiences),
             "need_change": need_change,
             "effective_pressure": {
-                "max": pressure_max,
-                "last": pressure_last,
-                "level": level,
+                "max": pressure_snapshot["max"],
+                "last": pressure_snapshot["last"],
+                "level": pressure_snapshot["level"],
             },
             "previous_result": previous_result,
             "mediators": mediators,
@@ -659,19 +685,7 @@ class LLMTheoryCardNeedEvaluator:
         }
 
     def _parse_llm_json(self, raw: str) -> dict:
-        # 接受纯 JSON 或 fenced JSON 代码块。任何非对象输出都会被拒绝，
-        # 并交由调用方的回退路径处理。
-        text = raw.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?", "", text).strip()
-            text = re.sub(r"```$", "", text).strip()
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
-            text = match.group(0)
-        data = json.loads(text)
-        if not isinstance(data, dict):
-            raise ValueError("LLM psychological assessment output is not a JSON object")
-        return data
+        return parse_json_object(raw, context="LLM psychological assessment output")
 
 
 class PlaceholderNeedEvaluator:
@@ -854,65 +868,78 @@ class PsychologicalAssessmentCoordinator:
         if experience:
             window.add_experience(experience)
 
-    def maybe_assess(self, agent: "Agent", tick: int) -> dict | None:
-        # 同步兼容路径。实际运行时使用 amaybe_assess_all()。
+    def _ready_window(self, agent: "Agent", tick: int) -> AssessmentWindow | None:
+        """返回已到评测间隔的窗口；未成熟时返回 None。"""
+
         self.ensure_agent_state(agent, tick)
         interval = max(1, self.config.psychological_assessment_interval)
         window = agent.psychological_assessment_window
         if tick - window.start_tick + 1 < interval:
             return None
-
         window.end_tick = tick
+        return window
+
+    def _assess_need_sync(self, agent: "Agent", window: AssessmentWindow, need_key: str) -> dict:
+        """同步评测单个需求，并写回该需求上一轮结果。"""
+
+        evaluator = self.evaluators.get(need_key) or PlaceholderNeedEvaluator(need_key)
+        previous_result = agent.last_need_assessments.get(need_key)
+        result = evaluator.assess(
+            agent=agent,
+            window=window,
+            previous_result=previous_result,
+        )
+        agent.last_need_assessments[need_key] = result
+        return result
+
+    async def _assess_need_async(self, agent: "Agent", window: AssessmentWindow, need_key: str) -> dict:
+        """异步评测单个需求；不支持异步的评测器走同步接口。"""
+
+        evaluator = self.evaluators.get(need_key) or PlaceholderNeedEvaluator(need_key)
+        previous_result = agent.last_need_assessments.get(need_key)
+        if hasattr(evaluator, "aassess"):
+            result = await evaluator.aassess(
+                agent=agent,
+                window=window,
+                previous_result=previous_result,
+            )
+        else:
+            result = evaluator.assess(
+                agent=agent,
+                window=window,
+                previous_result=previous_result,
+            )
+        agent.last_need_assessments[need_key] = result
+        return result
+
+    def maybe_assess(self, agent: "Agent", tick: int) -> dict | None:
+        # 同步兼容路径。实际运行时使用 amaybe_assess_all()。
+        window = self._ready_window(agent, tick)
+        if window is None:
+            return None
         activated_needs = self._activated_needs(window)
         if not activated_needs:
             return self._handle_no_activated_needs(agent, window, tick)
 
         evaluator_results: dict[str, dict] = {}
         for need_key in activated_needs:
-            evaluator = self.evaluators.get(need_key) or PlaceholderNeedEvaluator(need_key)
-            previous_result = agent.last_need_assessments.get(need_key)
-            result = evaluator.assess(
-                agent=agent,
-                window=window,
-                previous_result=previous_result,
-            )
-            evaluator_results[need_key] = result
-            agent.last_need_assessments[need_key] = result
+            evaluator_results[need_key] = self._assess_need_sync(agent, window, need_key)
 
         return self._store_integrated_assessment(agent, window, tick, evaluator_results)
 
     async def amaybe_assess(self, agent: "Agent", tick: int) -> dict | None:
         # 单个智能体的异步路径。逻辑与 maybe_assess() 对齐；
         # 当评测器支持异步 LLM 调用时使用 aassess()。
-        self.ensure_agent_state(agent, tick)
-        interval = max(1, self.config.psychological_assessment_interval)
-        window = agent.psychological_assessment_window
-        if tick - window.start_tick + 1 < interval:
+        window = self._ready_window(agent, tick)
+        if window is None:
             return None
-
-        window.end_tick = tick
         activated_needs = self._activated_needs(window)
         if not activated_needs:
             return self._handle_no_activated_needs(agent, window, tick)
 
         evaluator_results: dict[str, dict] = {}
         for need_key in activated_needs:
-            evaluator = self.evaluators.get(need_key) or PlaceholderNeedEvaluator(need_key)
-            previous_result = agent.last_need_assessments.get(need_key)
-            if hasattr(evaluator, "aassess"):
-                result = await evaluator.aassess(
-                    agent=agent,
-                    window=window,
-                    previous_result=previous_result,
-                )
-            else:
-                result = evaluator.assess(
-                    agent=agent,
-                    window=window,
-                    previous_result=previous_result,
-                )
-            evaluator_results[need_key] = result
-            agent.last_need_assessments[need_key] = result
+            evaluator_results[need_key] = await self._assess_need_async(agent, window, need_key)
 
         return self._store_integrated_assessment(agent, window, tick, evaluator_results)
 

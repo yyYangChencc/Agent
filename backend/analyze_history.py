@@ -1,0 +1,1588 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import html
+import json
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from statistics import mean, median
+from typing import Any, Iterable
+
+
+HISTORY_DIR = Path(__file__).resolve().parent / "history"
+REQUIRED_HISTORY_COLUMNS = ("tick", "opinion")
+OPENPYXL_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+XLRD_SUFFIXES = {".xls"}
+CSV_SUFFIXES = {".csv"}
+TABLE_SUFFIXES = OPENPYXL_SUFFIXES | XLRD_SUFFIXES | CSV_SUFFIXES
+INVALID_FILENAME_CHARS = '<>:"/\\|?*'
+GENERATED_ANALYSIS_FILES = {
+    "polarization_metrics.csv",
+    "polarization_agent_shift.csv",
+}
+
+
+@dataclass(frozen=True)
+class AnalysisOptions:
+    data_length: int | None = None
+    window_size: int = 10
+    support_threshold: float = 0.35
+    oppose_threshold: float = -0.35
+    neutral_threshold: float = 0.10
+    extreme_threshold: float = 0.75
+    min_side_share: float = 0.20
+    min_pairwise_delta: float = 0.05
+    min_abs_delta: float = 0.05
+    alpha: float = 0.05
+    bootstrap_samples: int = 2000
+    seed: int = 42
+    allow_incomplete_ticks: bool = False
+
+
+@dataclass(frozen=True)
+class AnalysisResult:
+    run_dir: Path
+    output_dir: Path
+    summary_path: Path
+    polarization_report_path: Path | None
+    generated_paths: list[Path]
+
+
+@dataclass(frozen=True)
+class TickMetric:
+    tick: int
+    n_agents: int
+    mean_opinion: float
+    median_opinion: float
+    std_population: float
+    mean_abs_opinion: float
+    median_abs_opinion: float
+    pairwise_mean_abs_distance: float
+    min_opinion: float
+    max_opinion: float
+    range_opinion: float
+    support_count: int
+    oppose_count: int
+    neutral_count: int
+    extreme_count: int
+    support_share: float
+    oppose_share: float
+    neutral_share: float
+    extreme_share: float
+    two_side_share: float
+    camp_gap: float | None
+    polarization_index: float
+
+
+@dataclass(frozen=True)
+class AgentShift:
+    agent_id: str
+    baseline_mean_opinion: float
+    final_mean_opinion: float
+    delta_opinion: float
+    baseline_mean_abs_opinion: float
+    final_mean_abs_opinion: float
+    delta_abs_opinion: float
+
+
+@dataclass(frozen=True)
+class PlotSeries:
+    label: str
+    x_values: list[Any]
+    y_values: list[float]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="统一分析 history 数据，生成实验摘要、曲线图、极化统计，也可按指定列绘图。",
+        epilog=(
+            "示例：python backend/analyze_history.py backend/history/20260628_181756\n"
+            "示例：python backend/analyze_history.py backend/history/20260628_181756 --plot-columns opinion --x-column tick"
+        ),
+    )
+    parser.add_argument("history_dir", nargs="?", default=str(HISTORY_DIR), help="history 运行目录，或 history 根目录。")
+    parser.add_argument("--output-dir", help="输出目录；默认写入被分析的运行目录。")
+    parser.add_argument("--data-length", type=int, help="只分析或绘制开头 N 条数据。")
+    parser.add_argument("--window-size", type=int, default=10, help="极化前后对比窗口长度，默认 10 个 tick。")
+    parser.add_argument("--support-threshold", type=float, default=0.35, help="明显支持阈值，默认 0.35。")
+    parser.add_argument("--oppose-threshold", type=float, default=-0.35, help="明显反对阈值，默认 -0.35。")
+    parser.add_argument("--neutral-threshold", type=float, default=0.10, help="中立区间绝对值阈值，默认 0.10。")
+    parser.add_argument("--extreme-threshold", type=float, default=0.75, help="极端立场绝对值阈值，默认 0.75。")
+    parser.add_argument("--min-side-share", type=float, default=0.20, help="双边阵营最小占比，默认 0.20。")
+    parser.add_argument("--min-pairwise-delta", type=float, default=0.05, help="平均成对距离最小增长，默认 0.05。")
+    parser.add_argument("--min-abs-delta", type=float, default=0.05, help="平均绝对立场最小增长，默认 0.05。")
+    parser.add_argument("--alpha", type=float, default=0.05, help="配对符号检验显著性水平，默认 0.05。")
+    parser.add_argument("--bootstrap-samples", type=int, default=2000, help="配对均值差 bootstrap 次数，默认 2000。")
+    parser.add_argument("--seed", type=int, default=42, help="bootstrap 随机种子，默认 42。")
+    parser.add_argument("--allow-incomplete-ticks", action="store_true", help="允许部分智能体缺失的 tick 参与极化统计。")
+    parser.add_argument("--plot-columns", nargs="+", help="按精确列名绘制所有 CSV/Excel 文件中的对应列。")
+    parser.add_argument("--x-column", help="列绘图横轴列名，必须与表头完全一致；省略时使用数据行序号。")
+    parser.add_argument("--sheet", help="列绘图只读取指定 Excel 工作表；CSV 不支持该参数。")
+    parser.add_argument("--header-row", type=int, default=1, help="列绘图表头所在行号，默认第 1 行。")
+    parser.add_argument("--format", default="svg", choices=("svg", "png", "pdf"), help="列绘图输出格式，默认 svg。")
+    parser.add_argument("--no-recursive", action="store_true", help="列绘图只读取直属 CSV/Excel 文件。")
+    parser.add_argument("--list-columns", action="store_true", help="只列出 CSV/Excel 表头，不生成统计。")
+    parser.add_argument("--no-legend", action="store_true", help="列绘图不显示图例。")
+    parser.add_argument("--legend-limit", type=int, default=30, help="列绘图曲线数量不超过该值时显示图例，默认 30。")
+    args = parser.parse_args(normalize_argv(argv))
+    validate_args(parser, args)
+    return args
+
+
+def normalize_argv(argv: list[str]) -> list[str]:
+    normalized: list[str] = []
+    index = 0
+    while index < len(argv):
+        item = argv[index]
+        if item.startswith("--") and item[2:].isdigit():
+            normalized.extend(["--data-length", item[2:]])
+            if index + 1 < len(argv) and not argv[index + 1].startswith("-"):
+                normalized.extend(["--x-column", argv[index + 1]])
+                index += 2
+                continue
+        else:
+            normalized.append(item)
+        index += 1
+    return normalized
+
+
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.data_length is not None and args.data_length < 1:
+        parser.error("--data-length 必须大于等于 1。")
+    if args.window_size < 1:
+        parser.error("--window-size 必须大于等于 1。")
+    if args.header_row < 1:
+        parser.error("--header-row 必须大于等于 1。")
+    if args.legend_limit < 0:
+        parser.error("--legend-limit 必须大于等于 0。")
+    if not 0 <= args.min_side_share <= 1:
+        parser.error("--min-side-share 必须在 [0, 1] 内。")
+    if not 0 < args.alpha < 1:
+        parser.error("--alpha 必须在 (0, 1) 内。")
+    if args.bootstrap_samples < 0:
+        parser.error("--bootstrap-samples 必须大于等于 0。")
+    if args.support_threshold <= args.oppose_threshold:
+        parser.error("--support-threshold 必须大于 --oppose-threshold。")
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    history_dir = Path(args.history_dir).expanduser()
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else None
+
+    if args.list_columns:
+        table_paths = find_table_files(history_dir, recursive=not args.no_recursive)
+        print_column_report(table_paths, args.sheet, args.header_row)
+        return 0
+
+    if args.plot_columns:
+        paths = plot_history_columns(
+            history_dir=history_dir,
+            columns=args.plot_columns,
+            output_dir=output_dir,
+            x_column=args.x_column,
+            sheet_name=args.sheet,
+            header_row=args.header_row,
+            image_format=args.format,
+            data_length=args.data_length,
+            recursive=not args.no_recursive,
+            show_legend=not args.no_legend,
+            legend_limit=args.legend_limit,
+        )
+        for path in paths:
+            print(f"已生成：{path}")
+        return 0
+
+    result = analyze_history_run(
+        history_dir,
+        output_dir=output_dir,
+        options=AnalysisOptions(
+            data_length=args.data_length,
+            window_size=args.window_size,
+            support_threshold=args.support_threshold,
+            oppose_threshold=args.oppose_threshold,
+            neutral_threshold=args.neutral_threshold,
+            extreme_threshold=args.extreme_threshold,
+            min_side_share=args.min_side_share,
+            min_pairwise_delta=args.min_pairwise_delta,
+            min_abs_delta=args.min_abs_delta,
+            alpha=args.alpha,
+            bootstrap_samples=args.bootstrap_samples,
+            seed=args.seed,
+            allow_incomplete_ticks=args.allow_incomplete_ticks,
+        ),
+    )
+    for path in result.generated_paths:
+        print(f"已生成：{path}")
+    return 0
+
+
+def analyze_history_run(
+    history_dir: str | Path,
+    *,
+    output_dir: str | Path | None = None,
+    config_snapshot: dict | None = None,
+    options: AnalysisOptions | None = None,
+) -> AnalysisResult:
+    """统一生成实验摘要、基础曲线和极化统计。"""
+
+    opts = options or AnalysisOptions()
+    run_dir = resolve_history_run_dir(history_dir)
+    out_dir = Path(output_dir).expanduser() if output_dir is not None else run_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows_by_agent = read_history_rows(run_dir)
+
+    summary_path = out_dir / "experiment_summary.md"
+    summary_path.write_text(
+        build_experiment_summary(rows_by_agent, config_snapshot or {}),
+        encoding="utf-8",
+    )
+    generated_paths = [summary_path]
+    generated_paths.extend(write_standard_charts(out_dir, rows_by_agent))
+
+    polarization_report_path = None
+    try:
+        polarization_paths = write_polarization_outputs(
+            run_dir=run_dir,
+            output_dir=out_dir,
+            options=opts,
+        )
+        generated_paths.extend(polarization_paths)
+        polarization_report_path = out_dir / "polarization_report.md"
+    except ValueError as exc:
+        error_path = out_dir / "polarization_report.md"
+        error_path.write_text(f"# 舆论极化统计报告\n\n无法生成极化统计：{exc}\n", encoding="utf-8")
+        generated_paths.append(error_path)
+        polarization_report_path = error_path
+
+    return AnalysisResult(
+        run_dir=run_dir,
+        output_dir=out_dir,
+        summary_path=summary_path,
+        polarization_report_path=polarization_report_path,
+        generated_paths=generated_paths,
+    )
+
+
+def resolve_history_run_dir(history_dir: str | Path) -> Path:
+    path = Path(history_dir).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"history 路径不存在：{path}")
+    if not path.is_dir():
+        raise NotADirectoryError(f"history 路径不是文件夹：{path}")
+    if history_csv_paths(path):
+        return path
+
+    run_dirs = sorted(
+        (child for child in path.iterdir() if child.is_dir()),
+        key=lambda child: child.stat().st_mtime,
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        if history_csv_paths(run_dir):
+            return run_dir
+    raise FileNotFoundError(f"没有找到包含 {REQUIRED_HISTORY_COLUMNS} 的智能体历史 CSV：{path}")
+
+
+def read_history_rows(run_dir: Path) -> dict[str, list[dict]]:
+    rows_by_agent = {
+        path.stem: read_csv_rows(path)
+        for path in history_csv_paths(run_dir)
+    }
+    if not rows_by_agent:
+        raise ValueError(f"没有读取到包含 {REQUIRED_HISTORY_COLUMNS} 的智能体历史 CSV：{run_dir}")
+    return rows_by_agent
+
+
+def history_csv_paths(run_dir: Path) -> list[Path]:
+    """返回真正的智能体历史 CSV；文件名可使用任意精确 agent_id。"""
+
+    return [
+        path
+        for path in sorted(run_dir.glob("*.csv"))
+        if is_history_agent_csv(path)
+    ]
+
+
+def is_history_agent_csv(path: Path) -> bool:
+    """通过表头识别历史 CSV，避免把分析产物再次读入。"""
+
+    if path.name in GENERATED_ANALYSIS_FILES or path.name.startswith("~$"):
+        return False
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f)
+            header = next(reader, [])
+    except (OSError, UnicodeDecodeError):
+        return False
+    return all(column in header for column in REQUIRED_HISTORY_COLUMNS)
+
+
+def read_csv_rows(path: Path) -> list[dict]:
+    with path.open("r", newline="", encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def build_experiment_summary(rows_by_agent: dict[str, list[dict]], config_snapshot: dict) -> str:
+    final_opinions = {}
+    pressure_peaks = defaultdict(dict)
+    mediator_peaks = defaultdict(float)
+    behavior_counts = Counter()
+    post_scores = []
+    abnormal_ticks = []
+
+    for agent_id, rows in rows_by_agent.items():
+        if not rows:
+            continue
+        final = rows[-1]
+        final_opinions[agent_id] = parse_float(final.get("opinion"))
+        for need in ["satiety", "relax", "money"]:
+            pressure_peaks[agent_id][need] = max(
+                parse_float(row.get(f"{need}_effective_pressure"))
+                for row in rows
+            )
+        for row in rows:
+            tool = str(row.get("action_tool") or "")
+            if tool:
+                behavior_counts[tool] += 1
+            if str(row.get("post_content") or ""):
+                post_scores.append(parse_float(row.get("post_opinion_index")))
+            mediators = json_obj(row.get("mediators"))
+            for value in mediators.values():
+                mediator_peaks[str(agent_id)] = max(mediator_peaks[str(agent_id)], parse_float(value))
+            before = parse_float(row.get("opinion_before"))
+            after = parse_float(row.get("opinion_after"))
+            if abs(after - before) >= 0.2:
+                abnormal_ticks.append({
+                    "agent_id": agent_id,
+                    "tick": row.get("tick"),
+                    "before": before,
+                    "after": after,
+                    "reason": row.get("opinion_assessment_reason", ""),
+                })
+
+    lines = [
+        "# 实验运行摘要",
+        "",
+        "## 配置快照",
+        "",
+        "```json",
+        json.dumps(config_snapshot, ensure_ascii=False, indent=2, default=str),
+        "```",
+        "",
+        "## 最终观念分布",
+        "",
+        markdown_table(["agent_id", "final_opinion"], [
+            [agent_id, f"{value:.3f}"]
+            for agent_id, value in sorted(final_opinions.items())
+        ]),
+        "",
+        "## 有效压力峰值",
+        "",
+        markdown_table(["agent_id", "satiety", "relax", "money"], [
+            [
+                agent_id,
+                f"{values.get('satiety', 0.0):.3f}",
+                f"{values.get('relax', 0.0):.3f}",
+                f"{values.get('money', 0.0):.3f}",
+            ]
+            for agent_id, values in sorted(pressure_peaks.items())
+        ]),
+        "",
+        "## 行为分布",
+        "",
+        markdown_table(["action_tool", "count"], [
+            [tool, count]
+            for tool, count in behavior_counts.most_common()
+        ]),
+        "",
+        "## 发帖立场",
+        "",
+        f"- 发帖样本数：{len(post_scores)}",
+        f"- 发帖文本立场均值：{mean(post_scores):.3f}" if post_scores else "- 发帖文本立场均值：无发帖样本",
+        "",
+        "## 输出图表",
+        "",
+        "- `opinion_trends.svg`",
+        "- `effective_pressure_trends.svg`",
+        "- `mediator_peak_trends.svg`",
+        "- `polarization_report.md`",
+        "- `polarization_metrics.csv`",
+        "- `polarization_agent_shift.csv`",
+        "",
+        "## 明显观念变化",
+        "",
+        markdown_table(["agent_id", "tick", "before", "after", "reason"], [
+            [
+                item["agent_id"],
+                item["tick"],
+                f"{item['before']:.3f}",
+                f"{item['after']:.3f}",
+                str(item["reason"])[:80],
+            ]
+            for item in abnormal_ticks[:20]
+        ]),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_standard_charts(output_dir: Path, rows_by_agent: dict[str, list[dict]]) -> list[Path]:
+    generated = []
+    generated.append(write_opinion_trend_svg(output_dir / "opinion_trends.svg", rows_by_agent))
+    generated.append(write_multi_series_svg(
+        output_dir / "effective_pressure_trends.svg",
+        rows_by_agent,
+        value_getter=lambda row: max(
+            parse_float(row.get("satiety_effective_pressure")),
+            parse_float(row.get("relax_effective_pressure")),
+            parse_float(row.get("money_effective_pressure")),
+        ),
+        title="Effective Pressure Trends",
+        y_min=0.0,
+        y_max=1.0,
+    ))
+    generated.append(write_multi_series_svg(
+        output_dir / "mediator_peak_trends.svg",
+        rows_by_agent,
+        value_getter=lambda row: max((parse_float(v) for v in json_obj(row.get("mediators")).values()), default=0.0),
+        title="Mediator Peak Trends",
+        y_min=0.0,
+        y_max=1.0,
+    ))
+    return generated
+
+
+def write_opinion_trend_svg(output_path: Path, rows_by_agent: dict[str, list[dict]]) -> Path:
+    return write_multi_series_svg(
+        output_path,
+        rows_by_agent,
+        value_getter=lambda row: parse_float(row.get("opinion")),
+        title="Agent Opinion Trends",
+        y_min=-1.0,
+        y_max=1.0,
+    )
+
+
+def write_multi_series_svg(
+    output_path: Path,
+    rows_by_agent: dict[str, list[dict]],
+    *,
+    value_getter,
+    title: str,
+    y_min: float,
+    y_max: float,
+) -> Path:
+    width, height = 900, 520
+    left, right, top, bottom = 70, 30, 54, 72
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    colors = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#be123c", "#4d7c0f"]
+    series = {}
+    ticks = []
+    for agent_id, rows in rows_by_agent.items():
+        points = []
+        for row in rows:
+            tick = int(float(row.get("tick") or 0))
+            points.append((tick, value_getter(row)))
+            ticks.append(tick)
+        series[agent_id] = points
+    if not ticks:
+        output_path.write_text("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>", encoding="utf-8")
+        return output_path
+    min_tick, max_tick = min(ticks), max(ticks)
+
+    def x_pos(tick: int) -> float:
+        return scale_value(tick, min_tick, max_tick, left, left + plot_width)
+
+    def y_pos(value: float) -> float:
+        bounded = clamp_number(value, y_min, y_max)
+        return scale_value(bounded, y_min, y_max, top + plot_height, top)
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        "<style>.axis{stroke:#333;stroke-width:1}.grid{stroke:#ddd;stroke-width:1}.label{font:14px sans-serif;fill:#222}.tick{font:12px sans-serif;fill:#555}.legend{font:12px sans-serif;fill:#222}</style>",
+        f'<rect width="{width}" height="{height}" fill="white"/>',
+        f'<text class="label" x="{width / 2}" y="28" text-anchor="middle">{escape_text(title)}</text>',
+    ]
+    for value in [y_min, (y_min + y_max) / 2, y_max]:
+        y = y_pos(value)
+        lines.append(f'<line class="grid" x1="{left}" y1="{y:.2f}" x2="{left + plot_width}" y2="{y:.2f}"/>')
+        lines.append(f'<text class="tick" x="{left - 10}" y="{y + 4:.2f}" text-anchor="end">{value:.2f}</text>')
+    lines.append(f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"/>')
+    lines.append(f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"/>')
+    for index, (agent_id, points) in enumerate(sorted(series.items())):
+        color = colors[index % len(colors)]
+        if not points:
+            continue
+        point_text = " ".join(f"{x_pos(tick):.2f},{y_pos(value):.2f}" for tick, value in points)
+        lines.append(f'<polyline points="{point_text}" fill="none" stroke="{color}" stroke-width="2"/>')
+        lines.append(f'<text class="legend" x="{left + 10 + index * 130}" y="{height - 24}" fill="{color}">{escape_text(agent_id)}</text>')
+    lines.append("</svg>")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return output_path
+
+
+def write_polarization_outputs(run_dir: Path, output_dir: Path, options: AnalysisOptions) -> list[Path]:
+    series_by_agent = read_agent_opinions(run_dir)
+    ticks = select_ticks(series_by_agent, allow_incomplete=options.allow_incomplete_ticks)
+    if options.data_length is not None:
+        # 统计范围按时间顺序从开头截取，便于观察实验早期变化。
+        ticks = ticks[:options.data_length]
+    if not ticks:
+        raise ValueError(f"没有可分析的完整 tick：{run_dir}")
+
+    metrics = [
+        compute_tick_metric(
+            tick,
+            opinions_for_tick(series_by_agent, tick, allow_incomplete=options.allow_incomplete_ticks),
+            support_threshold=options.support_threshold,
+            oppose_threshold=options.oppose_threshold,
+            neutral_threshold=options.neutral_threshold,
+            extreme_threshold=options.extreme_threshold,
+        )
+        for tick in ticks
+    ]
+    baseline_ticks, final_ticks = split_windows(ticks, options.window_size)
+    shifts = compute_agent_shifts(series_by_agent, baseline_ticks, final_ticks)
+    stats = summarize_windows(metrics, baseline_ticks, final_ticks)
+    sign_test_p = one_sided_sign_test([shift.delta_abs_opinion for shift in shifts])
+    ci_low, ci_high = bootstrap_mean_ci(
+        [shift.delta_abs_opinion for shift in shifts],
+        samples=options.bootstrap_samples,
+        seed=options.seed,
+    )
+
+    metrics_path = output_dir / "polarization_metrics.csv"
+    shifts_path = output_dir / "polarization_agent_shift.csv"
+    report_path = output_dir / "polarization_report.md"
+    write_metrics_csv(metrics_path, metrics)
+    write_agent_shift_csv(shifts_path, shifts)
+    write_polarization_report(
+        report_path=report_path,
+        run_dir=run_dir,
+        metrics_path=metrics_path,
+        shifts_path=shifts_path,
+        options=options,
+        series_by_agent=series_by_agent,
+        ticks=ticks,
+        baseline_ticks=baseline_ticks,
+        final_ticks=final_ticks,
+        stats=stats,
+        sign_test_p=sign_test_p,
+        ci_low=ci_low,
+        ci_high=ci_high,
+    )
+    return [metrics_path, shifts_path, report_path]
+
+
+def read_agent_opinions(run_dir: Path) -> dict[str, dict[int, float]]:
+    series_by_agent: dict[str, dict[int, float]] = {}
+    for csv_path in history_csv_paths(run_dir):
+        agent_id = csv_path.stem
+        series: dict[int, float] = {}
+        with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            missing = [column for column in REQUIRED_HISTORY_COLUMNS if column not in fieldnames]
+            if missing:
+                raise ValueError(f"{csv_path} 缺少列 {missing}；实际表头：{fieldnames}")
+            for row_number, row in enumerate(reader, start=2):
+                tick = parse_tick(row.get("tick"), csv_path, row_number)
+                opinion = parse_opinion(row.get("opinion"), csv_path, row_number)
+                if tick in series:
+                    raise ValueError(f"{csv_path} 存在重复 tick：{tick}")
+                series[tick] = opinion
+        if series:
+            series_by_agent[agent_id] = series
+    if not series_by_agent:
+        raise ValueError(f"没有读取到智能体 opinion 数据：{run_dir}")
+    return series_by_agent
+
+
+def parse_tick(value: object, csv_path: Path, row_number: int) -> int:
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{csv_path} 第 {row_number} 行 tick 不是数值：{value!r}") from exc
+
+
+def parse_opinion(value: object, csv_path: Path, row_number: int) -> float:
+    try:
+        opinion = float(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{csv_path} 第 {row_number} 行 opinion 不是数值：{value!r}") from exc
+    if not math.isfinite(opinion):
+        raise ValueError(f"{csv_path} 第 {row_number} 行 opinion 不是有限数值。")
+    if opinion < -1.0 or opinion > 1.0:
+        raise ValueError(f"{csv_path} 第 {row_number} 行 opinion 超出 [-1, 1]：{opinion}")
+    return opinion
+
+
+def select_ticks(series_by_agent: dict[str, dict[int, float]], *, allow_incomplete: bool) -> list[int]:
+    tick_sets = [set(series.keys()) for series in series_by_agent.values()]
+    if allow_incomplete:
+        return sorted(set().union(*tick_sets))
+    return sorted(set.intersection(*tick_sets))
+
+
+def opinions_for_tick(
+    series_by_agent: dict[str, dict[int, float]],
+    tick: int,
+    *,
+    allow_incomplete: bool,
+) -> dict[str, float]:
+    opinions = {
+        agent_id: series[tick]
+        for agent_id, series in series_by_agent.items()
+        if tick in series
+    }
+    if not allow_incomplete and len(opinions) != len(series_by_agent):
+        raise ValueError(f"tick {tick} 缺少智能体数据。")
+    return opinions
+
+
+def compute_tick_metric(
+    tick: int,
+    opinions_by_agent: dict[str, float],
+    *,
+    support_threshold: float,
+    oppose_threshold: float,
+    neutral_threshold: float,
+    extreme_threshold: float,
+) -> TickMetric:
+    values = list(opinions_by_agent.values())
+    if not values:
+        raise ValueError(f"tick {tick} 没有 opinion 数据。")
+
+    n_agents = len(values)
+    mean_opinion = sum(values) / n_agents
+    std_population = math.sqrt(sum((value - mean_opinion) ** 2 for value in values) / n_agents)
+    abs_values = [abs(value) for value in values]
+    support_values = [value for value in values if value >= support_threshold]
+    oppose_values = [value for value in values if value <= oppose_threshold]
+    support_count = len(support_values)
+    oppose_count = len(oppose_values)
+    neutral_count = sum(1 for value in values if abs(value) <= neutral_threshold)
+    extreme_count = sum(1 for value in values if abs(value) >= extreme_threshold)
+    support_share = support_count / n_agents
+    oppose_share = oppose_count / n_agents
+    neutral_share = neutral_count / n_agents
+    extreme_share = extreme_count / n_agents
+    two_side_share = min(support_share, oppose_share)
+    pairwise_distance = mean_pairwise_abs_distance(values)
+    camp_gap = None
+    if support_values and oppose_values:
+        camp_gap = sum(support_values) / len(support_values) - sum(oppose_values) / len(oppose_values)
+    polarization_index = pairwise_distance * two_side_share * (1.0 - neutral_share)
+
+    return TickMetric(
+        tick=tick,
+        n_agents=n_agents,
+        mean_opinion=mean_opinion,
+        median_opinion=float(median(values)),
+        std_population=std_population,
+        mean_abs_opinion=sum(abs_values) / n_agents,
+        median_abs_opinion=float(median(abs_values)),
+        pairwise_mean_abs_distance=pairwise_distance,
+        min_opinion=min(values),
+        max_opinion=max(values),
+        range_opinion=max(values) - min(values),
+        support_count=support_count,
+        oppose_count=oppose_count,
+        neutral_count=neutral_count,
+        extreme_count=extreme_count,
+        support_share=support_share,
+        oppose_share=oppose_share,
+        neutral_share=neutral_share,
+        extreme_share=extreme_share,
+        two_side_share=two_side_share,
+        camp_gap=camp_gap,
+        polarization_index=polarization_index,
+    )
+
+
+def mean_pairwise_abs_distance(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    total = 0.0
+    count = 0
+    for left_index, left in enumerate(values):
+        for right in values[left_index + 1:]:
+            total += abs(left - right)
+            count += 1
+    return total / count
+
+
+def split_windows(ticks: list[int], window_size: int) -> tuple[list[int], list[int]]:
+    size = min(window_size, len(ticks))
+    return ticks[:size], ticks[-size:]
+
+
+def compute_agent_shifts(
+    series_by_agent: dict[str, dict[int, float]],
+    baseline_ticks: list[int],
+    final_ticks: list[int],
+) -> list[AgentShift]:
+    shifts: list[AgentShift] = []
+    for agent_id, series in sorted(series_by_agent.items()):
+        baseline_values = [series[tick] for tick in baseline_ticks if tick in series]
+        final_values = [series[tick] for tick in final_ticks if tick in series]
+        if not baseline_values or not final_values:
+            continue
+        baseline_mean = sum(baseline_values) / len(baseline_values)
+        final_mean = sum(final_values) / len(final_values)
+        baseline_abs = sum(abs(value) for value in baseline_values) / len(baseline_values)
+        final_abs = sum(abs(value) for value in final_values) / len(final_values)
+        shifts.append(
+            AgentShift(
+                agent_id=agent_id,
+                baseline_mean_opinion=baseline_mean,
+                final_mean_opinion=final_mean,
+                delta_opinion=final_mean - baseline_mean,
+                baseline_mean_abs_opinion=baseline_abs,
+                final_mean_abs_opinion=final_abs,
+                delta_abs_opinion=final_abs - baseline_abs,
+            )
+        )
+    return shifts
+
+
+def summarize_windows(metrics: list[TickMetric], baseline_ticks: list[int], final_ticks: list[int]) -> dict[str, float]:
+    by_tick = {metric.tick: metric for metric in metrics}
+    baseline_metrics = [by_tick[tick] for tick in baseline_ticks]
+    final_metrics = [by_tick[tick] for tick in final_ticks]
+    names = [
+        "std_population",
+        "mean_abs_opinion",
+        "pairwise_mean_abs_distance",
+        "support_share",
+        "oppose_share",
+        "neutral_share",
+        "extreme_share",
+        "two_side_share",
+        "polarization_index",
+    ]
+    out: dict[str, float] = {}
+    for name in names:
+        baseline_value = metric_mean(baseline_metrics, name)
+        final_value = metric_mean(final_metrics, name)
+        out[f"baseline_{name}"] = baseline_value
+        out[f"final_{name}"] = final_value
+        out[f"delta_{name}"] = final_value - baseline_value
+    return out
+
+
+def metric_mean(metrics: Iterable[TickMetric], name: str) -> float:
+    values = [float(getattr(metric, name)) for metric in metrics]
+    return sum(values) / len(values) if values else 0.0
+
+
+def one_sided_sign_test(deltas: list[float]) -> float | None:
+    positives = sum(1 for delta in deltas if delta > 0)
+    negatives = sum(1 for delta in deltas if delta < 0)
+    n = positives + negatives
+    if n == 0:
+        return None
+    # 单侧符号检验：原假设下正负变化概率均为 0.5。
+    probability = 0.0
+    for k in range(positives, n + 1):
+        probability += math.comb(n, k) * (0.5 ** n)
+    return probability
+
+
+def bootstrap_mean_ci(deltas: list[float], *, samples: int, seed: int) -> tuple[float | None, float | None]:
+    if not deltas or samples == 0:
+        return None, None
+    rng = random.Random(seed)
+    means: list[float] = []
+    for _ in range(samples):
+        drawn = [deltas[rng.randrange(len(deltas))] for _ in deltas]
+        means.append(sum(drawn) / len(drawn))
+    means.sort()
+    low_index = max(0, int(0.025 * (len(means) - 1)))
+    high_index = min(len(means) - 1, int(0.975 * (len(means) - 1)))
+    return means[low_index], means[high_index]
+
+
+def write_metrics_csv(path: Path, metrics: list[TickMetric]) -> None:
+    fields = [
+        "tick",
+        "n_agents",
+        "mean_opinion",
+        "median_opinion",
+        "std_population",
+        "mean_abs_opinion",
+        "median_abs_opinion",
+        "pairwise_mean_abs_distance",
+        "min_opinion",
+        "max_opinion",
+        "range_opinion",
+        "support_count",
+        "oppose_count",
+        "neutral_count",
+        "extreme_count",
+        "support_share",
+        "oppose_share",
+        "neutral_share",
+        "extreme_share",
+        "two_side_share",
+        "camp_gap",
+        "polarization_index",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for metric in metrics:
+            writer.writerow({field: format_number(getattr(metric, field)) for field in fields})
+
+
+def write_agent_shift_csv(path: Path, shifts: list[AgentShift]) -> None:
+    fields = [
+        "agent_id",
+        "baseline_mean_opinion",
+        "final_mean_opinion",
+        "delta_opinion",
+        "baseline_mean_abs_opinion",
+        "final_mean_abs_opinion",
+        "delta_abs_opinion",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for shift in shifts:
+            writer.writerow({field: format_number(getattr(shift, field)) for field in fields})
+
+
+def write_polarization_report(
+    *,
+    report_path: Path,
+    run_dir: Path,
+    metrics_path: Path,
+    shifts_path: Path,
+    options: AnalysisOptions,
+    series_by_agent: dict[str, dict[int, float]],
+    ticks: list[int],
+    baseline_ticks: list[int],
+    final_ticks: list[int],
+    stats: dict[str, float],
+    sign_test_p: float | None,
+    ci_low: float | None,
+    ci_high: float | None,
+) -> None:
+    side_pass = stats["final_two_side_share"] >= options.min_side_share
+    distance_pass = stats["delta_pairwise_mean_abs_distance"] >= options.min_pairwise_delta
+    abs_delta_pass = stats["delta_mean_abs_opinion"] >= options.min_abs_delta
+    sign_pass = sign_test_p is not None and sign_test_p <= options.alpha
+    ci_pass = ci_low is not None and ci_low > 0.0
+    neutral_pass = stats["delta_neutral_share"] <= 0.0
+    strict_pass = side_pass and distance_pass and abs_delta_pass and sign_pass and ci_pass and neutral_pass
+
+    lines = [
+        "# 舆论极化统计报告",
+        "",
+        "## 数据范围",
+        "",
+        f"- 运行目录：`{run_dir}`",
+        f"- 智能体数量：{len(series_by_agent)}",
+        f"- 分析 tick 数：{len(ticks)}",
+        f"- tick 范围：{ticks[0]} - {ticks[-1]}",
+        f"- 基线窗口：{baseline_ticks[0]} - {baseline_ticks[-1]}",
+        f"- 末端窗口：{final_ticks[0]} - {final_ticks[-1]}",
+        "",
+        "## 阈值",
+        "",
+        markdown_table(
+            ["项目", "数值"],
+            [
+                ["明显支持", f"opinion >= {options.support_threshold}"],
+                ["明显反对", f"opinion <= {options.oppose_threshold}"],
+                ["中立", f"abs(opinion) <= {options.neutral_threshold}"],
+                ["极端", f"abs(opinion) >= {options.extreme_threshold}"],
+                ["双边阵营最小占比", options.min_side_share],
+                ["平均成对距离最小增长", options.min_pairwise_delta],
+                ["平均绝对立场最小增长", options.min_abs_delta],
+                ["符号检验 alpha", options.alpha],
+            ],
+        ),
+        "",
+        "## 前后窗口统计",
+        "",
+        markdown_table(
+            ["指标", "基线窗口均值", "末端窗口均值", "变化"],
+            [
+                metric_row(stats, "std_population"),
+                metric_row(stats, "mean_abs_opinion"),
+                metric_row(stats, "pairwise_mean_abs_distance"),
+                metric_row(stats, "support_share"),
+                metric_row(stats, "oppose_share"),
+                metric_row(stats, "neutral_share"),
+                metric_row(stats, "extreme_share"),
+                metric_row(stats, "two_side_share"),
+                metric_row(stats, "polarization_index"),
+            ],
+        ),
+        "",
+        "## 配对检验",
+        "",
+        f"- 单侧符号检验 p 值：{format_number(sign_test_p)}",
+        f"- 平均绝对立场变化 bootstrap 95% CI：[{format_number(ci_low)}, {format_number(ci_high)}]",
+        "",
+        "## 判定标准",
+        "",
+        markdown_table(
+            ["标准", "是否满足"],
+            [
+                ["末端窗口存在双边阵营", yes_no(side_pass)],
+                ["平均成对距离增长达到阈值", yes_no(distance_pass)],
+                ["平均绝对立场增长达到阈值", yes_no(abs_delta_pass)],
+                ["配对符号检验达到显著性水平", yes_no(sign_pass)],
+                ["bootstrap 置信区间下界大于 0", yes_no(ci_pass)],
+                ["中立占比没有上升", yes_no(neutral_pass)],
+            ],
+        ),
+        "",
+        f"**严格判定：{yes_no(strict_pass)}**",
+        "",
+        "## 输出文件",
+        "",
+        f"- `{metrics_path}`",
+        f"- `{shifts_path}`",
+        "",
+    ]
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def metric_row(stats: dict[str, float], name: str) -> list[str]:
+    return [
+        name,
+        format_number(stats[f"baseline_{name}"]),
+        format_number(stats[f"final_{name}"]),
+        format_number(stats[f"delta_{name}"]),
+    ]
+
+
+def plot_history_columns(
+    *,
+    history_dir: Path,
+    columns: list[str],
+    output_dir: Path | None,
+    x_column: str | None,
+    sheet_name: str | None,
+    header_row: int,
+    image_format: str,
+    data_length: int | None,
+    recursive: bool,
+    show_legend: bool,
+    legend_limit: int,
+) -> list[Path]:
+    table_paths = find_table_files(history_dir, recursive=recursive)
+    out_dir = output_dir if output_dir is not None else history_dir / "column_plots"
+    series_by_column = collect_series_by_column(
+        table_paths=table_paths,
+        history_dir=history_dir,
+        columns=columns,
+        x_column=x_column,
+        sheet_name=sheet_name,
+        header_row=header_row,
+        data_length=data_length,
+    )
+    return draw_column_plots(
+        series_by_column=series_by_column,
+        output_dir=out_dir,
+        image_format=image_format,
+        x_label=x_column or "数据行序号",
+        show_legend=show_legend,
+        legend_limit=legend_limit,
+    )
+
+
+def find_table_files(history_dir: Path, recursive: bool) -> list[Path]:
+    if not history_dir.exists():
+        raise FileNotFoundError(f"history 文件夹不存在：{history_dir}")
+    if not history_dir.is_dir():
+        raise NotADirectoryError(f"history 路径不是文件夹：{history_dir}")
+
+    pattern = "**/*" if recursive else "*"
+    table_paths = sorted(
+        path
+        for path in history_dir.glob(pattern)
+        if path.is_file()
+        and path.suffix.lower() in TABLE_SUFFIXES
+        and path.name not in GENERATED_ANALYSIS_FILES
+        and not path.name.startswith("~$")
+    )
+    if not table_paths:
+        raise FileNotFoundError(f"没有在 history 文件夹下找到 CSV/Excel 文件：{history_dir}")
+    return table_paths
+
+
+def print_column_report(table_paths: Iterable[Path], sheet_name: str | None, header_row: int) -> None:
+    for table_path in table_paths:
+        for current_sheet, headers, _ in iter_sheet_rows(table_path, sheet_name, header_row):
+            header_text = ", ".join(format_header(value) for value in headers) or "（无表头）"
+            print(f"{table_path} | {current_sheet}")
+            print(f"  {header_text}")
+
+
+def collect_series_by_column(
+    *,
+    table_paths: Iterable[Path],
+    history_dir: Path,
+    columns: list[str],
+    x_column: str | None,
+    sheet_name: str | None,
+    header_row: int,
+    data_length: int | None,
+) -> dict[str, list[PlotSeries]]:
+    series_by_column: dict[str, list[PlotSeries]] = {column: [] for column in columns}
+    for table_path in table_paths:
+        for current_sheet, headers, rows in iter_sheet_rows(table_path, sheet_name, header_row):
+            header_index = build_header_index(headers, table_path, current_sheet)
+            ensure_required_columns(header_index, headers, table_path, current_sheet, columns, x_column)
+            for column in columns:
+                y_index = header_index[column]
+                x_index = header_index[x_column] if x_column is not None else None
+                x_values: list[Any] = []
+                y_values: list[float] = []
+                for row_offset, row_values in enumerate(rows, start=1):
+                    row_number = header_row + row_offset
+                    y_raw = cell_value(row_values, y_index)
+                    if is_blank(y_raw):
+                        continue
+                    y_value = parse_number(y_raw, table_path, current_sheet, row_number, column)
+                    if x_index is None:
+                        x_value = row_offset
+                    else:
+                        x_value = cell_value(row_values, x_index)
+                        if is_blank(x_value):
+                            raise ValueError(
+                                f"{table_path} | {current_sheet} 第 {row_number} 行横轴列 {x_column!r} 为空。"
+                            )
+                    x_values.append(x_value)
+                    y_values.append(y_value)
+
+                if not y_values:
+                    raise ValueError(f"{table_path} | {current_sheet} 列 {column!r} 没有可绘图数据。")
+                if data_length is not None:
+                    # 绘图范围与统计范围保持一致，保留开头数据。
+                    x_values = x_values[:data_length]
+                    y_values = y_values[:data_length]
+                series_by_column[column].append(
+                    PlotSeries(
+                        label=series_label(history_dir, table_path, current_sheet),
+                        x_values=x_values,
+                        y_values=y_values,
+                    )
+                )
+
+    for column, series_list in series_by_column.items():
+        if not series_list:
+            raise ValueError(f"列 {column!r} 没有收集到可绘图数据。")
+    return series_by_column
+
+
+def iter_sheet_rows(
+    table_path: Path,
+    sheet_name: str | None,
+    header_row: int,
+) -> Iterable[tuple[str, list[Any], list[list[Any]]]]:
+    suffix = table_path.suffix.lower()
+    if suffix in CSV_SUFFIXES:
+        yield from iter_csv_rows(table_path, sheet_name, header_row)
+        return
+    if suffix in OPENPYXL_SUFFIXES:
+        yield from iter_openpyxl_sheet_rows(table_path, sheet_name, header_row)
+        return
+    if suffix in XLRD_SUFFIXES:
+        yield from iter_xlrd_sheet_rows(table_path, sheet_name, header_row)
+        return
+    raise ValueError(f"不支持的文件后缀：{table_path}")
+
+
+def iter_csv_rows(
+    csv_path: Path,
+    sheet_name: str | None,
+    header_row: int,
+) -> Iterable[tuple[str, list[Any], list[list[Any]]]]:
+    if sheet_name is not None:
+        raise ValueError(f"{csv_path} 是 CSV 文件，不支持 --sheet。")
+    with csv_path.open("r", newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    if len(rows) < header_row:
+        yield "CSV", [], []
+        return
+    # CSV 首行按原始表头精确匹配，不做大小写或空格改写。
+    yield "CSV", rows[header_row - 1], rows[header_row:]
+
+
+def iter_openpyxl_sheet_rows(
+    excel_path: Path,
+    sheet_name: str | None,
+    header_row: int,
+) -> Iterable[tuple[str, list[Any], list[list[Any]]]]:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise RuntimeError("读取 .xlsx/.xlsm 需要安装 openpyxl；请执行 pip install -r requirements.txt。") from exc
+
+    workbook = load_workbook(excel_path, read_only=True, data_only=True)
+    try:
+        names = workbook.sheetnames
+        selected_sheets = selected_sheet_names(names, sheet_name, excel_path)
+        for current_sheet in selected_sheets:
+            worksheet = workbook[current_sheet]
+            header_values = next(
+                worksheet.iter_rows(min_row=header_row, max_row=header_row, values_only=True),
+                None,
+            )
+            headers = list(header_values or [])
+            rows = [list(row) for row in worksheet.iter_rows(min_row=header_row + 1, values_only=True)]
+            yield current_sheet, headers, rows
+    finally:
+        workbook.close()
+
+
+def iter_xlrd_sheet_rows(
+    excel_path: Path,
+    sheet_name: str | None,
+    header_row: int,
+) -> Iterable[tuple[str, list[Any], list[list[Any]]]]:
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise RuntimeError("读取 .xls 需要安装 xlrd；请执行 pip install -r requirements.txt。") from exc
+
+    workbook = xlrd.open_workbook(str(excel_path), on_demand=True)
+    selected_sheets = selected_sheet_names(workbook.sheet_names(), sheet_name, excel_path)
+    for current_sheet in selected_sheets:
+        worksheet = workbook.sheet_by_name(current_sheet)
+        if worksheet.nrows < header_row:
+            yield current_sheet, [], []
+        else:
+            yield (
+                current_sheet,
+                worksheet.row_values(header_row - 1),
+                [worksheet.row_values(row_index) for row_index in range(header_row, worksheet.nrows)],
+            )
+
+
+def selected_sheet_names(all_names: list[str], sheet_name: str | None, excel_path: Path) -> list[str]:
+    if sheet_name is None:
+        return list(all_names)
+    if sheet_name not in all_names:
+        names = ", ".join(repr(name) for name in all_names)
+        raise ValueError(f"{excel_path} 不存在工作表 {sheet_name!r}；实际工作表：{names}")
+    return [sheet_name]
+
+
+def build_header_index(headers: list[Any], table_path: Path, sheet_name: str) -> dict[str, int]:
+    header_index: dict[str, int] = {}
+    repeated: set[str] = set()
+    for index, value in enumerate(headers):
+        if not isinstance(value, str) or value == "":
+            continue
+        if value in header_index:
+            repeated.add(value)
+            continue
+        header_index[value] = index
+    if repeated:
+        names = ", ".join(repr(value) for value in sorted(repeated))
+        raise ValueError(f"{table_path} | {sheet_name} 存在重复表头：{names}。请先改为唯一表头。")
+    return header_index
+
+
+def ensure_required_columns(
+    header_index: dict[str, int],
+    headers: list[Any],
+    table_path: Path,
+    sheet_name: str,
+    columns: list[str],
+    x_column: str | None,
+) -> None:
+    required = list(columns)
+    if x_column is not None:
+        required.append(x_column)
+    missing = [column for column in required if column not in header_index]
+    if missing:
+        missing_text = ", ".join(repr(column) for column in missing)
+        header_text = ", ".join(format_header(value) for value in headers) or "（无表头）"
+        raise ValueError(f"{table_path} | {sheet_name} 缺少列：{missing_text}。实际表头：{header_text}")
+
+
+def cell_value(row_values: list[Any], index: int) -> Any:
+    if index >= len(row_values):
+        return None
+    return row_values[index]
+
+
+def parse_number(value: Any, table_path: Path, sheet_name: str, row_number: int, column: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{table_path} | {sheet_name} 第 {row_number} 行列 {column!r} 是布尔值，不能绘图。")
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"{table_path} | {sheet_name} 第 {row_number} 行列 {column!r} 不是数值：{value!r}"
+            ) from exc
+    else:
+        raise ValueError(f"{table_path} | {sheet_name} 第 {row_number} 行列 {column!r} 不是数值：{value!r}")
+    if not math.isfinite(number):
+        raise ValueError(f"{table_path} | {sheet_name} 第 {row_number} 行列 {column!r} 不是有限数值。")
+    return number
+
+
+def draw_column_plots(
+    *,
+    series_by_column: dict[str, list[PlotSeries]],
+    output_dir: Path,
+    image_format: str,
+    x_label: str,
+    show_legend: bool,
+    legend_limit: int,
+) -> list[Path]:
+    if image_format == "svg":
+        return draw_column_svg_plots(
+            series_by_column=series_by_column,
+            output_dir=output_dir,
+            x_label=x_label,
+            show_legend=show_legend,
+            legend_limit=legend_limit,
+        )
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError("绘图需要安装 matplotlib；请执行 pip install -r requirements.txt。") from exc
+
+    plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS", "DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+    output_dir.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+    output_paths: list[Path] = []
+    for column, series_list in series_by_column.items():
+        fig, ax = plt.subplots(figsize=(11, 6.5))
+        for series in series_list:
+            ax.plot(series.x_values, series.y_values, marker="o", linewidth=1.7, markersize=3, label=series.label)
+        ax.set_title(column)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(column)
+        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.4)
+        if show_legend and len(series_list) <= legend_limit:
+            ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=8)
+        fig.tight_layout()
+        output_path = output_dir / unique_output_name(column, image_format, used_names)
+        fig.savefig(output_path, dpi=150)
+        plt.close(fig)
+        output_paths.append(output_path)
+    return output_paths
+
+
+def draw_column_svg_plots(
+    *,
+    series_by_column: dict[str, list[PlotSeries]],
+    output_dir: Path,
+    x_label: str,
+    show_legend: bool,
+    legend_limit: int,
+) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+    output_paths: list[Path] = []
+    for column, series_list in series_by_column.items():
+        output_path = output_dir / unique_output_name(column, "svg", used_names)
+        write_column_svg_plot(
+            output_path=output_path,
+            title=column,
+            x_label=x_label,
+            y_label=column,
+            series_list=series_list,
+            show_legend=show_legend and len(series_list) <= legend_limit,
+        )
+        output_paths.append(output_path)
+    return output_paths
+
+
+def write_column_svg_plot(
+    *,
+    output_path: Path,
+    title: str,
+    x_label: str,
+    y_label: str,
+    series_list: list[PlotSeries],
+    show_legend: bool,
+) -> None:
+    width = 1120
+    height = 660
+    left = 82
+    right = 290 if show_legend else 36
+    top = 62
+    bottom = 104
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    colors = ("#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#be123c", "#4d7c0f")
+    x_axis = build_x_axis(series_list)
+    y_min, y_max = value_bounds([value for series in series_list for value in series.y_values])
+
+    def x_pos(value: Any, fallback_index: int) -> float:
+        if x_axis["kind"] == "numeric":
+            numeric_value = axis_number(value)
+            if numeric_value is None:
+                numeric_value = float(fallback_index)
+            x_min = x_axis["min"]
+            x_max = x_axis["max"]
+            return scale_value(numeric_value, x_min, x_max, left, left + plot_width)
+        key = display_value(value)
+        index = x_axis["index"].get(key, fallback_index)
+        count = max(1, len(x_axis["labels"]) - 1)
+        return scale_value(index, 0, count, left, left + plot_width)
+
+    def y_pos(value: float) -> float:
+        return scale_value(value, y_min, y_max, top + plot_height, top)
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        "<style>text{font-family:Arial,'Microsoft YaHei','SimHei',sans-serif;fill:#111827}.title{font-size:22px;font-weight:700}.label{font-size:14px}.tick{font-size:12px;fill:#4b5563}.axis{stroke:#374151;stroke-width:1.2}.grid{stroke:#d1d5db;stroke-width:0.8;stroke-dasharray:4 4}.legend{font-size:12px}</style>",
+        f'<rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff"/>',
+        f'<text class="title" x="{width / 2}" y="36" text-anchor="middle">{escape_text(title)}</text>',
+    ]
+    for tick in numeric_ticks(y_min, y_max, 6):
+        y = y_pos(tick)
+        lines.append(f'<line class="grid" x1="{left}" y1="{y:.2f}" x2="{left + plot_width}" y2="{y:.2f}"/>')
+        lines.append(f'<text class="tick" x="{left - 12}" y="{y + 4:.2f}" text-anchor="end">{format_axis_number(tick)}</text>')
+    for axis_tick in x_axis_ticks(x_axis):
+        x = x_pos(axis_tick["value"], axis_tick["index"])
+        label = escape_text(short_text(axis_tick["label"], 18))
+        lines.append(f'<line class="grid" x1="{x:.2f}" y1="{top}" x2="{x:.2f}" y2="{top + plot_height}"/>')
+        lines.append(
+            f'<text class="tick" x="{x:.2f}" y="{top + plot_height + 30}" text-anchor="end" '
+            f'transform="rotate(-28 {x:.2f} {top + plot_height + 30})">{label}</text>'
+        )
+    lines.extend([
+        f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"/>',
+        f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"/>',
+        f'<text class="label" x="{left + plot_width / 2}" y="{height - 28}" text-anchor="middle">{escape_text(x_label)}</text>',
+        f'<text class="label" x="24" y="{top + plot_height / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_height / 2})">{escape_text(y_label)}</text>',
+    ])
+    for index, series in enumerate(series_list):
+        color = colors[index % len(colors)]
+        points = " ".join(
+            f"{x_pos(x_value, point_index):.2f},{y_pos(y_value):.2f}"
+            for point_index, (x_value, y_value) in enumerate(zip(series.x_values, series.y_values))
+        )
+        if points:
+            lines.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"/>')
+        for point_index, (x_value, y_value) in enumerate(zip(series.x_values, series.y_values)):
+            lines.append(f'<circle cx="{x_pos(x_value, point_index):.2f}" cy="{y_pos(y_value):.2f}" r="2.8" fill="{color}"/>')
+        if show_legend:
+            legend_x = left + plot_width + 28
+            legend_y = top + 18 + index * 20
+            if legend_y < height - 24:
+                lines.append(f'<line x1="{legend_x}" y1="{legend_y}" x2="{legend_x + 22}" y2="{legend_y}" stroke="{color}" stroke-width="2.1"/>')
+                lines.append(f'<text class="legend" x="{legend_x + 30}" y="{legend_y + 4}">{escape_text(short_text(series.label, 34))}</text>')
+    lines.append("</svg>")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def build_x_axis(series_list: list[PlotSeries]) -> dict[str, Any]:
+    all_values = [value for series in series_list for value in series.x_values]
+    numeric_values = [axis_number(value) for value in all_values]
+    if all(value is not None for value in numeric_values):
+        x_min, x_max = value_bounds([value for value in numeric_values if value is not None])
+        return {"kind": "numeric", "min": x_min, "max": x_max}
+    labels: list[str] = []
+    seen: set[str] = set()
+    for value in all_values:
+        label = display_value(value)
+        if label in seen:
+            continue
+        seen.add(label)
+        labels.append(label)
+    return {"kind": "category", "labels": labels, "index": {label: index for index, label in enumerate(labels)}}
+
+
+def x_axis_ticks(x_axis: dict[str, Any]) -> list[dict[str, Any]]:
+    if x_axis["kind"] == "numeric":
+        ticks = numeric_ticks(x_axis["min"], x_axis["max"], 8)
+        return [{"value": tick, "label": format_axis_number(tick), "index": index} for index, tick in enumerate(ticks)]
+    labels = x_axis["labels"]
+    if not labels:
+        return []
+    if len(labels) <= 8:
+        indexes = list(range(len(labels)))
+    else:
+        indexes = sorted({round(index * (len(labels) - 1) / 7) for index in range(8)})
+    return [{"value": labels[index], "label": labels[index], "index": index} for index in indexes]
+
+
+def value_bounds(values: list[float]) -> tuple[float, float]:
+    low = min(values)
+    high = max(values)
+    if low == high:
+        padding = 1.0 if low == 0 else abs(low) * 0.1
+        return low - padding, high + padding
+    padding = (high - low) * 0.06
+    return low - padding, high + padding
+
+
+def clamp_number(value: float, low: float, high: float) -> float:
+    """把数值限制在给定闭区间内。"""
+
+    return min(high, max(low, value))
+
+
+def scale_value(value: float, in_min: float, in_max: float, out_min: float, out_max: float) -> float:
+    """线性映射坐标；输入范围退化时返回输出中点。"""
+
+    if in_min == in_max:
+        return (out_min + out_max) / 2
+    ratio = (value - in_min) / (in_max - in_min)
+    return out_min + ratio * (out_max - out_min)
+
+
+def numeric_ticks(low: float, high: float, count: int) -> list[float]:
+    if count <= 1 or low == high:
+        return [low]
+    step = (high - low) / (count - 1)
+    return [low + step * index for index in range(count)]
+
+
+def axis_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    return None
+
+
+def display_value(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def series_label(history_dir: Path, table_path: Path, sheet_name: str) -> str:
+    try:
+        relative_path = table_path.relative_to(history_dir)
+    except ValueError:
+        relative_path = table_path
+    return f"{relative_path} | {sheet_name}"
+
+
+def cell_text(value: object) -> str:
+    return "" if value is None else str(value)
+
+
+def parse_float(value: object) -> float:
+    try:
+        return float(cell_text(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def json_obj(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def is_blank(value: Any) -> bool:
+    return value is None or value == ""
+
+
+def format_header(value: Any) -> str:
+    if value is None or value == "":
+        return "（空）"
+    return repr(value)
+
+
+def markdown_table(headers: list[str], rows: list[list[object]]) -> str:
+    if not rows:
+        rows = [["" for _ in headers]]
+    out = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    for row in rows:
+        out.append("| " + " | ".join(str(value) for value in row) + " |")
+    return "\n".join(out)
+
+
+def yes_no(value: bool) -> str:
+    return "是" if value else "否"
+
+
+def format_number(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int):
+        return str(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return ""
+    return f"{number:.6f}".rstrip("0").rstrip(".")
+
+
+def format_axis_number(value: float) -> str:
+    if value == 0:
+        return "0"
+    if abs(value) >= 1000 or abs(value) < 0.01:
+        return f"{value:.2e}"
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def short_text(value: str, max_length: int) -> str:
+    if len(value) <= max_length:
+        return value
+    return value[: max(0, max_length - 3)] + "..."
+
+
+def escape_text(value: str) -> str:
+    return html.escape(value, quote=True)
+
+
+def unique_output_name(column: str, image_format: str, used_names: set[str]) -> str:
+    base = safe_filename(column) or "plot"
+    name = f"{base}.{image_format}"
+    index = 2
+    while name.lower() in used_names:
+        name = f"{base}_{index}.{image_format}"
+        index += 1
+    used_names.add(name.lower())
+    return name
+
+
+def safe_filename(value: str) -> str:
+    # 文件名只替换 Windows 禁止字符，不改动列名匹配逻辑。
+    text = "".join("_" if char in INVALID_FILENAME_CHARS else char for char in value)
+    return text.strip(" .")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        raise SystemExit(1)

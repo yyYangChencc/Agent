@@ -2,7 +2,7 @@ import json
 import threading
 
 from tools.operator_tools import SocialOperator, register_operator_tools
-from social_sys.post.post import Post
+from social_sys.post import Post
 from persona.logger import get_logger
 from persona.opinion.scale import OPINION_NEUTRAL, clamp_opinion
 
@@ -12,10 +12,13 @@ logger = get_logger(__name__)
 class SocialPlatform:
     """Social platform state and action execution."""
 
-    def __init__(self):
+    def __init__(self, llm=None, config=None):
         self.agents = {}
+        self.influencers = {}
         self.posts = []
         self.time = 0
+        self.llm = llm
+        self.config = config
         self._posts_lock = threading.Lock()
         self.social_operator = SocialOperator(self)
         self.tools, self.tools_prompt = register_operator_tools(self.social_operator)
@@ -25,6 +28,16 @@ class SocialPlatform:
 
     def add_agent(self, agent):
         self.agents[agent.id] = agent
+
+    def add_influencer(self, influencer: dict) -> None:
+        """注册只有线上身份、没有地图实体的投放者账号。"""
+
+        influencer_id = str(influencer.get("id") or "").strip()
+        if not influencer_id:
+            raise ValueError("influencer id is required")
+        data = dict(influencer)
+        data["id"] = influencer_id
+        self.influencers[influencer_id] = data
 
     def add_post(self, post):
         self.posts.append(post)
@@ -55,15 +68,46 @@ class SocialPlatform:
         tick: int,
         title: str,
         content: str,
+        topic: str = "",
         opinion_index: float = OPINION_NEUTRAL,
     ):
         post_id = len(self.posts) + 1
-        news_post = Post(post_id, "system", f"【{title}】{content}", is_news=True)
+        news_post = Post(post_id, "system", f"【{title}】{content}", is_news=True, topic=topic)
         news_post.opinion_index = clamp_opinion(opinion_index)
         news_post.time = tick
         self.posts.append(news_post)
         logger.info("[News] tick=%d inject news: %s", tick, title)
         return news_post
+
+    def inject_influencer_post(
+        self,
+        tick: int,
+        author_id: str,
+        content: str,
+        topic: str = "",
+        opinion_index: float = OPINION_NEUTRAL,
+        is_rumor: bool = False,
+    ):
+        """按场景排期发布投放者帖子，投放者不进入世界行动循环。"""
+
+        author_id = str(author_id or "").strip()
+        if not author_id:
+            raise ValueError("influencer post author_id is required")
+        post_id = len(self.posts) + 1
+        post = Post(
+            post_id,
+            author_id,
+            str(content or ""),
+            is_rumor=is_rumor,
+            is_news=False,
+            topic=topic,
+            source_type="influencer",
+        )
+        post.opinion_index = clamp_opinion(opinion_index)
+        post.time = tick
+        self.posts.append(post)
+        logger.info("[Influencer] tick=%d author=%s post=%s", tick, author_id, post_id)
+        return post
 
     def execute(self, Operator_id, action_str):
         if not action_str:
@@ -127,6 +171,9 @@ class SocialPlatform:
     def _structured_feedback(self, action: str, operator_id: str, args: dict, feedback, think: str = ""):
         post = self._post_from_action(action, operator_id, args)
         ok = not (isinstance(feedback, str) and feedback.startswith("error:"))
+        if action == "send_post" and not ok:
+            # 发帖失败时不能回填作者旧帖，避免把旧帖子误记为本次动作结果。
+            post = None
         if action in {"comment_post", "like_post", "dislike_post"} and post is None:
             ok = False
         result = {

@@ -1,12 +1,13 @@
 import asyncio
 from dotenv import load_dotenv
-from default_scenario import DEFAULT_AGENT_IDS, build_cli_demo_runtime
 from persona.logger import setup_logging
+from scenarios.registry import get_scenario
 
 
 async def _main():
-    rt = build_cli_demo_runtime(conversation_max_rounds=2)
-    agents = [rt.world.agents[agent_id] for agent_id in DEFAULT_AGENT_IDS]
+    scenario = get_scenario("default_town")
+    rt = scenario.build_runtime(conversation_max_rounds=2)
+    agents = [rt.world.agents[agent_id] for agent_id in scenario.AGENT_IDS]
 
     # --- 运行仿真 ---
     header = "  ".join(f"{ag.id:>8}" for ag in agents)

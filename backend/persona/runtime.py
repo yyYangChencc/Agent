@@ -7,7 +7,7 @@ from persona.llm.interface import LLMClient
 from persona.agent_memory.mem import MultiAgentMemoryManager
 from world.world import World
 from persona.agents.agent import Agent
-from persona.agents.policy import LLMPolicy, LLMMemoryPlannerPolicy
+from persona.agents.policy import ActionParser, LLMPolicy, LLMMemoryPlannerPolicy, MemoryQueryPlanParser
 from persona.agents.prompt import (
     WorldPromptBuilder,
     SocialPromptBuilder,
@@ -15,11 +15,10 @@ from persona.agents.prompt import (
     ReflectPromptBuilder,
     MemoryPlannerPromptBuilder,
 )
-from persona.agents.parser import ActionParser, MemoryQueryPlanParser
-from persona.reflect.reflect import Reflect
-from social_sys.platform.platform import SocialPlatform
-from persona.opinion import OpinionAssessmentCoordinator
-from persona.psychology import PsychologicalAssessmentCoordinator
+from persona.reflect import Reflect
+from social_sys.platform import SocialPlatform
+from persona.opinion.assessment import OpinionAssessmentCoordinator
+from persona.psychology.assessment import PsychologicalAssessmentCoordinator
 
 
 @dataclass
@@ -49,6 +48,7 @@ class SimulationRuntime:
         api_key: str | None = None,
         base_url: str | None = None,
         conversation_max_rounds: int = 2,
+        llm_client: LLMClient | None = None,
     ) -> SimulationRuntime:
         """从环境变量和配置构建一套完整运行时。"""
 
@@ -62,12 +62,15 @@ class SimulationRuntime:
         embedding_base_url = os.environ.get("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
 
         # LLM 客户端同时承担文本生成和 embedding；记忆、policy、评测器共享同一客户端。
-        from persona.llm.openai_client import AsyncOpenAIClient
-        llm = AsyncOpenAIClient(api_key=api_key, base_url=base_url, embedding_key=embedding_key, embedding_base_url=embedding_base_url, config=config)
+        if llm_client is None:
+            from persona.llm.openai_client import AsyncOpenAIClient
+            llm = AsyncOpenAIClient(api_key=api_key, base_url=base_url, embedding_key=embedding_key, embedding_base_url=embedding_base_url, config=config)
+        else:
+            llm = llm_client
         mem = MultiAgentMemoryManager(llm)
         opinion_assessor = OpinionAssessmentCoordinator(config, llm)
         psychological_assessor = PsychologicalAssessmentCoordinator(config, llm)
-        platform = SocialPlatform()
+        platform = SocialPlatform(llm=llm, config=config)
         world = World(
             platform=platform,
             psychological_assessor=psychological_assessor,
@@ -121,7 +124,7 @@ class SimulationRuntime:
         """清空记忆并重建 world/platform，用于从干净状态重新开始实验。"""
 
         self.mem.reset_all()
-        self.platform = SocialPlatform()
+        self.platform = SocialPlatform(llm=self.llm, config=self.config)
         self.world = World(
             platform=self.platform,
             psychological_assessor=PsychologicalAssessmentCoordinator(self.config, self.llm),

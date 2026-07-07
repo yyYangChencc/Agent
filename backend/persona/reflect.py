@@ -11,10 +11,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Valid urgency keys that agents can target
-VALID_URGENCY_KEYS = {"satiety", "relax", "money"}
-
-
 class Reflect:
     def __init__(self, llm_client: "LLMClient", reflect_prompt: "ReflectPromptBuilder", config: "AgentConfig"):
         self.llm = llm_client
@@ -74,8 +70,9 @@ class Reflect:
             return
         new_task = task_match.group(1).strip()
         urgency_key = key_match.group(1).strip()
-        if urgency_key not in VALID_URGENCY_KEYS:
-            logger.warning("[%s] LLM返回无效需求键: %s，合法值为 %s", agent.id, urgency_key, VALID_URGENCY_KEYS)
+        valid_urgency_keys = set(agent.satisfaction.keys())
+        if urgency_key not in valid_urgency_keys:
+            logger.warning("[%s] LLM返回无效需求键: %s，合法值为 %s", agent.id, urgency_key, valid_urgency_keys)
             return
         agent.set_task(new_task, urgency_key)
         logger.info("[%s] LLM决定新任务：%s（需求键: %s）", agent.id, new_task, urgency_key)
@@ -91,8 +88,9 @@ class Reflect:
             return
         new_task = task_match.group(1).strip()
         urgency_key = key_match.group(1).strip()
-        if urgency_key not in VALID_URGENCY_KEYS:
-            logger.warning("[%s] LLM返回无效需求键: %s，合法值为 %s", agent.id, urgency_key, VALID_URGENCY_KEYS)
+        valid_urgency_keys = set(agent.satisfaction.keys())
+        if urgency_key not in valid_urgency_keys:
+            logger.warning("[%s] LLM返回无效需求键: %s，合法值为 %s", agent.id, urgency_key, valid_urgency_keys)
             return
         agent.set_task(new_task, urgency_key)
         logger.info("[%s] LLM决定新任务：%s（需求键: %s）", agent.id, new_task, urgency_key)

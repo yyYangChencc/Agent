@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "示意性理论卡。当前代码会自动接通 satiety、relax、money；safety、belonging、esteem、self_actualization 作为扩展需求保留，等系统加入对应需求键后可直接启用。",
+  "description": "实验可用版理论卡。当前仅覆盖运行时真实存在的六个需求键：satiety、relax、money、belonging、esteem、self_actualization；money 作为安全需求的经济资源代理，不再保留独立 safety 卡。",
   "cards": [
     {
       "id": "physiological_satiety_deficit_v1",
@@ -249,10 +249,11 @@
       "need_key": "money",
       "display_name": "经济安全需求缺口",
       "maslow_need": "safety",
-      "summary": "金钱缺口代表资源安全不足，会提高威胁评估、风险规避、工作倾向和对分配议题的敏感性。",
+      "summary": "金钱缺口代表经济安全代理需求不足，会提高经济不安全感、威胁监测、风险规避、控制寻求、工作倾向和对分配议题的敏感性。",
       "source_anchors": [
         "资源不确定性和经济压力会提高压力感、威胁监测和短期生计关注。",
-        "安全需求受威胁时，个体更关注稳定资源、可预测性和损失避免。"
+        "安全需求受威胁时，个体更关注稳定资源、可预测性和损失避免。",
+        "慢性威胁会通过压力负荷影响认知控制与社会判断，并提高对可控环境的需求。"
       ],
       "mediators": [
         {
@@ -280,6 +281,22 @@
           "previous_weight": 0.10
         },
         {
+          "key": "risk_avoidance",
+          "label": "风险规避",
+          "base": 0.03,
+          "pressure_weight": 0.54,
+          "decline_weight": 0.06,
+          "previous_weight": 0.10
+        },
+        {
+          "key": "control_seeking",
+          "label": "控制寻求",
+          "base": 0.02,
+          "pressure_weight": 0.48,
+          "decline_weight": 0.06,
+          "previous_weight": 0.10
+        },
+        {
           "key": "work_orientation",
           "label": "工作取向",
           "base": 0.03,
@@ -293,16 +310,16 @@
           "summary": "轻度经济压力，开始关注收入和支出。",
           "emotion_tone": "谨慎",
           "cognition": [
-            "更关注公司、价格和金钱变化。"
+            "更关注公司、价格、金钱变化和稳定资源线索。"
           ],
           "behavior": [
-            "在空闲时更倾向靠近可赚钱设施。"
+            "在空闲时更倾向靠近可赚钱设施或熟悉稳定的地点。"
           ],
           "social_expression": [
             "表达中会提到花费、收入或保障。"
           ],
           "online_behavior": [
-            "更关注经济、工作、福利和资源分配内容。"
+            "更关注经济、工作、福利、风险提示和资源分配内容。"
           ],
           "decision_bias": [
             "轻微提高赚钱与节省资源的权重。"
@@ -316,20 +333,22 @@
           "emotion_tone": "不安、谨慎、现实",
           "cognition": [
             "更关注可预测收益和避免不必要消费。",
-            "更容易把资源稀缺解释为安全风险。"
+            "更容易把资源稀缺解释为安全风险。",
+            "更偏好可预测、可控制的行动。"
           ],
           "behavior": [
             "更倾向进入公司工作。",
-            "除非 relax 或 satiety 压力更高，否则减少娱乐消费。"
+            "除非 relax 或 satiety 压力更高，否则减少娱乐消费。",
+            "减少无收益探索，增加稳定资源和可信关系导向的行动。"
           ],
           "social_expression": [
             "对福利、收入、价格和公平分配更敏感。"
           ],
           "online_behavior": [
-            "更可能参与经济安全、补助、工作机会相关讨论。"
+            "更可能参与经济安全、补助、工作机会、风险求证相关讨论。"
           ],
           "decision_bias": [
-            "提高稳定收入和低风险行动权重。"
+            "提高稳定收入、低风险行动和控制感修复权重。"
           ],
           "constraints": [
             "金钱压力影响偏好，但不能强制忽视饥饿和疲劳。"
@@ -340,20 +359,22 @@
           "emotion_tone": "焦虑、防御、警觉",
           "cognition": [
             "持续监测资源损失、消费和收入机会。",
-            "对涉及补贴、剥夺或不公平的信息高度敏感。"
+            "对涉及补贴、剥夺或不公平的信息高度敏感。",
+            "对模糊风险更容易作负面解释，并寻求可控方案。"
           ],
           "behavior": [
             "优先工作赚钱或寻找能降低未来缺口的路径。",
-            "倾向避免非必要消费。"
+            "倾向避免非必要消费。",
+            "减少高不确定探索，优先选择熟悉、稳定、可预测的行动。"
           ],
           "social_expression": [
             "表达更容易出现不公平感、担忧和防御。"
           ],
           "online_behavior": [
-            "更容易传播与经济安全、资源危机和政策补偿相关的信息。"
+            "更容易传播与经济安全、资源危机、风险提示和政策补偿相关的信息。"
           ],
           "decision_bias": [
-            "显著提高经济保障权重。"
+            "显著提高经济保障、风险规避和控制感修复权重。"
           ],
           "constraints": [
             "不得把金钱缺口直接生成暴力或违法行为。"
@@ -362,117 +383,7 @@
       },
       "validation_predictions": [
         "money 压力升高时，进入公司工作和减少娱乐消费的行为增加。",
-        "money 压力较高时，经济安全相关发帖和评论增加。"
-      ]
-    },
-    {
-      "id": "safety_general_deficit_v1",
-      "need_key": "safety",
-      "display_name": "一般安全需求缺口",
-      "maslow_need": "safety",
-      "summary": "安全缺口会提高威胁监测、风险规避、寻求庇护和对稳定秩序的偏好。",
-      "source_anchors": [
-        "安全威胁会提高警觉、风险规避和对可预测环境的需求。",
-        "慢性威胁会通过压力负荷影响认知控制与社会判断。"
-      ],
-      "mediators": [
-        {
-          "key": "threat_monitoring",
-          "label": "威胁监测",
-          "base": 0.05,
-          "pressure_weight": 0.78,
-          "decline_weight": 0.08,
-          "previous_weight": 0.12
-        },
-        {
-          "key": "risk_avoidance",
-          "label": "风险规避",
-          "base": 0.04,
-          "pressure_weight": 0.64,
-          "decline_weight": 0.06,
-          "previous_weight": 0.10
-        },
-        {
-          "key": "control_seeking",
-          "label": "控制寻求",
-          "base": 0.03,
-          "pressure_weight": 0.52,
-          "decline_weight": 0.06,
-          "previous_weight": 0.10
-        }
-      ],
-      "role_card_templates": {
-        "low": {
-          "summary": "轻度不安全感，开始留意风险线索。",
-          "emotion_tone": "警觉",
-          "cognition": [
-            "更关注威胁、资源稳定性和陌生环境。"
-          ],
-          "behavior": [
-            "倾向靠近熟悉、稳定或有支持的地点。"
-          ],
-          "social_expression": [
-            "更谨慎地表达判断。"
-          ],
-          "online_behavior": [
-            "更关注安全、秩序和风险提示内容。"
-          ],
-          "decision_bias": [
-            "轻微提高低风险方案权重。"
-          ],
-          "constraints": [
-            "安全缺口必须来自系统记录的事件或状态。"
-          ]
-        },
-        "moderate": {
-          "summary": "中度不安全感，风险规避和控制寻求增强。",
-          "emotion_tone": "紧张、防御",
-          "cognition": [
-            "更容易把不确定事件评估为威胁。",
-            "更偏好可预测、可控制的行动。"
-          ],
-          "behavior": [
-            "减少探索，增加寻求庇护、资源和可信关系的行为。"
-          ],
-          "social_expression": [
-            "对他人建议更谨慎，可能要求更多证据。"
-          ],
-          "online_behavior": [
-            "更可能传播风险提示和求证信息。"
-          ],
-          "decision_bias": [
-            "提高保守行动和稳定资源权重。"
-          ],
-          "constraints": [
-            "不要把一般不安全感自动解释为敌意。"
-          ]
-        },
-        "high": {
-          "summary": "高安全压力，威胁监测占主导。",
-          "emotion_tone": "焦虑、警觉、防御",
-          "cognition": [
-            "持续扫描潜在威胁，对模糊信息作负面解释。"
-          ],
-          "behavior": [
-            "优先远离威胁、寻找安全地点或可信对象。"
-          ],
-          "social_expression": [
-            "表达中防御性更强，容易要求保证和解释。"
-          ],
-          "online_behavior": [
-            "更容易参与安全危机、秩序和保护性政策讨论。"
-          ],
-          "decision_bias": [
-            "显著提高风险规避权重。"
-          ],
-          "constraints": [
-            "不能编造威胁来源。"
-          ]
-        }
-      },
-      "validation_predictions": [
-        "安全压力升高时，探索行为下降，靠近稳定地点或可信关系的行为增加。",
-        "安全压力较高时，风险和秩序相关表达增加。"
+        "money 压力较高时，经济安全、风险求证和稳定秩序相关发帖及评论增加。"
       ]
     },
     {

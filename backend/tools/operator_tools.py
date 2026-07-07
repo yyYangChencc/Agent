@@ -1,13 +1,26 @@
 import heapq
+import math
 
-from tools.base import Tool
-from social_sys.post.post import Post
-from social_sys.post.comment import Comment
+from social_sys.post import Comment, Post
 from world.objects import Interactable, building
-from persona.opinion.scorer import evaluate_opinion
+from persona.need_events import apply_need_delta
 from persona.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class Tool:
+    """工具函数的最小包装，统一保留名称、描述和参数声明。"""
+
+    def __init__(self, name, func, description, args):
+        self.name = name
+        self.func = func
+        self.description = description
+        self.args = args
+
+    def run(self, **kwargs):
+        return self.func(**kwargs)
+
 
 def register_operator_tools(operator):
     """把 Operator 方法包装成 Tool，并生成给 LLM 使用的工具说明文本。"""
@@ -51,10 +64,10 @@ class Operator:
         self.world = world
         self.tool_specs = {
             "move": {
-                "description": "自动向目标坐标 (x, y) 使用网格最短路寻路移动，每次可前进多格，但不会超过观测半径大小，自动避开障碍物并优先利用道路",
+                "description": "自动向目标坐标 (x, y) 使用网格最短路寻路移动，单次移动不再按观测半径封顶；每移动一格都会消耗 relax，relax 为 0 时无法移动，移动会在目标位置、最近可达位置或 relax 耗尽处停止",
                 "args": {"x": int, "y": int},
                 "returns": str,
-                "constraint": "若目标坐标(x,y)存在障碍物，将停在距(x,y)最近的可达位置；若周围路径全被阻挡则原地不动"
+                "constraint": "若目标坐标(x,y)存在障碍物，将停在距(x,y)最近的可达位置；若周围路径全被阻挡或 relax 为 0 则原地不动"
             },
             "eat": {
                 "description": "吃指定ID的食物",
@@ -64,7 +77,15 @@ class Operator:
             },
             "speak": {
                 "description": "对指定ID或<all>说话,说话内容为content,若对多个ID说话则用空格分隔ID，response_to表示回复的内容，若此条语句不是回复他人的发言，则可无需添加response_to.",
-                "args": {"content": str, "ID": str, "response_to": str},
+                "args": {
+                    "content": str,
+                    "ID": str,
+                    "response_to": str,
+                    "intent": str,
+                    "social_valence": float,
+                    "topic": str,
+                    "topic_stance": float,
+                },
                 "returns": str,
                 "constraint": "距离己方5格内才能听见"
             },
@@ -104,9 +125,45 @@ class Operator:
                 return [nx, ny]
         return None
 
+    def _agent_or_error(self, operator_ID: str):
+        """统一读取实体智能体，避免各工具重复判断。"""
+
+        agent = self.world.agents.get(operator_ID)
+        if agent is None:
+            return None, "智能体不存在"
+        return agent, None
+
+    def _object_or_error(self, ID: str, *, empty_message: str = "此处为空"):
+        """统一读取地图物体，保留原工具的失败返回语义。"""
+
+        if ID == '0':
+            return None, empty_message
+        obj = self.world.objects.get(ID)
+        if obj is None:
+            return None, "物品不存在"
+        return obj, None
+
+    def _within_interact_distance(self, agent, target) -> bool:
+        """判断智能体是否处于通用交互距离内。"""
+
+        target_pos = target.get_position()
+        agent_pos = agent.get_position()
+        return (
+            (target_pos[0] - agent_pos[0]) ** 2
+            + (target_pos[1] - agent_pos[1]) ** 2
+        ) <= agent.config.eat_distance_sq
+
+    @staticmethod
+    def _remember_tool(agent, tool_name: str) -> None:
+        """记录最近使用的工具，供需求与历史链路读取。"""
+
+        if hasattr(agent, "remember_action_tool"):
+            agent.remember_action_tool(tool_name)
+
     def social_step(self, operator_ID):
         logger.info("[%s] 正在查看帖子...", operator_ID)
         agent = self.world.agents[operator_ID]
+        self._remember_tool(agent, "social_step")
         return agent.social_step()
 
     @staticmethod
@@ -253,8 +310,9 @@ class Operator:
                 return f"{exit_msg}；目标位置是当前位置，没有发生移动"
             return "目标位置是当前位置，没有发生移动"
 
-        max_steps = max(0, int(agent.config.observation_radius))
         interact_msg = ""
+        relax_cost = max(0.0, float(agent.config.relax_moving_usage))
+        current_relax = max(0.0, float(agent.satisfaction.get("relax", 0.0)))
 
         with self.world._world_lock:
             target_cell_id = self.world.map.get_e(x, y)
@@ -268,7 +326,14 @@ class Operator:
                 (x, y),
                 stop_within_distance_sq=stop_distance_sq,
             )
-            path = planned_path[:max_steps + 1]
+            if relax_cost > 0 and current_relax <= 0 and len(planned_path) > 1:
+                path = [[old_x, old_y]]
+            elif relax_cost > 0:
+                # relax 只在每个格子移动完成后扣除；剩余 relax 大于 0 时允许再走一格。
+                max_steps_by_relax = max(1, int(math.ceil(current_relax / relax_cost)))
+                path = planned_path[:max_steps_by_relax + 1]
+            else:
+                path = planned_path
             if not path:
                 path = [[old_x, old_y]]
             cur_x, cur_y = path[-1]
@@ -301,14 +366,30 @@ class Operator:
                     "agent_id": operator_ID,
                     "path": path,
                 })
+                agent.did_move_this_tick = True
                 _try_interact_at(cur_x, cur_y)
 
         if steps == 0:
             if interact_msg:
                 return f"{operator_ID}原地不动{interact_msg}"
+            if relax_cost > 0 and current_relax <= 0:
+                return "relax 为 0，无法继续移动"
             return f"无法移动，[{old_x},{old_y}]已是当前可达范围内距目标最近的位置"
 
-        agent.update_satisfaction("relax", -agent.config.relax_moving_usage * steps)
+        apply_need_delta(
+            agent,
+            "relax",
+            -agent.config.relax_moving_usage * steps,
+            source="physiological",
+            reason="移动消耗 relax",
+            evidence={
+                "from": [old_x, old_y],
+                "to": [cur_x, cur_y],
+                "target": [x, y],
+                "steps": steps,
+            },
+        )
+        self._remember_tool(agent, "move")
 
         logger.info(
             "[%s] 从 [%d,%d] 移动 %d 步至 [%d,%d]（目标 [%d,%d]）",
@@ -322,64 +403,81 @@ class Operator:
         if ID == '0':
             logger.warning("[%s] 尝试吃空位置", operator_ID)
             return "此处为空"
-        if operator_ID not in self.world.agents:
-            return "智能体不存在"
-        agent = self.world.agents[operator_ID]
+        agent, error = self._agent_or_error(operator_ID)
+        if error:
+            return error
         with self.world._world_lock:
-            if ID not in self.world.objects:
+            operated, error = self._object_or_error(ID)
+            if error:
                 logger.warning("[%s] 物品 %s 不存在", operator_ID, ID)
-                return "物品不存在"
-            operated = self.world.objects[ID]
+                return error
             if getattr(operated, "kind", None) != "food":
                 logger.warning("[%s] 物品 %s 种类不是食物", operator_ID, ID)
                 return "物品种类不是食物，不可以吃"
-            f_pos = operated.get_position()
-            A_pos = agent.get_position()
-            if (f_pos[0] - A_pos[0])**2 + (f_pos[1] - A_pos[1])**2 > agent.config.eat_distance_sq:
+            if not self._within_interact_distance(agent, operated):
                 logger.warning("[%s] 距离食物 %s 过远", operator_ID, ID)
                 return "距离过远吃不到"
             operated.interact(agent)
+        self._remember_tool(agent, "eat")
         logger.info("[%s] 成功吃到 %s", operator_ID, ID)
         return f"{operator_ID}成功吃到{ID}"
 
-    def speak(self, operator_ID, content, ID, response_to=None):
+    def speak(
+        self,
+        operator_ID,
+        content,
+        ID,
+        response_to=None,
+        intent=None,
+        social_valence=None,
+        topic="",
+        topic_stance=None,
+    ):
         msg = f"{operator_ID}对{ID}说:{content}"
         if response_to:
             msg += f"  回复：{response_to}"
         logger.info("[%s] 说话 → %s | 内容: %s", operator_ID, ID, content)
+        # speak 不因元数据非法而失败；规范化由 ConversationManager 统一处理。
+        if intent:
+            msg += f" intent={intent}"
+        if social_valence is not None:
+            msg += f" social_valence={social_valence}"
+        if topic:
+            msg += f" topic={topic}"
+        if topic_stance is not None:
+            msg += f" topic_stance={topic_stance}"
         return msg
 
     def sleep(self, operator_ID: str, ID: str):
         if ID == '0':
             return "此处为空"
-        if operator_ID not in self.world.agents:
-            return "智能体不存在"
-        agent = self.world.agents[operator_ID]
+        agent, error = self._agent_or_error(operator_ID)
+        if error:
+            return error
         if agent.sleeping:
             return "已经在睡眠中"
         if agent.inside_building_id:
             return "当前在建筑内，需先离开建筑再睡觉"
         with self.world._world_lock:
-            if ID not in self.world.objects:
-                return "物品不存在"
-            target = self.world.objects[ID]
+            target, error = self._object_or_error(ID)
+            if error:
+                return error
             if getattr(target, "kind", None) != "bed":
                 return "目标不是床，不可以睡觉"
-            t_pos = target.get_position()
-            a_pos = agent.get_position()
-            if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
+            if not self._within_interact_distance(agent, target):
                 return "距离过远无法休息"
             result = target.interact(agent)
         if agent.sleeping:
+            self._remember_tool(agent, "sleep")
             logger.info("[%s] 开始睡觉 → %s", operator_ID, ID)
         return f"{operator_ID}{result}"
 
     def enter_building(self, operator_ID: str, ID: str):
         if ID == '0':
             return "此处为空"
-        if operator_ID not in self.world.agents:
-            return "智能体不存在"
-        agent = self.world.agents[operator_ID]
+        agent, error = self._agent_or_error(operator_ID)
+        if error:
+            return error
         if agent.sleeping:
             return "睡眠中无法进入建筑"
         if agent.inside_building_id:
@@ -387,15 +485,12 @@ class Operator:
                 return f"已在建筑 {ID} 内"
             return "当前已在其他建筑内，请先离开建筑"
         with self.world._world_lock:
-            if ID not in self.world.objects:
-                return "物品不存在"
-            target = self.world.objects[ID]
-            from world.objects import building
+            target, error = self._object_or_error(ID)
+            if error:
+                return error
             if not isinstance(target, building):
                 return "目标不是建筑，无法进入"
-            t_pos = target.get_position()
-            a_pos = agent.get_position()
-            if (t_pos[0] - a_pos[0]) ** 2 + (t_pos[1] - a_pos[1]) ** 2 > agent.config.eat_distance_sq:
+            if not self._within_interact_distance(agent, target):
                 return "距离过远无法进入"
             old_x, old_y = agent.position
             enter_result = target.enter(agent)
@@ -403,14 +498,16 @@ class Operator:
                 self.world.map.remove(old_x, old_y)
             agent.position = list(target.position)
         interact_result = self.world.interact_inside_building(agent, record_history=False, source="enter_building")
+        self._remember_tool(agent, "enter_building")
+        self._apply_building_exploration_needs(agent, target)
         result = f"{enter_result}; {interact_result}" if interact_result else enter_result
         logger.info("[%s] 进入建筑 %s", operator_ID, ID)
         return result
 
     def exit_building(self, operator_ID: str):
-        if operator_ID not in self.world.agents:
-            return "智能体不存在"
-        agent = self.world.agents[operator_ID]
+        agent, error = self._agent_or_error(operator_ID)
+        if error:
+            return error
         building_id = agent.inside_building_id
         if not building_id:
             return "当前不在任何建筑内"
@@ -428,8 +525,58 @@ class Operator:
                 self.world.map.remove(old_x, old_y)
             self.world.map.place(exit_pos[0], exit_pos[1], agent.id)
             agent.position = exit_pos
+        self._remember_tool(agent, "exit_building")
         logger.info("[%s] 离开建筑 %s", operator_ID, building_id)
         return result
+
+    def _apply_building_exploration_needs(self, agent, target) -> None:
+        """首次进入建筑或建筑类型时，补充自我实现满足度。"""
+
+        building_id = str(getattr(target, "id", "") or "")
+        building_kind = str(getattr(target, "kind", "") or "")
+        gained_exploration = False
+        if building_id and building_id not in agent.visited_building_ids:
+            agent.visited_building_ids.add(building_id)
+            event = apply_need_delta(
+                agent,
+                "self_actualization",
+                agent.config.self_actualization_first_building_delta,
+                source="exploration",
+                reason="首次进入新的建筑",
+                evidence={"building_id": building_id, "kind": building_kind},
+            )
+            gained_exploration = gained_exploration or event is not None
+        if building_kind and building_kind not in agent.visited_building_kinds:
+            agent.visited_building_kinds.add(building_kind)
+            event = apply_need_delta(
+                agent,
+                "self_actualization",
+                agent.config.self_actualization_first_building_kind_delta,
+                source="exploration",
+                reason="首次进入新的建筑类型",
+                evidence={"building_id": building_id, "kind": building_kind},
+            )
+            gained_exploration = gained_exploration or event is not None
+        if gained_exploration:
+            self._apply_self_actualization_task_bonus(
+                agent,
+                "完成自我实现任务时产生新的地点探索",
+                {"building_id": building_id, "kind": building_kind},
+            )
+
+    def _apply_self_actualization_task_bonus(self, agent, reason: str, evidence: dict) -> None:
+        """自我实现任务产生新探索或新表达时给予额外反馈。"""
+
+        if getattr(agent, "task_urgency_key", "") != "self_actualization":
+            return
+        apply_need_delta(
+            agent,
+            "self_actualization",
+            agent.config.self_actualization_task_completion_delta,
+            source="exploration",
+            reason=reason,
+            evidence=evidence,
+        )
 
 
 class SocialOperator:
@@ -443,13 +590,13 @@ class SocialOperator:
         self.platform = platform
         self.tool_specs = {
             "send_post": {
-                "description": "发表帖子，content为帖子内容",
-                "args": {"content": str},
+                "description": "发表帖子，topic为帖子标题/主题，content为帖子内容，opinion_index为作者对该主题的立场快照，范围[-1,1]；仅在有自己的新增观点、真实经历或明确求助时使用，不用于复述他人帖子；若内容与当前观念主题相关，topic必须使用该观念主题，否则自行定义普通主题",
+                "args": {"topic": str, "content": str, "opinion_index": float},
                 "returns": str,
             },
             "comment_post": {
-                "description": "评论帖子，post_id为被评论的帖子ID，content为评论内容",
-                "args": {"post_id": int, "content": str},
+                "description": "评论帖子，post_id为被评论的帖子ID，content为评论内容，agreement_to_post为你对被评论帖子的认同程度，范围[-1,1]",
+                "args": {"post_id": int, "content": str, "agreement_to_post": float},
                 "returns": str,
             },
             "like_post": {
@@ -502,32 +649,138 @@ class SocialOperator:
         logger.info("[%s] 私信 → %s: %s", operator_ID, ID, content)
         return f"{operator_ID}对{ID}说:{content}"
 
-    def send_post(self, operator_ID, content):
-        # 发帖时的 opinion_index 目前由 evaluate_opinion 占位函数给出。
+    def _parse_required_unit_score(self, operator_ID: str, field_name: str, value):
+        """校验 LLM 显式给出的 [-1, 1] 数值字段，非法时拒绝动作。"""
+
+        if value is None or isinstance(value, bool):
+            logger.warning("[%s] 社交动作失败，%s 缺失或不是数值: %r", operator_ID, field_name, value)
+            return None, f"error: {field_name} 必须是 [-1, 1] 范围内的数值"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            logger.warning("[%s] 社交动作失败，%s 不是数值: %r", operator_ID, field_name, value)
+            return None, f"error: {field_name} 必须是 [-1, 1] 范围内的数值"
+        if not math.isfinite(number) or number < -1.0 or number > 1.0:
+            logger.warning("[%s] 社交动作失败，%s 超出范围: %r", operator_ID, field_name, value)
+            return None, f"error: {field_name} 必须在 [-1, 1] 范围内"
+        return number, None
+
+    @staticmethod
+    def _remember_social_tool(agent, tool_name: str) -> None:
+        """记录线上工具动作，供历史和需求事件读取。"""
+
+        if hasattr(agent, "remember_action_tool"):
+            agent.remember_action_tool(tool_name)
+
+    def _set_last_social_action(
+        self,
+        agent,
+        *,
+        action: str,
+        post_id,
+        post_content: str = "",
+        comment_content: str = "",
+        opinion_index=0.0,
+        agreement_to_post="",
+    ) -> None:
+        """统一写入最近一次线上动作快照，保持历史字段一致。"""
+
+        agent.last_social_action = {
+            "action": action,
+            "post_id": post_id,
+            "post_content": post_content,
+            "comment_content": comment_content,
+            "opinion_index": opinion_index,
+            "agreement_to_post": agreement_to_post,
+        }
+
+    def _notify_author(self, post: Post, message: str) -> None:
+        """向真实帖子作者写入社交通知；无实体投放者会被跳过。"""
+
+        author_agent = self.platform.get_agent(post.author_id)
+        if author_agent is not None:
+            author_agent._pending_social_notifications.append(message)
+
+    def _adjust_online_trust(self, agent, author_id: str, delta: float) -> None:
+        """线上弱反馈只调整信任，不直接修改观念。"""
+
+        current = agent.online_trust.get(author_id, agent.config.default_online_trust)
+        agent.online_trust[author_id] = max(0.0, min(1.0, current + delta))
+
+    def _after_reaction_to_post(
+        self,
+        *,
+        operator_ID: str,
+        agent,
+        post: Post,
+        action: str,
+        trust_delta: float,
+        notification: str,
+        belonging_delta: float,
+        esteem_delta: float,
+    ) -> None:
+        """统一处理点赞/点踩后的信任、通知、需求和新关系事件。"""
+
+        if agent is None or post.author_id == operator_ID:
+            return
+        self._adjust_online_trust(agent, post.author_id, trust_delta)
+        self._notify_author(post, notification)
+        self._apply_author_feedback(operator_ID, post, action, belonging_delta, esteem_delta)
+        self._apply_new_social_contact(agent, post, action)
+
+    def send_post(self, operator_ID, content, topic="日常", opinion_index=None):
+        topic = str(topic or "").strip() or "日常"
+        score, error = self._parse_required_unit_score(operator_ID, "opinion_index", opinion_index)
+        if error:
+            return error
+        # 普通智能体发帖立场由动作 LLM 显式给出，工具层只校验和记录。
         with self.platform._posts_lock:
             post_id = len(self.platform.posts) + 1
-            new_post = Post(post_id, operator_ID, content)
-            new_post.opinion_index = evaluate_opinion(content)
+            new_post = Post(post_id, operator_ID, content, topic=topic)
+            new_post.opinion_index = score
             self.platform.posts.append(new_post)
-        self.platform.get_agent(operator_ID).add_post_history(new_post)
-        logger.info("[%s] 发表帖子: %s", operator_ID, content)
-        return f"{operator_ID}成功发表了帖子: {content}"
+        agent = self.platform.get_agent(operator_ID)
+        if agent is not None:
+            agent.add_post_history(new_post)
+            self._remember_social_tool(agent, "send_post")
+            self._set_last_social_action(
+                agent,
+                action="send_post",
+                post_id=new_post.id,
+                post_content=content,
+                opinion_index=new_post.opinion_index,
+            )
+            self._apply_topic_expression_need(agent, topic, new_post)
+        logger.info("[%s] 发表帖子 topic=%s: %s", operator_ID, topic, content)
+        return f"{operator_ID}成功发表了帖子，主题：{topic}，内容：{content}"
 
-    def comment_post(self, operator_ID, post_id, content):
+    def comment_post(self, operator_ID, post_id, content, agreement_to_post=None):
         post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
         if error:
             return error
+        agreement, error = self._parse_required_unit_score(operator_ID, "agreement_to_post", agreement_to_post)
+        if error:
+            return error
         comment_id = f"{post_id}_c{post.comments+1}"
-        new_comment = Comment(comment_id, operator_ID, content, time=None)
+        new_comment = Comment(comment_id, operator_ID, content, time=None, agreement_to_post=agreement)
         post.add_comment(new_comment)
+        agent = self.platform.get_agent(operator_ID)
+        if agent is not None:
+            self._remember_social_tool(agent, "comment_post")
+            self._set_last_social_action(
+                agent,
+                action="comment_post",
+                post_id=post_id,
+                comment_content=content,
+                opinion_index=getattr(post, "opinion_index", 0.0),
+                agreement_to_post=agreement,
+            )
+            self._apply_new_social_contact(agent, post, "comment_post")
         # 通知帖主有人评论了其帖子
         if post.author_id != operator_ID:
-            author_agent = self.platform.get_agent(post.author_id)
-            if author_agent is not None:
-                snippet = content[:40] + "..." if len(content) > 40 else content
-                author_agent._pending_social_notifications.append(
-                    f"[社交通知] {operator_ID} 评论了你的帖子：{snippet}"
-                )
+            snippet = content[:40] + "..." if len(content) > 40 else content
+            self._notify_author(post, f"[社交通知] {operator_ID} 评论了你的帖子：{snippet}")
+            self._apply_comment_feedback_to_author(operator_ID, post, agreement)
         logger.info("[%s] 评论帖子 %s: %s", operator_ID, post_id, content)
         return f"{operator_ID}成功评论了帖子 {post_id}: {content}"
 
@@ -537,19 +790,24 @@ class SocialOperator:
             return error
         post.add_like(operator_ID)
         agent = self.platform.get_agent(operator_ID)
-        if agent is not None and post.author_id != operator_ID:
-            cfg = agent.config
-            # 点赞被视作弱正反馈，只调整 online_trust，不直接更新观念分数。
-            agent.online_trust[post.author_id] = min(
-                1.0,
-                agent.online_trust.get(post.author_id, cfg.default_online_trust) + 0.05
+        if agent is not None:
+            self._remember_social_tool(agent, "like_post")
+            self._set_last_social_action(
+                agent,
+                action="like_post",
+                post_id=post_id,
+                opinion_index=getattr(post, "opinion_index", 0.0),
             )
-            # 通知帖主有人点赞
-            author_agent = self.platform.get_agent(post.author_id)
-            if author_agent is not None:
-                author_agent._pending_social_notifications.append(
-                    f"[社交通知] {operator_ID} 点赞了你的帖子"
-                )
+        self._after_reaction_to_post(
+            operator_ID=operator_ID,
+            agent=agent,
+            post=post,
+            action="like_post",
+            trust_delta=0.05,
+            notification=f"[社交通知] {operator_ID} 点赞了你的帖子",
+            belonging_delta=agent.config.social_like_belonging_delta if agent is not None else 0.0,
+            esteem_delta=agent.config.social_like_esteem_delta if agent is not None else 0.0,
+        )
         logger.info("[%s] 点赞帖子 %s", operator_ID, post_id)
         return f"{operator_ID}成功点赞了帖子 {post_id}"
 
@@ -559,18 +817,146 @@ class SocialOperator:
             return error
         post.add_dislike(operator_ID)
         agent = self.platform.get_agent(operator_ID)
-        if agent is not None and post.author_id != operator_ID:
-            cfg = agent.config
-            # 点踩被视作弱负反馈，只调整 online_trust，不直接更新观念分数。
-            agent.online_trust[post.author_id] = max(
-                0.0,
-                agent.online_trust.get(post.author_id, cfg.default_online_trust) - 0.05
+        if agent is not None:
+            self._remember_social_tool(agent, "dislike_post")
+            self._set_last_social_action(
+                agent,
+                action="dislike_post",
+                post_id=post_id,
+                opinion_index=getattr(post, "opinion_index", 0.0),
             )
-            # 通知帖主有人点踩
-            author_agent = self.platform.get_agent(post.author_id)
-            if author_agent is not None:
-                author_agent._pending_social_notifications.append(
-                    f"[社交通知] {operator_ID} 点踩了你的帖子"
-                )
+        self._after_reaction_to_post(
+            operator_ID=operator_ID,
+            agent=agent,
+            post=post,
+            action="dislike_post",
+            trust_delta=-0.05,
+            notification=f"[社交通知] {operator_ID} 点踩了你的帖子",
+            belonging_delta=agent.config.social_dislike_belonging_delta if agent is not None else 0.0,
+            esteem_delta=agent.config.social_dislike_esteem_delta if agent is not None else 0.0,
+        )
         logger.info("[%s] 点踩帖子 %s", operator_ID, post_id)
         return f"{operator_ID}成功点踩了帖子 {post_id}"
+
+    def _apply_topic_expression_need(self, agent, topic: str, post: Post) -> None:
+        """首次围绕系统新闻主题原创发帖时，提高自我实现。"""
+
+        default_topic = str(getattr(agent.config, "default_opinion_topic", "") or "")
+        if not default_topic or str(topic or "") != default_topic:
+            return
+        if default_topic in agent.expressed_opinion_topics:
+            return
+        agent.expressed_opinion_topics.add(default_topic)
+        event = apply_need_delta(
+            agent,
+            "self_actualization",
+            agent.config.self_actualization_first_topic_post_delta,
+            source="exploration",
+            reason="首次围绕系统新闻主题原创表达观点",
+            evidence={"post_id": post.id, "topic": topic, "opinion_index": post.opinion_index},
+        )
+        if event is not None:
+            self._apply_self_actualization_task_bonus(
+                agent,
+                "完成自我实现任务时产生新的观点表达",
+                {"post_id": post.id, "topic": topic},
+            )
+
+    def _apply_comment_feedback_to_author(self, operator_ID: str, post: Post, agreement: float) -> None:
+        """根据评论认同值影响原帖作者的归属和尊重。"""
+
+        author_agent = self.platform.get_agent(post.author_id)
+        if author_agent is None:
+            return
+        threshold = author_agent.config.social_feedback_agreement_threshold
+        if agreement > threshold:
+            self._apply_author_feedback(
+                operator_ID,
+                post,
+                "comment_post",
+                author_agent.config.social_comment_positive_belonging_delta,
+                author_agent.config.social_comment_positive_esteem_delta,
+                agreement_to_post=agreement,
+            )
+        elif agreement < -threshold:
+            self._apply_author_feedback(
+                operator_ID,
+                post,
+                "comment_post",
+                author_agent.config.social_comment_negative_belonging_delta,
+                author_agent.config.social_comment_negative_esteem_delta,
+                agreement_to_post=agreement,
+            )
+
+    def _apply_author_feedback(
+        self,
+        operator_ID: str,
+        post: Post,
+        action: str,
+        belonging_delta: float,
+        esteem_delta: float,
+        *,
+        agreement_to_post: float | None = None,
+    ) -> None:
+        """把线上互动转成帖子作者的归属和尊重事件。"""
+
+        author_agent = self.platform.get_agent(post.author_id)
+        if author_agent is None:
+            return
+        evidence = {
+            "post_id": post.id,
+            "post_author_id": post.author_id,
+            "operator_id": operator_ID,
+            "action": action,
+            "topic": getattr(post, "topic", ""),
+            "opinion_index": getattr(post, "opinion_index", 0.0),
+        }
+        if agreement_to_post is not None:
+            evidence["agreement_to_post"] = agreement_to_post
+        apply_need_delta(
+            author_agent,
+            "belonging",
+            belonging_delta,
+            source="social_feedback",
+            reason="自己的帖子收到线上互动反馈",
+            evidence=evidence,
+        )
+        apply_need_delta(
+            author_agent,
+            "esteem",
+            esteem_delta,
+            source="social_feedback",
+            reason="自己的帖子收到线上互动反馈",
+            evidence=evidence,
+        )
+
+    def _apply_new_social_contact(self, agent, post: Post, action: str) -> None:
+        """自我实现任务中与新的真实智能体发生线上互动时给出反馈。"""
+
+        author_id = str(getattr(post, "author_id", "") or "")
+        if not author_id or author_id == agent.id:
+            return
+        if self.platform.get_agent(author_id) is None:
+            return
+        if author_id in agent.known_social_contacts:
+            return
+        agent.known_social_contacts.add(author_id)
+        self._apply_self_actualization_task_bonus(
+            agent,
+            "完成自我实现任务时产生新的线上互动对象",
+            {"post_id": post.id, "author_id": author_id, "action": action},
+        )
+
+    def _apply_self_actualization_task_bonus(self, agent, reason: str, evidence: dict) -> None:
+        """当前任务为自我实现且发生新表达或新互动时追加反馈。"""
+
+        if getattr(agent, "task_urgency_key", "") != "self_actualization":
+            return
+        apply_need_delta(
+            agent,
+            "self_actualization",
+            agent.config.self_actualization_task_completion_delta,
+            source="exploration",
+            reason=reason,
+            evidence=evidence,
+        )

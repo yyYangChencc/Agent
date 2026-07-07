@@ -89,17 +89,22 @@ export interface CommentState {
   author_id: string
   content: string
   time: number | null
+  agreement_to_post: number
 }
 
 export interface PostState {
   id: number
   author_id: string
+  topic: string
   content: string
   time: number
   likes: number
   dislikes: number
   comments: CommentState[]
   opinion_index: number
+  is_news: boolean
+  is_rumor: boolean
+  source_type: string
 }
 
 export interface MovementState {
@@ -109,6 +114,7 @@ export interface MovementState {
 
 export interface WorldState {
   time: number
+  scenario_name: string
   simulation_step_limit: number
   map_size: [number, number]
   map_design: MapDesignState | null
@@ -116,6 +122,18 @@ export interface WorldState {
   agents: AgentState[]
   objects: ObjectState[]
   posts: PostState[]
+}
+
+export interface ArchivedRunState {
+  run_name: string
+  output_dir: string
+  tick_count: number
+  reason: string
+  summary_path: string
+  summary_url: string
+  config_url: string
+  charts: { name: string; url: string }[]
+  error: string
 }
 
 export interface AgentHistoryPoint {
@@ -137,6 +155,9 @@ interface SimStore {
   worldState: WorldState | null
   running: boolean
   speed: number
+  scenarioName: string
+  scenarios: string[]
+  archivedRun: ArchivedRunState | null
   selectedAgentId: string | null
   selectedObjectId: string | null   // 当前选中的场景物品 ID
   showMapRegions: boolean           // 是否显示地图区域划分
@@ -144,7 +165,7 @@ interface SimStore {
   connected: boolean
   agentHistory: Record<string, AgentHistoryPoint[]>
   setWorldState: (state: WorldState) => void
-  setStatus: (running: boolean, speed: number) => void
+  setStatus: (running: boolean, speed: number, scenarioName?: string, scenarios?: string[], archivedRun?: ArchivedRunState | null) => void
   selectAgent: (id: string | null) => void
   selectObject: (id: string | null) => void  // 选中物品，同时取消智能体选中
   toggleMapRegions: () => void
@@ -158,6 +179,9 @@ export const useSimStore = create<SimStore>((set, get) => ({
   worldState: null,
   running: false,
   speed: 1.0,
+  scenarioName: 'default_town',
+  scenarios: ['default_town', 'jiang_ping_polarization'],
+  archivedRun: null,
   selectedAgentId: null,
   selectedObjectId: null,
   showMapRegions: false,
@@ -186,10 +210,16 @@ export const useSimStore = create<SimStore>((set, get) => ({
       const updated = [...arr, point]
       next[a.id] = updated.length > MAX_HISTORY ? updated.slice(-MAX_HISTORY) : updated
     }
-    set({ worldState, agentHistory: next })
+    set({ worldState, scenarioName: worldState.scenario_name, agentHistory: next })
   },
 
-  setStatus: (running, speed) => set({ running, speed }),
+  setStatus: (running, speed, scenarioName, scenarios, archivedRun) => set((state) => ({
+    running,
+    speed,
+    scenarioName: scenarioName ?? state.scenarioName,
+    scenarios: scenarios ?? state.scenarios,
+    archivedRun: archivedRun === undefined ? state.archivedRun : archivedRun,
+  })),
   // 选中智能体时清除物品选中，保持互斥
   selectAgent: (id) => set({ selectedAgentId: id, selectedObjectId: null }),
   // 选中物品时清除智能体选中，保持互斥

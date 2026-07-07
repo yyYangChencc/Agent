@@ -3,13 +3,14 @@ import json
 import math
 from typing import TYPE_CHECKING
 from persona.logger import get_logger
+from persona.need_events import apply_need_delta
 from persona.opinion.scale import clamp_opinion
 
 if TYPE_CHECKING:
     from world.world import World
     from persona.agents.policy import Policy
     from persona.agent_memory.mem import MultiAgentMemoryManager
-    from persona.reflect.reflect import Reflect
+    from persona.reflect import Reflect
     from persona.config import AgentConfig
 
 logger = get_logger(__name__)
@@ -53,12 +54,22 @@ class Agent:
 
         # satisfaction 是客观满足度；urgency 是主观急迫度；pressure_* 是需求缺口
         # 的累积压力层，供心理评测器判断是否激活。
-        self.satisfaction: dict[str, float] = {"satiety": 0.0, "relax": 0.0, "money": 0.0}
-        self.urgency: dict[str, float] = {"satiety": 1.0, "relax": 1.0, "money": 1.0}
+        self.satisfaction: dict[str, float] = {
+            "satiety": 0.0,
+            "relax": 0.0,
+            "money": 0.0,
+            "belonging": 55.0,
+            "esteem": 55.0,
+            "self_actualization": 55.0,
+        }
+        self.urgency: dict[str, float] = {key: 1.0 for key in self.satisfaction}
         self.satisfaction_threshold: dict[str, float] = {
             "satiety": config.satiety_threshold,
             "relax": config.relax_threshold,
             "money": config.money_threshold,
+            "belonging": config.belonging_threshold,
+            "esteem": config.esteem_threshold,
+            "self_actualization": config.self_actualization_threshold,
         }
         self.need_gap: dict[str, float] = {k: 0.0 for k in self.satisfaction}
         self.pressure_memory: dict[str, float] = {k: 0.0 for k in self.satisfaction}
@@ -74,6 +85,16 @@ class Agent:
         self.mem = mem
         self.inbox: list[dict] = []
         self.conversation_opted_out: bool = False
+        self.conversation_event_log: list[dict] = []  # 已落地的线下对话消息，供历史与评测追踪
+        self.need_event_log: list[dict] = []          # 需求满足度变化事件，供实验解释链追踪
+        self.visited_building_ids: set[str] = set()   # 已进入过的建筑 ID，用于自我实现探索奖励
+        self.visited_building_kinds: set[str] = set() # 已进入过的建筑类型，用于避免重复奖励
+        self.known_social_contacts: set[str] = set()  # 已发生过线上互动的真实智能体
+        self.expressed_opinion_topics: set[str] = set() # 已围绕系统主题原创发帖的记录
+        self.last_positive_belonging_tick: int = 0
+        self.last_positive_esteem_tick: int = 0
+        self.last_self_actualization_tick: int = 0
+        self.recent_action_tools: list[str] = []       # 近期动作类型，用于自我实现被动衰减
 
         self.post_history: list = []
         self.followers: list[str] = []
@@ -90,9 +111,17 @@ class Agent:
         self.opinion_scores: dict[str, float] = {}
         self.last_opinion_assessment: dict | None = None
         self.opinion_assessment_history: list[dict] = []
+        self.last_opinion_before_assessment: float = self.opinion
+        self.opinion_seen_posts_buffer: list[dict] = []  # 当前观念评测周期内实际看过的当前主题帖子。
+        self._last_opinion_assessment_tick: int = 0      # 记录上次观念评测时间，用于间隔兜底。
+        self._last_opinion_evidence_signature: str = ""  # 已评测证据签名，避免同一证据重复触发 LLM。
         self.online_trust: dict[str, float] = {}   # 线上信任，主要由点赞/点踩调整
         self.offline_trust: dict[str, float] = {}  # 线下信任，保留给后续线下关系建模
         self._last_seen_posts: list = []            # 上一次 social_step 中可见的帖子
+        self.last_action: dict = {}                 # 最近一次世界动作摘要，供实验日志记录。
+        self.last_social_action: dict = {}          # 最近一次社交动作摘要，供实验日志记录。
+        self.did_move_this_tick: bool = False       # 本 tick 是否真实发生移动，用于 relax 被动恢复。
+        self.did_work_this_tick: bool = False       # 本 tick 是否真实发生工作，用于 relax 被动恢复。
 
         self.current_focus: str = ""
         self.stuck_ticks: int = 0
@@ -148,6 +177,7 @@ class Agent:
         logger.info("[%s] 正在查看帖子...", self.id)
         posts, posts_info = self._receive_post()
         self._last_seen_posts = posts
+        self._record_opinion_seen_posts(posts_info)
         # 社交浏览结果先以 JSON 写入记忆，再转成 prompt 字符串交给社交 policy。
         self._store_social_browse_memory(posts_info)
         posts_text = self._format_structured_context(posts_info)
@@ -162,6 +192,54 @@ class Agent:
     def _receive_post(self) -> tuple[list, dict]:
         posts = self.platform.get_visible_posts(self.id)
         return posts, self.platform.give_post(self.id)
+
+    def _record_opinion_seen_posts(self, posts_info: dict) -> None:
+        """只记录本周期实际看过且 topic 等于当前观念主题的帖子。"""
+
+        if not isinstance(posts_info, dict):
+            return
+        posts = posts_info.get("posts") if isinstance(posts_info.get("posts"), list) else []
+        if not posts:
+            return
+        topic = str(self.config.default_opinion_topic or "")
+        latest_by_id = {
+            str(post.get("id")): dict(post)
+            for post in self.opinion_seen_posts_buffer
+            if isinstance(post, dict) and post.get("id") is not None
+        }
+        for post in posts:
+            # 观念证据只由帖子 topic 决定，不读取正文或评论内容。
+            if not isinstance(post, dict) or not self._post_matches_opinion_topic(post, topic):
+                continue
+            post_id = post.get("id")
+            if post_id is None:
+                continue
+            latest_by_id[str(post_id)] = self._opinion_post_snapshot(post)
+        self.opinion_seen_posts_buffer = list(latest_by_id.values())
+
+    def _post_matches_opinion_topic(self, post: dict, topic: str) -> bool:
+        """按帖子 topic 判断是否属于当前观念主题。"""
+
+        return bool(topic) and str(post.get("topic") or "") == topic
+
+    def _opinion_post_snapshot(self, post: dict) -> dict:
+        """只保留评测所需字段，避免把无关平台状态带入观念 prompt。"""
+
+        return {
+            "id": post.get("id"),
+            "author_id": post.get("author_id"),
+            "topic": post.get("topic"),
+            "content": post.get("content"),
+            "time": post.get("time"),
+            "likes": post.get("likes"),
+            "dislikes": post.get("dislikes"),
+            "comments_count": post.get("comments_count"),
+            "opinion_index": post.get("opinion_index"),
+            "is_news": post.get("is_news"),
+            "is_rumor": post.get("is_rumor"),
+            "source_type": post.get("source_type"),
+            "comments": post.get("comments") if isinstance(post.get("comments"), list) else [],
+        }
 
     def get_post_history(self) -> str:
         return "\n".join([post.show() for post in self.post_history])
@@ -193,6 +271,87 @@ class Agent:
             top_k = max(2, top_k - 2)
         return min(top_k, self.config.memory_max_top_k)
 
+    def _memory_timeout_seconds(self) -> float | None:
+        """读取记忆检索超时预算；非正数表示不启用超时。"""
+
+        value = getattr(self.config, "memory_retrieval_timeout_seconds", 0.0)
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            return None
+        return timeout if timeout > 0 else None
+
+    def _observation_has_direct_need_target(self, obs: str | dict | list | None, context: str) -> bool:
+        """当前观察已经给出可行动目标时跳过记忆查询，避免重复召回同一最新状态。"""
+
+        if not getattr(self.config, "memory_planner_skip_when_observation_sufficient", True):
+            return False
+        if context != "world" or not isinstance(obs, dict):
+            return False
+        if not self._is_basic_need_task():
+            return False
+        useful_kinds = self._useful_object_kinds_for_current_task()
+        if not useful_kinds:
+            return False
+        for obj in obs.get("objects") or []:
+            if not isinstance(obj, dict):
+                continue
+            if str(obj.get("kind") or "") in useful_kinds:
+                return True
+        return False
+
+    def _rule_based_memory_plan(self, obs: str | dict | list | None, context: str) -> str | None:
+        """低信号场景用结构化规则查询替代 LLM planner，减少无意义 planner 调用。"""
+
+        if not isinstance(obs, dict):
+            return None
+        if context == "world" and self._is_low_signal_observation(obs):
+            kinds = sorted(self._useful_object_kinds_for_current_task())
+            if not kinds:
+                return None
+            plan = {
+                "context": context,
+                "think": "规则短路：当前无新闻、社交、人物互动或失败反馈，只查询当前任务需要的实体状态。",
+                "queries": [
+                    {
+                        "type": "entity_state",
+                        "intent": "find_need_target",
+                        "entity_type": "object",
+                        "kinds": kinds,
+                        "exclude_visible": True,
+                        "limit": 5,
+                    }
+                ],
+            }
+            return json.dumps(plan, ensure_ascii=False)
+        return None
+
+    def _is_basic_need_task(self) -> bool:
+        """判断当前任务是否属于生理/安全需求。"""
+
+        return self.task_urgency_key in {"satiety", "relax", "money"}
+
+    def _useful_object_kinds_for_current_task(self) -> set[str]:
+        """把需求键映射到可用物品/建筑 kind。"""
+
+        if self.task_urgency_key == "satiety":
+            return {"food", "food_shop"}
+        if self.task_urgency_key == "relax":
+            return {"bed", "playground"}
+        if self.task_urgency_key == "money":
+            return {"company"}
+        return set()
+
+    def _is_low_signal_observation(self, obs: dict) -> bool:
+        """没有新闻、社交通知、人物互动或失败反馈时，不需要调用 LLM planner。"""
+
+        social = obs.get("social") if isinstance(obs.get("social"), dict) else {}
+        notifications = social.get("notifications") if isinstance(social.get("notifications"), list) else []
+        if notifications or obs.get("people") or obs.get("actions"):
+            return False
+        recent_history = "\n".join(str(item) for item in self.history[-4:])
+        return "failed" not in recent_history.lower() and "error" not in recent_history.lower() and "失败" not in recent_history
+
     def recall(self, obs: str | dict | list | None, context: str = "world") -> list[str]:
         """按场景召回记忆，返回 list[str] 以保持现有 prompt 兼容。"""
 
@@ -202,6 +361,7 @@ class Agent:
                 self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
                 n_results=top_k,
                 context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
             )
         obs_text = self._format_structured_context(obs)
         return self.mem.smart_retrieve(
@@ -219,6 +379,7 @@ class Agent:
                 self.id, obs, self.task, self.urgency, self.satisfaction_threshold,
                 n_results=top_k,
                 context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
             )
         obs_text = self._format_structured_context(obs)
         return await self.mem.asmart_retrieve(
@@ -231,7 +392,28 @@ class Agent:
         """先由 LLM planner 生成查询计划，再执行受控记忆召回。"""
 
         planner = getattr(self, "memory_planner", None)
-        if planner is None or not hasattr(planner, "plan") or not hasattr(self.mem, "execute_query_plan"):
+        if self._observation_has_direct_need_target(obs, context):
+            # 当前 observe 已提供可直接行动的目标时，不调用 planner 和 Chroma，直接让 action LLM 决策。
+            return []
+        rule_plan = self._rule_based_memory_plan(obs, context)
+        if rule_plan is not None and hasattr(self.mem, "execute_query_plan"):
+            return self.mem.execute_query_plan(
+                self.id,
+                rule_plan,
+                obs,
+                self.task,
+                self.urgency,
+                self.satisfaction_threshold,
+                n_results=self._memory_top_k_for(context),
+                context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
+            )
+        if (
+            not getattr(self.config, "memory_planner_enabled", True)
+            or planner is None
+            or not hasattr(planner, "plan")
+            or not hasattr(self.mem, "execute_query_plan")
+        ):
             return self.recall(obs, context=context)
         try:
             plan = planner.plan(self, observation_text, context=context)
@@ -245,6 +427,7 @@ class Agent:
                 self.satisfaction_threshold,
                 n_results=self._memory_top_k_for(context),
                 context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
             )
         except Exception as exc:
             logger.warning("[%s] 记忆查询计划执行失败，退回自动召回: %s", self.id, exc)
@@ -254,7 +437,28 @@ class Agent:
         """异步 planner 召回；失败时保留旧召回路径。"""
 
         planner = getattr(self, "memory_planner", None)
-        if planner is None or not hasattr(planner, "aplan") or not hasattr(self.mem, "aexecute_query_plan"):
+        if self._observation_has_direct_need_target(obs, context):
+            # 当前观察足够完成生理/安全任务时，跳过记忆查询，减少无效 LLM/embedding 调用。
+            return []
+        rule_plan = self._rule_based_memory_plan(obs, context)
+        if rule_plan is not None and hasattr(self.mem, "aexecute_query_plan"):
+            return await self.mem.aexecute_query_plan(
+                self.id,
+                rule_plan,
+                obs,
+                self.task,
+                self.urgency,
+                self.satisfaction_threshold,
+                n_results=self._memory_top_k_for(context),
+                context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
+            )
+        if (
+            not getattr(self.config, "memory_planner_enabled", True)
+            or planner is None
+            or not hasattr(planner, "aplan")
+            or not hasattr(self.mem, "aexecute_query_plan")
+        ):
             return await self.arecall(obs, context=context)
         try:
             plan = await planner.aplan(self, observation_text, context=context)
@@ -268,6 +472,7 @@ class Agent:
                 self.satisfaction_threshold,
                 n_results=self._memory_top_k_for(context),
                 context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
             )
         except Exception as exc:
             logger.warning("[%s] 异步记忆查询计划执行失败，退回自动召回: %s", self.id, exc)
@@ -444,8 +649,8 @@ class Agent:
         if event.position is None:
             return False
         r = radius if radius is not None else self.config.observation_radius
-        from persona.utils.distance import manhattan
-        return manhattan(self.position, event.position) <= r
+        # 感知距离使用曼哈顿距离，避免为一个简单计算保留单独工具模块。
+        return abs(self.position[0] - event.position[0]) + abs(self.position[1] - event.position[1]) <= r
 
     def receive_message(
         self,
@@ -455,6 +660,9 @@ class Agent:
         session_id: str | None = None,
         intent: str | None = None,
         target: str | None = None,
+        social_valence=None,
+        topic: str = "",
+        topic_stance=None,
     ) -> None:
         """接收线下对话消息。
 
@@ -471,6 +679,9 @@ class Agent:
             "session_id": session_id,
             "intent": intent,
             "target": target,
+            "social_valence": social_valence,
+            "topic": topic,
+            "topic_stance": topic_stance,
         })
 
     def conversation_step(
@@ -491,10 +702,19 @@ class Agent:
             for entry in conv_history:
                 session_text = f" session={entry.get('session_id')}" if entry.get("session_id") else ""
                 intent_text = f" intent={entry.get('intent')}" if entry.get("intent") else ""
+                metadata_parts = []
+                if entry.get("social_valence") is not None:
+                    metadata_parts.append(f"social_valence={entry.get('social_valence')}")
+                if entry.get("topic"):
+                    metadata_parts.append(f"topic={entry.get('topic')}")
+                if entry.get("topic_stance") is not None:
+                    metadata_parts.append(f"topic_stance={entry.get('topic_stance')}")
                 line = (
                     f"  [第{entry['round']}轮{session_text}{intent_text}] "
                     f"{entry['sender']} → {entry['target']}: {entry['content']}"
                 )
+                if metadata_parts:
+                    line += " [" + " ".join(metadata_parts) + "]"
                 if entry.get("response_to"):
                     line += f"（回复: {entry['response_to']}）"
                 lines.append(line)
@@ -513,10 +733,23 @@ class Agent:
             (f"（回复的是: {m['response_to']}）" if m.get("response_to") else "")
             for m in inbox_messages
         ])
+        metadata_lines = []
+        for m in inbox_messages:
+            metadata_lines.append(
+                "sender={sender} session={session} intent={intent} social_valence={valence} topic={topic} topic_stance={stance}".format(
+                    sender=m.get("sender"),
+                    session=m.get("session_id") or "",
+                    intent=m.get("intent") or "",
+                    valence=m.get("social_valence"),
+                    topic=m.get("topic") or "",
+                    stance=m.get("topic_stance"),
+                )
+            )
+        metadata_block = "[对话元数据]\n" + "\n".join(metadata_lines)
         observation = (
             f"{history_block}\n\n"
             f"[对话消息 · 第 {round_n} 轮，还剩 {remaining} 轮]\n"
-            f"{msgs}"
+            f"{msgs}\n\n{metadata_block}"
         )
         self.inbox.clear()
         self.add_history("conversation", observation)
@@ -539,14 +772,26 @@ class Agent:
 
     def update_urgency(self, urgency_key: str, urgency_delta: float) -> None:
         if urgency_key in self.urgency:
-            self.urgency[urgency_key] = max(0.0, min(1.0, self.urgency[urgency_key] + urgency_delta))
+            self.urgency[urgency_key] = self._clamp_unit(self.urgency[urgency_key] + urgency_delta)
+
+    @staticmethod
+    def _clamp_unit(value: float) -> float:
+        """把普通比例值限制在 [0, 1]。"""
+
+        return max(0.0, min(1.0, float(value)))
+
+    @staticmethod
+    def _clamp_satisfaction(value: float) -> float:
+        """非 money 满足度限制在 [0, 100]。"""
+
+        return max(0.0, min(100.0, float(value)))
 
     def _clamp_urgency(self, value: float, floor: float) -> float:
-        return max(floor, min(1.0, value))
+        return max(floor, min(1.0, float(value)))
 
     def _urgency_floor(self, satisfaction_key: str) -> float:
         floor = self.config.urgency_floors.get(satisfaction_key, 0.0)
-        return max(0.0, min(1.0, floor))
+        return self._clamp_unit(floor)
 
     def _raw_urgency_from_gap(self, satisfaction_key: str) -> float:
         floor = self._urgency_floor(satisfaction_key)
@@ -603,20 +848,74 @@ class Agent:
     def update_satisfaction(self, satisfaction_key: str, satisfaction_delta: float) -> None:
         if satisfaction_key in self.satisfaction:
             new_val = self.satisfaction[satisfaction_key] + satisfaction_delta
-            # money 无上限（累计金额）；satiety / relax 范围 [0, 100]
+            # money 无上限（累计金额）；其他满足度限制在 [0, 100]。
             if satisfaction_key == "money":
                 self.satisfaction[satisfaction_key] = max(0.0, new_val)
             else:
-                self.satisfaction[satisfaction_key] = max(0.0, min(100.0, new_val))
+                self.satisfaction[satisfaction_key] = self._clamp_satisfaction(new_val)
             self.update_need_pressure(accumulate=False)
             self.update_urgency_from_satisfaction()
 
-    def _normalized_need_gap(self, satisfaction_key: str) -> float:
+    def _need_threshold(self, satisfaction_key: str) -> float | None:
+        """读取需求阈值，非法阈值返回 None。"""
+
         threshold = self.satisfaction_threshold.get(satisfaction_key)
         if not isinstance(threshold, (int, float)) or threshold <= 0:
+            return None
+        return float(threshold)
+
+    def _normalized_need_gap(self, satisfaction_key: str) -> float:
+        threshold = self._need_threshold(satisfaction_key)
+        if threshold is None:
             return 0.0
         satisfaction = self.satisfaction.get(satisfaction_key, 0.0)
         return max(0.0, (threshold - satisfaction) / threshold)
+
+    def _updated_pressure_memory(self, key: str, gap: float, memory: float, dt: float, accumulate: bool) -> float:
+        """根据当前缺口更新压力记忆；睡眠等场景可关闭累积。"""
+
+        if accumulate and dt > 0:
+            if gap > 0:
+                memory += gap * dt
+            else:
+                recovery_rate = self.config.pressure_recovery_rates.get(
+                    key,
+                    self.config.pressure_default_recovery_rate,
+                )
+                memory *= max(0.0, 1.0 - recovery_rate * dt)
+        return max(0.0, memory)
+
+    def _pressure_load_from_memory(self, key: str, memory: float) -> float:
+        """把压力记忆压缩为 [0, 1] 的负荷饱和值。"""
+
+        kappa = self.config.pressure_load_kappas.get(
+            key,
+            self.config.pressure_default_load_kappa,
+        )
+        load = 0.0 if kappa <= 0 else 1.0 - math.exp(-memory / kappa)
+        return self._clamp_unit(load)
+
+    def _effective_pressure_value(self, key: str, gap: float, load: float) -> float:
+        """合成瞬时缺口、残余负荷和放大项。"""
+
+        current_weight = self.config.pressure_current_weights.get(
+            key,
+            self.config.pressure_default_current_weight,
+        )
+        residual_weight = self.config.pressure_residual_weights.get(
+            key,
+            self.config.pressure_default_residual_weight,
+        )
+        amplification_weight = self.config.pressure_amplification_weights.get(
+            key,
+            self.config.pressure_default_amplification_weight,
+        )
+        pressure = (
+            current_weight * gap
+            + residual_weight * load
+            + amplification_weight * gap * load
+        )
+        return max(0.0, pressure)
 
     def update_need_pressure(self, accumulate: bool = True) -> None:
         """刷新需求压力层。
@@ -632,45 +931,14 @@ class Agent:
             self.need_gap[key] = gap
 
             memory = self.pressure_memory.get(key, 0.0)
-            if accumulate and dt > 0:
-                if gap > 0:
-                    memory += gap * dt
-                else:
-                    recovery_rate = self.config.pressure_recovery_rates.get(
-                        key,
-                        self.config.pressure_default_recovery_rate,
-                    )
-                    memory *= max(0.0, 1.0 - recovery_rate * dt)
-            memory = max(0.0, memory)
+            memory = self._updated_pressure_memory(key, gap, memory, dt, accumulate)
             self.pressure_memory[key] = memory
 
-            kappa = self.config.pressure_load_kappas.get(
-                key,
-                self.config.pressure_default_load_kappa,
-            )
             # 指数饱和避免 pressure_memory 无限增长后直接支配心理评测。
-            load = 0.0 if kappa <= 0 else 1.0 - math.exp(-memory / kappa)
-            load = max(0.0, min(1.0, load))
+            load = self._pressure_load_from_memory(key, memory)
             self.load_saturation[key] = load
 
-            current_weight = self.config.pressure_current_weights.get(
-                key,
-                self.config.pressure_default_current_weight,
-            )
-            residual_weight = self.config.pressure_residual_weights.get(
-                key,
-                self.config.pressure_default_residual_weight,
-            )
-            amplification_weight = self.config.pressure_amplification_weights.get(
-                key,
-                self.config.pressure_default_amplification_weight,
-            )
-            pressure = (
-                current_weight * gap
-                + residual_weight * load
-                + amplification_weight * gap * load
-            )
-            self.effective_pressure[key] = max(0.0, pressure)
+            self.effective_pressure[key] = self._effective_pressure_value(key, gap, load)
 
     def update_opinion(self, delta: float) -> None:
         self.opinion = clamp_opinion(self.opinion + delta)
@@ -715,10 +983,23 @@ class Agent:
 
         if self.sleeping:
             return
-        self.update_satisfaction("satiety", -self.config.satiety_decay_rate)
-        self.update_satisfaction("relax", -self.config.relax_decay_rate)
-        if self.task == "none":
-            self.update_satisfaction("relax", self.config.relax_increase_rate)
+        apply_need_delta(
+            self,
+            "satiety",
+            -self.config.satiety_decay_rate,
+            source="physiological",
+            reason="清醒状态下饱腹度自然消耗",
+            evidence={"rate": self.config.satiety_decay_rate},
+        )
+        if not self.did_move_this_tick and not self.did_work_this_tick:
+            apply_need_delta(
+                self,
+                "relax",
+                self.config.relax_increase_rate,
+                source="physiological",
+                reason="未移动且未工作时自然恢复 relax",
+                evidence={"rate": self.config.relax_increase_rate},
+            )
         self.update_need_pressure()
         self.update_urgency_from_satisfaction()
 
@@ -732,26 +1013,38 @@ class Agent:
         if not self.sleeping:
             return
         sleep_time = max(1, self.config.sleep_time)
-        self.update_satisfaction("relax", self.config.sleep_relax_recover / sleep_time)
+        apply_need_delta(
+            self,
+            "relax",
+            self.config.sleep_relax_recover / sleep_time,
+            source="physiological",
+            reason="睡眠期间恢复 relax",
+            evidence={
+                "bed_id": self.sleeping_on_bed_id,
+                "sleep_time": sleep_time,
+            },
+        )
 
-    def wakeup(self, bed) -> None:
-        """结束睡眠并把智能体从床位置移回周围空格。"""
+    def remember_action_tool(self, tool_name: str) -> None:
+        """记录近期动作类型，供高层需求被动衰减判断。"""
 
-        elapsed = self.world.time - self._sleep_start_time
-        changes = {
-            k: round(self.satisfaction.get(k, 0) - self._sleep_start_satisfaction.get(k, 0), 2)
-            for k in self.satisfaction
+        self.recent_action_tools.append(str(tool_name or ""))
+        max_len = max(30, self.config.self_actualization_repetition_window_ticks * 2)
+        if len(self.recent_action_tools) > max_len:
+            self.recent_action_tools = self.recent_action_tools[-max_len:]
+
+    def _sleep_satisfaction_changes(self) -> dict[str, float]:
+        """计算本次睡眠期间各需求满足度的变化。"""
+
+        return {
+            key: round(self.satisfaction.get(key, 0) - self._sleep_start_satisfaction.get(key, 0), 2)
+            for key in self.satisfaction
         }
-        change_str = "，".join(f"{k} {'+' if v >= 0 else ''}{v}" for k, v in changes.items())
-        self.sleeping = False
-        self.sleep_ticks_remaining = 0
-        self.sleeping_on_bed_id = None
-        self.task = "none"
-        if bed is not None:
-            bed.exit_bed(self)
-        # 在床周围找空格放置智能体
-        bx, by = self.position  # 当前位置 = 床的位置
-        placed = False
+
+    def _place_near_sleep_position(self) -> bool:
+        """睡醒后把智能体放回床周围空格；无空格时保留当前位置。"""
+
+        bx, by = self.position
         with self.world._world_lock:
             for dx, dy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]:
                 nx, ny = bx + dx, by + dy
@@ -759,13 +1052,26 @@ class Agent:
                     if self.world.map.is_empty(nx, ny):
                         self.world.map.place(nx, ny, self.id)
                         self.position = [nx, ny]
-                        placed = True
-                        break
-            if not placed:
-                if self.world.map.is_empty(bx, by):
-                    self.world.map.place(bx, by, self.id)
-                else:
-                    logger.warning("[%s] 睡眠结束但床周围无空位，暂留当前位置 %s", self.id, self.position)
+                        return True
+            if self.world.map.is_empty(bx, by):
+                self.world.map.place(bx, by, self.id)
+                return True
+        return False
+
+    def wakeup(self, bed) -> None:
+        """结束睡眠并把智能体从床位置移回周围空格。"""
+
+        elapsed = self.world.time - self._sleep_start_time
+        changes = self._sleep_satisfaction_changes()
+        change_str = "，".join(f"{k} {'+' if v >= 0 else ''}{v}" for k, v in changes.items())
+        self.sleeping = False
+        self.sleep_ticks_remaining = 0
+        self.sleeping_on_bed_id = None
+        self.task = "none"
+        if bed is not None:
+            bed.exit_bed(self)
+        if not self._place_near_sleep_position():
+            logger.warning("[%s] 睡眠结束但床周围无空位，暂留当前位置 %s", self.id, self.position)
         self.add_history("sleep_summary", f"睡眠结束，共经过 {elapsed} 步，期间需求变化：{change_str}")
         logger.info("[%s] 睡眠结束，经过 %d 步，需求变化 %s", self.id, elapsed, changes)
 

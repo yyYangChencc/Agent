@@ -1,16 +1,26 @@
 from __future__ import annotations
-import chromadb
 import hashlib
+import json
 import threading
 import time
 from pathlib import Path
 from typing import Any
-from chromadb.config import Settings
 from persona.agent_memory.controller import MemoryController
 from persona.agent_memory.structured_store import StructuredMemoryStore
 from persona.logger import get_logger
 
 logger = get_logger(__name__)
+
+try:
+    import chromadb
+    from chromadb.config import Settings
+except ModuleNotFoundError:
+    chromadb = None
+
+    def Settings(**kwargs):
+        """缺少 chromadb 时的占位配置，供内存后备客户端使用。"""
+
+        return kwargs
 
 DEFAULT_MEMORY_TYPE = "episodic"
 MEMORY_TYPE_ALIASES = {
@@ -25,6 +35,91 @@ CONTEXT_MEMORY_TYPES = {
 }
 
 
+class _InMemoryCollection:
+    """缺少 chromadb 时使用的最小内存 collection。"""
+
+    def __init__(self, name: str, metadata: dict | None = None):
+        self.name = name
+        self.metadata = metadata or {}
+        self._rows: dict[str, dict] = {}
+
+    def count(self) -> int:
+        return len(self._rows)
+
+    def upsert(self, *, embeddings=None, documents=None, metadatas=None, ids=None) -> None:
+        for index, memory_id in enumerate(ids or []):
+            self._rows[str(memory_id)] = {
+                "id": str(memory_id),
+                "embedding": (embeddings or [[]])[index],
+                "document": (documents or [""])[index],
+                "metadata": (metadatas or [{}])[index],
+            }
+
+    def query(self, *, query_embeddings=None, query_texts=None, n_results=3, where=None, **kwargs) -> dict:
+        rows = [row for row in self._rows.values() if self._matches_where(row.get("metadata") or {}, where)]
+        rows.sort(key=lambda row: float((row.get("metadata") or {}).get("saved_at", 0) or 0), reverse=True)
+        selected = rows[:max(0, int(n_results or 0))]
+        return {
+            "ids": [[row["id"] for row in selected]],
+            "documents": [[row["document"] for row in selected]],
+            "metadatas": [[row["metadata"] for row in selected]],
+            "distances": [[0.0 for _ in selected]],
+        }
+
+    def get(self, *, limit=None, include=None, where=None, **kwargs) -> dict:
+        rows = [row for row in self._rows.values() if self._matches_where(row.get("metadata") or {}, where)]
+        rows.sort(key=lambda row: float((row.get("metadata") or {}).get("saved_at", 0) or 0), reverse=True)
+        if limit is not None:
+            rows = rows[:max(0, int(limit))]
+        return {
+            "ids": [row["id"] for row in rows],
+            "documents": [row["document"] for row in rows],
+            "metadatas": [row["metadata"] for row in rows],
+        }
+
+    def _matches_where(self, metadata: dict, where: dict | None) -> bool:
+        if not where:
+            return True
+        for key, expected in where.items():
+            if key == "$and" and isinstance(expected, list):
+                return all(self._matches_where(metadata, item) for item in expected)
+            if key == "$or" and isinstance(expected, list):
+                return any(self._matches_where(metadata, item) for item in expected)
+            actual = metadata.get(key)
+            if isinstance(expected, dict):
+                if "$in" in expected and actual not in expected["$in"]:
+                    return False
+                if "$eq" in expected and actual != expected["$eq"]:
+                    return False
+            elif actual != expected:
+                return False
+        return True
+
+
+class _InMemoryChromaClient:
+    """缺少 chromadb 时的进程内后备客户端，只用于本地 mock/测试。"""
+
+    def __init__(self, *args, **kwargs):
+        self._collections: dict[str, _InMemoryCollection] = {}
+
+    def get_or_create_collection(self, *, name: str, metadata: dict | None = None, **kwargs):
+        if name not in self._collections:
+            self._collections[name] = _InMemoryCollection(name, metadata)
+        return self._collections[name]
+
+    def reset(self) -> None:
+        self._collections.clear()
+
+
+def _build_chroma_client(path: str, settings):
+    """构建 Chroma 客户端；缺包时自动降级为内存实现。"""
+
+    if chromadb is None:
+        logger.warning("未安装 chromadb，使用内存记忆后备；该模式不持久化向量记忆。")
+        return _InMemoryChromaClient(path=path, settings=settings)
+    return chromadb.PersistentClient(path=path, settings=settings)
+
+
 class MultiAgentMemoryManager:
     """多智能体长期记忆管理器。
 
@@ -33,7 +128,7 @@ class MultiAgentMemoryManager:
     """
 
     def __init__(self, llm_client, persist_directory: str = "./chroma_agents", structured_db_path: str | None = None):
-        self.client = chromadb.PersistentClient(
+        self.client = _build_chroma_client(
             path=persist_directory,
             settings=Settings(allow_reset=True),
         )
@@ -42,6 +137,8 @@ class MultiAgentMemoryManager:
         self._collection_lock = threading.Lock()
         self._embedding_cache: dict[str, list[float]] = {}
         self._embedding_cache_lock = threading.Lock()
+        self._retrieval_cache: dict[tuple, tuple[int, list[str]]] = {}
+        self._retrieval_cache_lock = threading.Lock()
         if structured_db_path is None:
             structured_db_path = str(Path(persist_directory) / "structured_memory.sqlite3")
         # SQLite 负责结构化状态和证据；MemoryController 负责把业务 payload 分流到 SQLite/Chroma。
@@ -98,6 +195,7 @@ class MultiAgentMemoryManager:
             ids=[memory_id],
         )
         self._record_derived_memory(agent_id, memory_id, memory_text, world_time, full_metadata)
+        self._invalidate_retrieval_cache(agent_id)
         return memory_id
 
     async def astore_agent_memory(self, agent_id: str, memory_text: str, world_time: int = 0, **metadata) -> str:
@@ -117,6 +215,7 @@ class MultiAgentMemoryManager:
             ids=[memory_id],
         )
         self._record_derived_memory(agent_id, memory_id, memory_text, world_time, full_metadata)
+        self._invalidate_retrieval_cache(agent_id)
         return memory_id
 
     def store_observation(self, agent_id: str, observation: Any) -> None:
@@ -146,6 +245,7 @@ class MultiAgentMemoryManager:
                 reward=reward,
                 world_time=world_time,
             )
+            self._invalidate_retrieval_cache(agent_id)
 
     def store_social_browse(self, agent_id: str, browse_payload: Any) -> None:
         """写入社交平台浏览结果，保留为 manager 方法以减少业务模块依赖。"""
@@ -153,6 +253,7 @@ class MultiAgentMemoryManager:
         controller = getattr(self, "controller", None)
         if controller is not None:
             controller.store_social_browse(agent_id, browse_payload)
+            self._invalidate_retrieval_cache(agent_id)
 
     def store_social_feedback(self, agent_id: str, feedback_payload: Any, *, world_time: int | None = None) -> None:
         """写入社交操作反馈，实际帖子快照和事件拆分由控制层完成。"""
@@ -160,6 +261,7 @@ class MultiAgentMemoryManager:
         controller = getattr(self, "controller", None)
         if controller is not None:
             controller.store_social_feedback(agent_id, feedback_payload, world_time=world_time)
+            self._invalidate_retrieval_cache(agent_id)
 
     def store_conversation(
         self,
@@ -181,6 +283,7 @@ class MultiAgentMemoryManager:
                 observation=observation,
                 world_time=world_time,
             )
+            self._invalidate_retrieval_cache(agent_id)
 
     def store_opinion_assessment(self, agent_id: str, assessment: Any) -> None:
         """写入观念评测结果，作为 reflective 记忆证据。"""
@@ -188,6 +291,7 @@ class MultiAgentMemoryManager:
         controller = getattr(self, "controller", None)
         if controller is not None:
             controller.store_opinion_assessment(agent_id, assessment)
+            self._invalidate_retrieval_cache(agent_id)
 
     def retrieve_context(
         self,
@@ -198,6 +302,7 @@ class MultiAgentMemoryManager:
         satisfaction_threshold: dict,
         n_results: int = 3,
         context: str = "world",
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """统一检索入口。
 
@@ -205,9 +310,24 @@ class MultiAgentMemoryManager:
         controller，则退回原来的 smart_retrieve，保证既有调用兼容。
         """
 
+        cache_key, cache_time = self._retrieval_cache_key(
+            "retrieve_context",
+            agent_id,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results,
+            context,
+            None,
+        )
+        cached = self._get_retrieval_cache(cache_key, cache_time)
+        if cached is not None:
+            return list(cached)
+
         controller = getattr(self, "controller", None)
         if controller is None:
-            return self.smart_retrieve(
+            result = self.smart_retrieve(
                 agent_id,
                 observation if isinstance(observation, str) else str(observation),
                 task,
@@ -216,7 +336,9 @@ class MultiAgentMemoryManager:
                 n_results=n_results,
                 context=context,
             )
-        return controller.retrieve_context(
+            self._set_retrieval_cache(cache_key, cache_time, result)
+            return result
+        result = controller.retrieve_context(
             agent_id,
             observation,
             task,
@@ -224,7 +346,10 @@ class MultiAgentMemoryManager:
             satisfaction_threshold,
             n_results=n_results,
             context=context,
+            timeout_seconds=timeout_seconds,
         )
+        self._set_retrieval_cache(cache_key, cache_time, result)
+        return result
 
     async def aretrieve_context(
         self,
@@ -235,12 +360,28 @@ class MultiAgentMemoryManager:
         satisfaction_threshold: dict,
         n_results: int = 3,
         context: str = "world",
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """异步统一检索入口，兼容没有结构化控制层的旧测试对象。"""
 
+        cache_key, cache_time = self._retrieval_cache_key(
+            "retrieve_context",
+            agent_id,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results,
+            context,
+            None,
+        )
+        cached = self._get_retrieval_cache(cache_key, cache_time)
+        if cached is not None:
+            return list(cached)
+
         controller = getattr(self, "controller", None)
         if controller is None:
-            return await self.asmart_retrieve(
+            result = await self.asmart_retrieve(
                 agent_id,
                 observation if isinstance(observation, str) else str(observation),
                 task,
@@ -249,7 +390,9 @@ class MultiAgentMemoryManager:
                 n_results=n_results,
                 context=context,
             )
-        return await controller.aretrieve_context(
+            self._set_retrieval_cache(cache_key, cache_time, result)
+            return result
+        result = await controller.aretrieve_context(
             agent_id,
             observation,
             task,
@@ -257,7 +400,10 @@ class MultiAgentMemoryManager:
             satisfaction_threshold,
             n_results=n_results,
             context=context,
+            timeout_seconds=timeout_seconds,
         )
+        self._set_retrieval_cache(cache_key, cache_time, result)
+        return result
 
     def execute_query_plan(
         self,
@@ -269,12 +415,28 @@ class MultiAgentMemoryManager:
         satisfaction_threshold: dict,
         n_results: int = 3,
         context: str = "world",
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """执行 LLM planner 输出的受控记忆查询计划；旧对象退回自动召回。"""
 
+        cache_key, cache_time = self._retrieval_cache_key(
+            "execute_query_plan",
+            agent_id,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results,
+            context,
+            query_plan,
+        )
+        cached = self._get_retrieval_cache(cache_key, cache_time)
+        if cached is not None:
+            return list(cached)
+
         controller = getattr(self, "controller", None)
         if controller is None:
-            return self.smart_retrieve(
+            result = self.smart_retrieve(
                 agent_id,
                 observation if isinstance(observation, str) else str(observation),
                 task,
@@ -283,7 +445,9 @@ class MultiAgentMemoryManager:
                 n_results=n_results,
                 context=context,
             )
-        return controller.execute_query_plan(
+            self._set_retrieval_cache(cache_key, cache_time, result)
+            return result
+        result = controller.execute_query_plan(
             agent_id,
             query_plan,
             observation,
@@ -292,7 +456,10 @@ class MultiAgentMemoryManager:
             satisfaction_threshold,
             n_results=n_results,
             context=context,
+            timeout_seconds=timeout_seconds,
         )
+        self._set_retrieval_cache(cache_key, cache_time, result)
+        return result
 
     async def aexecute_query_plan(
         self,
@@ -304,13 +471,29 @@ class MultiAgentMemoryManager:
         satisfaction_threshold: dict,
         n_results: int = 3,
         context: str = "world",
+        timeout_seconds: float | None = None,
     ) -> list[str]:
         """异步执行 LLM planner 输出的受控记忆查询计划。"""
+
+        cache_key, cache_time = self._retrieval_cache_key(
+            "execute_query_plan",
+            agent_id,
+            observation,
+            task,
+            urgency,
+            satisfaction_threshold,
+            n_results,
+            context,
+            query_plan,
+        )
+        cached = self._get_retrieval_cache(cache_key, cache_time)
+        if cached is not None:
+            return list(cached)
 
         controller = getattr(self, "controller", None)
         if controller is None:
             obs_text = observation if isinstance(observation, str) else str(observation)
-            return await self.asmart_retrieve(
+            result = await self.asmart_retrieve(
                 agent_id,
                 obs_text,
                 task,
@@ -319,7 +502,9 @@ class MultiAgentMemoryManager:
                 n_results=n_results,
                 context=context,
             )
-        return await controller.aexecute_query_plan(
+            self._set_retrieval_cache(cache_key, cache_time, result)
+            return result
+        result = await controller.aexecute_query_plan(
             agent_id,
             query_plan,
             observation,
@@ -328,7 +513,10 @@ class MultiAgentMemoryManager:
             satisfaction_threshold,
             n_results=n_results,
             context=context,
+            timeout_seconds=timeout_seconds,
         )
+        self._set_retrieval_cache(cache_key, cache_time, result)
+        return result
 
     def smart_retrieve(
         self,
@@ -373,38 +561,22 @@ class MultiAgentMemoryManager:
         """
 
         started_at = time.perf_counter()
-        collection = self.get_agent_collection(agent_id)
-
-        count = collection.count()
-        if count == 0:
+        prepared = self._prepare_vector_retrieval(agent_id, n_results, context, kwargs)
+        if prepared is None:
             return []
-        # 先多取一批，再在本地用任务/需求/重要性重排，提升与当前状态的匹配度。
-        fetch_n = min(max(n_results * 4, n_results), count)
-
-        allowed_memory_types = self._memory_types_for_context(context)
-        kwargs["where"] = self._build_where(agent_id, kwargs.get("where"))
+        collection, fetch_n, allowed_memory_types = prepared
 
         query_embedding = self._get_embedding(query)
         if not query_embedding:
             logger.warning("[%s] 获取查询 embedding 失败，返回空记忆", agent_id)
             return []
 
-        try:
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=fetch_n,
-                include=["documents", "metadatas", "distances"],
-                **kwargs,
-            )
-        except Exception as e:
-            if "Nothing found on disk" in str(e):
-                logger.warning("[%s] HNSW 索引损坏，重建 collection", agent_id)
-                self.client.delete_collection(self._get_collection_name(agent_id))
-                self.agent_collections.pop(agent_id, None)
-            else:
-                logger.error("[%s] 记忆查询失败: %s", agent_id, e, exc_info=True)
+        results = self._query_vector_collection(agent_id, collection, query_embedding, fetch_n, kwargs)
+        if results is None:
             return []
-        out = self._format_ranked_results(results, n_results, query, task, urgency or {}, allowed_memory_types)
+        out = self._format_retrieval_output(
+            results, n_results, query, task, urgency, allowed_memory_types, context
+        )
         logger.debug(
             "[%s] 记忆检索完成 context=%s returned=%d elapsed=%.3fs",
             agent_id,
@@ -464,23 +636,48 @@ class MultiAgentMemoryManager:
         """异步向量检索入口，与同步路径保持同样的召回和重排逻辑。"""
 
         started_at = time.perf_counter()
-        collection = self.get_agent_collection(agent_id)
-
-        count = collection.count()
-        if count == 0:
+        prepared = self._prepare_vector_retrieval(agent_id, n_results, context, kwargs)
+        if prepared is None:
             return []
-        fetch_n = min(max(n_results * 4, n_results), count)
-
-        allowed_memory_types = self._memory_types_for_context(context)
-        kwargs["where"] = self._build_where(agent_id, kwargs.get("where"))
+        collection, fetch_n, allowed_memory_types = prepared
 
         query_embedding = await self._aget_embedding(query)
         if not query_embedding:
             logger.warning("[%s] 获取查询 embedding 失败，返回空记忆", agent_id)
             return []
 
+        results = self._query_vector_collection(agent_id, collection, query_embedding, fetch_n, kwargs)
+        if results is None:
+            return []
+        out = self._format_retrieval_output(
+            results, n_results, query, task, urgency, allowed_memory_types, context
+        )
+        logger.debug(
+            "[%s] 异步记忆检索完成 context=%s returned=%d elapsed=%.3fs",
+            agent_id,
+            context,
+            len(out),
+            time.perf_counter() - started_at,
+        )
+        return out
+
+    def _prepare_vector_retrieval(self, agent_id: str, n_results: int, context: str, kwargs: dict):
+        """准备 Chroma 查询参数，并扩大召回数量供本地重排。"""
+
+        collection = self.get_agent_collection(agent_id)
+        count = collection.count()
+        if count == 0:
+            return None
+        # 先多取一批，再在本地用任务/需求/重要性重排。
+        fetch_n = min(max(n_results * 4, n_results), count)
+        kwargs["where"] = self._build_where(agent_id, kwargs.get("where"))
+        return collection, fetch_n, self._memory_types_for_context(context)
+
+    def _query_vector_collection(self, agent_id: str, collection, query_embedding: list[float], fetch_n: int, kwargs: dict):
+        """执行 Chroma 查询，并集中处理 HNSW 索引损坏。"""
+
         try:
-            results = collection.query(
+            return collection.query(
                 query_embeddings=[query_embedding],
                 n_results=fetch_n,
                 include=["documents", "metadatas", "distances"],
@@ -493,16 +690,29 @@ class MultiAgentMemoryManager:
                 self.agent_collections.pop(agent_id, None)
             else:
                 logger.error("[%s] 记忆查询失败: %s", agent_id, e, exc_info=True)
-            return []
-        out = self._format_ranked_results(results, n_results, query, task, urgency or {}, allowed_memory_types)
-        logger.debug(
-            "[%s] 异步记忆检索完成 context=%s returned=%d elapsed=%.3fs",
-            agent_id,
-            context,
-            len(out),
-            time.perf_counter() - started_at,
+            return None
+
+    def _format_retrieval_output(
+        self,
+        results: dict,
+        n_results: int,
+        query: str,
+        task: str,
+        urgency: dict | None,
+        allowed_memory_types: set[str] | None,
+        context: str,
+    ) -> list[str]:
+        """统一执行本地重排和格式化。"""
+
+        return self._format_ranked_results(
+            results,
+            n_results,
+            query,
+            task,
+            urgency or {},
+            allowed_memory_types,
+            context=context,
         )
-        return out
 
     def list_agent_memories(self, agent_id: str) -> list[dict[str, Any]]:
         """列出某个智能体的全部原始记忆，供前端记忆窗口展示。"""
@@ -703,6 +913,7 @@ class MultiAgentMemoryManager:
         task: str,
         urgency: dict,
         allowed_memory_types: set[str] | None = None,
+        context: str = "world",
     ) -> list[str]:
         """过滤不适合当前上下文的记忆类型，并返回重排后的文本。"""
 
@@ -712,6 +923,9 @@ class MultiAgentMemoryManager:
         rows = []
         for index, (doc, meta) in enumerate(zip(docs, metas)):
             if allowed_memory_types and meta.get("memory_type", DEFAULT_MEMORY_TYPE) not in allowed_memory_types:
+                continue
+            # 观念评测不能把上一轮评测结果当作本轮证据，避免分数自我强化。
+            if context == "opinion_assessment" and meta.get("source_type") == "opinion_assessment":
                 continue
             distance = distances[index] if index < len(distances) else 1.0
             rows.append((self._memory_score(doc, meta, distance, query, task, urgency), doc, meta))
@@ -797,7 +1011,112 @@ class MultiAgentMemoryManager:
         self.agent_collections.clear()
         with self._embedding_cache_lock:
             self._embedding_cache.clear()
+        with self._retrieval_cache_lock:
+            self._retrieval_cache.clear()
         logger.info("已清空所有智能体记忆存储")
+
+    def _retrieval_cache_key(
+        self,
+        method: str,
+        agent_id: str,
+        observation: Any,
+        task: str,
+        urgency: dict,
+        satisfaction_threshold: dict,
+        n_results: int,
+        context: str,
+        query_plan: Any,
+    ) -> tuple | None:
+        """生成短期检索缓存键；ttl<=0 时禁用缓存。"""
+
+        ttl = self._retrieval_cache_ttl_ticks()
+        if ttl <= 0:
+            return None, 0
+        world_time = self._extract_world_time(observation)
+        cache_time = world_time // ttl if world_time >= 0 else int(time.time() // max(1, ttl))
+        payload = {
+            "method": method,
+            "agent_id": agent_id,
+            "query_text": self._cache_query_text(observation),
+            "query_plan": query_plan,
+            "task": task,
+            "urgency": urgency,
+            "satisfaction_threshold": satisfaction_threshold,
+            "n_results": n_results,
+            "context": context,
+        }
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return (method, agent_id, context, hashlib.md5(text.encode("utf-8")).hexdigest()), cache_time
+
+    def _cache_query_text(self, observation: Any) -> str:
+        """只取检索相关文本，避免可见对象细节让 TTL 缓存完全失效。"""
+
+        if isinstance(observation, str):
+            return observation[:500]
+        if isinstance(observation, dict):
+            compact = {
+                "type": observation.get("type"),
+                "task_like": observation.get("task"),
+                "social": observation.get("social"),
+                "posts": observation.get("posts"),
+                "receiver_id": observation.get("receiver_id"),
+            }
+            return json.dumps(compact, ensure_ascii=False, sort_keys=True, default=str)[:500]
+        return str(observation)[:500]
+
+    def _get_retrieval_cache(self, key: tuple | None, cache_time: int) -> list[str] | None:
+        if key is None:
+            return None
+        with self._retrieval_cache_lock:
+            cached = self._retrieval_cache.get(key)
+        if cached is None:
+            return None
+        cached_time, value = cached
+        if cached_time != cache_time:
+            return None
+        return list(value)
+
+    def _set_retrieval_cache(self, key: tuple | None, cache_time: int, value: list[str]) -> None:
+        if key is None:
+            return
+        with self._retrieval_cache_lock:
+            self._retrieval_cache[key] = (cache_time, list(value))
+
+    def _invalidate_retrieval_cache(self, agent_id: str | None = None) -> None:
+        """写入新记忆后清空相关缓存，避免旧证据继续被复用。"""
+
+        with self._retrieval_cache_lock:
+            if not agent_id:
+                self._retrieval_cache.clear()
+                return
+            stale_keys = [key for key in self._retrieval_cache if len(key) > 1 and key[1] == agent_id]
+            for key in stale_keys:
+                self._retrieval_cache.pop(key, None)
+
+    def _retrieval_cache_ttl_ticks(self) -> int:
+        config = getattr(self.llm_client, "_config", None)
+        try:
+            return max(0, int(getattr(config, "memory_retrieval_ttl_ticks", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _extract_world_time(self, observation: Any) -> int:
+        if isinstance(observation, dict):
+            try:
+                return int(observation.get("time", -1))
+            except (TypeError, ValueError):
+                return -1
+        if isinstance(observation, str):
+            try:
+                parsed = json.loads(observation)
+            except json.JSONDecodeError:
+                return -1
+            if isinstance(parsed, dict):
+                try:
+                    return int(parsed.get("time", -1))
+                except (TypeError, ValueError):
+                    return -1
+        return -1
 
     def backup_agent_memory(self, agent_id: str, backup_path: str | None = None) -> str:
         if backup_path is None:

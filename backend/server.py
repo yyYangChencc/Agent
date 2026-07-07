@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,11 +13,12 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from default_scenario import build_default_runtime
 from persona.logger import setup_logging
 from persona.logger import get_logger
 from persona.runtime import SimulationRuntime
 from persona.history_recorder import HistoryRecorder
+from persona.run_archive import archive_runtime_run
+from scenarios.registry import get_scenario, list_scenarios
 from world.serializer import snapshot
 
 logger = get_logger(__name__)
@@ -29,12 +31,29 @@ logger = get_logger(__name__)
 rt: SimulationRuntime | None = None
 # 历史记录器，随 rt 一起重建
 _recorder: HistoryRecorder | None = None
+# 当前前端运行场景；默认保持旧 Web 入口的小镇场景。
+current_scenario_name = "default_town"
 # 当前所有已连接的 WebSocket 客户端，广播时遍历
 clients: set[WebSocket] = set()
 # 仿真控制状态，running=True 时自动步进循环运行
 sim_state: dict = {"running": False, "speed": 1.0}
 # 自动步进 asyncio Task 引用，pause/reset 时用于取消
 _sim_task: asyncio.Task | None = None
+# 最近一次 reset 前归档的实验输出，供前端提示摘要和图表链接。
+_last_archived_run: dict | None = None
+
+
+HISTORY_DIR = Path(__file__).parent / "history"
+HISTORY_VIEW_FILES = {
+    "config_snapshot.json",
+    "experiment_summary.md",
+    "opinion_trends.svg",
+    "effective_pressure_trends.svg",
+    "mediator_peak_trends.svg",
+    "polarization_report.md",
+    "polarization_metrics.csv",
+    "polarization_agent_shift.csv",
+}
 
 
 def _simulation_step_limit() -> int:
@@ -54,8 +73,11 @@ def _status_payload(*, limit_reached: bool | None = None) -> dict:
         "type": "status",
         "running": sim_state["running"],
         "speed": sim_state["speed"],
+        "scenario_name": current_scenario_name,
+        "scenarios": list_scenarios(),
         "max_ticks": _simulation_step_limit(),
         "limit_reached": reached,
+        "archived_run": _last_archived_run,
     }
 
 
@@ -63,14 +85,27 @@ def _status_payload(*, limit_reached: bool | None = None) -> dict:
 # 仿真初始化（与 main.py 保持一致的智能体配置）
 # ---------------------------------------------------------------------------
 
-def _build_runtime() -> SimulationRuntime:
-    """构建仿真运行时并初始化默认场景。"""
-    global _recorder
+def _build_runtime(scenario_name: str | None = None) -> SimulationRuntime:
+    """按场景名构建仿真运行时。"""
+    global _recorder, current_scenario_name
     if _recorder is not None:
         _recorder.close()
     _recorder = HistoryRecorder()
 
-    return build_default_runtime(history_recorder=_recorder)
+    selected = scenario_name or current_scenario_name
+    scenario = get_scenario(selected)
+    current_scenario_name = selected
+    return scenario.build_runtime(history_recorder=_recorder)
+
+
+def _finalize_current_run(reason: str) -> dict | None:
+    """在重建 runtime 前归档当前已运行 tick 的 CSV、JSONL、摘要和图表。"""
+
+    global _last_archived_run
+    archived = archive_runtime_run(rt, _recorder, reason=reason, scenario_name=current_scenario_name)
+    if archived is not None:
+        _last_archived_run = archived
+    return archived
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +195,7 @@ async def lifespan(app: FastAPI):
     global rt
     setup_logging()
     load_dotenv()
-    rt = _build_runtime()
+    rt = _build_runtime(os.environ.get("SIM_SCENARIO") or "default_town")
     yield
 
 
@@ -181,6 +216,28 @@ async def serve_index():
     if index.exists():
         return FileResponse(str(index))
     return JSONResponse({"message": "Frontend not built. Run: cd frontend && npm run build"})
+
+
+@app.get("/api/history/latest")
+async def latest_archived_run():
+    """返回最近一次 reset 前归档的实验输出信息。"""
+
+    return {"archived_run": _last_archived_run}
+
+
+@app.get("/history/{run_name}/{file_name}")
+async def serve_history_file(run_name: str, file_name: str):
+    """提供 reset 归档后的摘要和图表文件。"""
+
+    if file_name not in HISTORY_VIEW_FILES:
+        return JSONResponse({"error": "history file is not exposed"}, status_code=404)
+    target = (HISTORY_DIR / run_name / file_name).resolve()
+    history_root = HISTORY_DIR.resolve()
+    if history_root not in target.parents:
+        return JSONResponse({"error": "invalid history path"}, status_code=400)
+    if not target.exists():
+        return JSONResponse({"error": "history file not found"}, status_code=404)
+    return FileResponse(str(target))
 
 
 def _agent_or_error(agent_id: str):
@@ -336,8 +393,11 @@ async def ws_endpoint(websocket: WebSocket):
             "state": snapshot(rt.world, rt.platform),
             "running": sim_state["running"],
             "speed": sim_state["speed"],
+            "scenario_name": current_scenario_name,
+            "scenarios": list_scenarios(),
             "max_ticks": _simulation_step_limit(),
             "limit_reached": _limit_reached(),
+            "archived_run": _last_archived_run,
         }, ensure_ascii=False))
         async for text in websocket.iter_text():
             try:
@@ -391,14 +451,26 @@ async def _handle_cmd(msg: dict) -> None:
             _sim_task = None
         # _build_runtime() 会调用 LLM 初始化，放到线程池避免阻塞事件循环
         loop = asyncio.get_event_loop()
-        rt = await loop.run_in_executor(None, _build_runtime)
+        scenario_name = msg.get("scenario") or current_scenario_name
+        if scenario_name not in list_scenarios():
+            await broadcast({
+                "type": "error",
+                "message": f"unknown scenario: {scenario_name}",
+                "scenarios": list_scenarios(),
+            })
+            return
+        archived_run = await loop.run_in_executor(None, _finalize_current_run, "reset")
+        rt = await loop.run_in_executor(None, _build_runtime, scenario_name)
         await broadcast({
             "type": "init",
             "state": snapshot(rt.world, rt.platform),
             "running": False,
             "speed": sim_state["speed"],
+            "scenario_name": current_scenario_name,
+            "scenarios": list_scenarios(),
             "max_ticks": _simulation_step_limit(),
             "limit_reached": False,
+            "archived_run": archived_run,
         })
 
 

@@ -33,6 +33,20 @@ def _text_id(value: Any) -> str:
     return str(value)
 
 
+def _text_ids(values: list[Any] | None, *, exclude_system: bool = False) -> list[str]:
+    """把一组索引字段转成非空文本 ID。"""
+
+    ids: list[str] = []
+    for value in values or []:
+        text = _text_id(value)
+        if not text:
+            continue
+        if exclude_system and text == "system":
+            continue
+        ids.append(text)
+    return ids
+
+
 def _region_id(region: Any) -> str:
     if isinstance(region, dict):
         return _text_id(region.get("id"))
@@ -175,6 +189,7 @@ class StructuredMemoryStore:
                     agent_id TEXT NOT NULL,
                     post_id TEXT NOT NULL,
                     author_id TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL DEFAULT '',
                     content TEXT NOT NULL DEFAULT '',
                     post_time INTEGER,
                     likes INTEGER NOT NULL DEFAULT 0,
@@ -273,8 +288,27 @@ class StructuredMemoryStore:
                     ON memory_access_log(agent_id, world_time DESC, id DESC);
                 """
             )
+            self._ensure_columns_locked("social_posts", {"topic": "TEXT NOT NULL DEFAULT ''"})
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_social_posts_agent_topic
+                    ON social_posts(agent_id, topic, last_seen_at DESC)
+                """
+            )
             self._migrate_person_entity_states_locked()
             self._conn.commit()
+
+    def _ensure_columns_locked(self, table_name: str, columns: dict[str, str]) -> None:
+        """为已有 SQLite 库补齐新增列，避免升级后必须手动删库。"""
+
+        existing_columns = {
+            str(row["name"])
+            for row in self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        for column_name, column_type in columns.items():
+            if column_name in existing_columns:
+                continue
+            self._conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     def _migrate_person_entity_states_locked(self) -> None:
         """把旧人物状态迁移为人物档案，并让旧 person entity_states 不再参与默认检索。"""
@@ -750,16 +784,17 @@ class StructuredMemoryStore:
             self._conn.execute(
                 """
                 INSERT INTO social_posts (
-                    agent_id, post_id, author_id, content, post_time, likes,
+                    agent_id, post_id, author_id, topic, content, post_time, likes,
                     dislikes, reposts, comments_count, opinion_index,
                     is_news, is_rumor, first_seen_at, last_seen_at,
                     source_type, payload_json, importance, confidence, valid,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id, post_id)
                 DO UPDATE SET
                     author_id = excluded.author_id,
+                    topic = excluded.topic,
                     content = excluded.content,
                     post_time = excluded.post_time,
                     likes = excluded.likes,
@@ -781,6 +816,7 @@ class StructuredMemoryStore:
                     agent_id,
                     post_id,
                     _text_id(post.get("author_id")),
+                    _text_id(post.get("topic")),
                     _text_id(post.get("content")),
                     post.get("time"),
                     int(post.get("likes") or 0),
@@ -1165,7 +1201,7 @@ class StructuredMemoryStore:
     def get_person_profiles(self, agent_id: str, target_agent_ids: list[Any], limit: int = 20) -> list[dict[str, Any]]:
         """按人物 id 精确读取人物档案，用于 world/social/conversation 召回。"""
 
-        ids = [_text_id(value) for value in target_agent_ids if _text_id(value) and _text_id(value) != "system"]
+        ids = _text_ids(target_agent_ids, exclude_system=True)
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
@@ -1237,7 +1273,7 @@ class StructuredMemoryStore:
     def get_entity_states(self, agent_id: str, entity_ids: list[Any], limit: int = 20) -> list[dict[str, Any]]:
         """按实体 id 精确读取当前状态，用于 world/conversation 检索路由。"""
 
-        ids = [_text_id(value) for value in entity_ids if _text_id(value)]
+        ids = _text_ids(entity_ids)
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
@@ -1296,7 +1332,7 @@ class StructuredMemoryStore:
         return self._fetch_all(sql, params)
 
     def get_social_posts(self, agent_id: str, post_ids: list[Any], limit: int = 20) -> list[dict[str, Any]]:
-        ids = [_text_id(value) for value in post_ids if _text_id(value)]
+        ids = _text_ids(post_ids)
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
@@ -1321,7 +1357,7 @@ class StructuredMemoryStore:
     def get_social_posts_by_authors(self, agent_id: str, author_ids: list[Any], limit: int = 10) -> list[dict[str, Any]]:
         """按作者读取近期帖子，用于社交 planner 查询人物相关线上内容。"""
 
-        ids = [_text_id(value) for value in author_ids if _text_id(value) and _text_id(value) != "system"]
+        ids = _text_ids(author_ids, exclude_system=True)
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)

@@ -35,6 +35,18 @@ function OpinionBar({ value }: { value: number }) {
 
 function PostCard({ post }: { post: PostState }) {
   const [open, setOpen] = useState(false)
+  const sourceLabel =
+    post.source_type === 'official_news'
+      ? '官方新闻'
+      : post.source_type === 'influencer'
+        ? '投放者'
+        : '智能体'
+  const sourceClass =
+    post.source_type === 'official_news'
+      ? 'bg-[#4f8fc0] text-[#f8f5d8]'
+      : post.source_type === 'influencer'
+        ? 'bg-[#9b5b43] text-[#f8f5d8]'
+        : 'bg-[#d7b36a] text-[#243225]'
 
   return (
     <div className="border-2 border-[#25251c] bg-[#f8f5d8] rounded p-2.5 space-y-1.5 shadow-[2px_2px_0_#25251c]">
@@ -42,8 +54,19 @@ function PostCard({ post }: { post: PostState }) {
         <span className={`text-xs font-semibold ${agentColor(post.author_id)}`}>
           {post.author_id}
         </span>
-        <span className="text-xs text-[#6c584c] font-mono">t={post.time}</span>
+        <div className="flex items-center gap-1">
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${sourceClass}`}>
+            {sourceLabel}
+          </span>
+          {post.is_rumor && (
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#b94b4b] text-[#f8f5d8]">
+              极化投放
+            </span>
+          )}
+          <span className="text-xs text-[#6c584c] font-mono">t={post.time}</span>
+        </div>
       </div>
+      {post.topic && <div className="text-[11px] text-[#6c584c]">主题：{post.topic}</div>}
       <div className="text-xs text-[#243225] leading-relaxed break-words">{post.content}</div>
       <OpinionBar value={post.opinion_index} />
       <div className="flex items-center gap-3 text-xs text-[#4b3f2f]">
@@ -67,6 +90,8 @@ function PostCard({ post }: { post: PostState }) {
               {c.time !== null && (
                 <span className="text-[#6c584c] ml-1 font-mono">t={c.time}</span>
               )}
+              <span className="ml-2 text-[#6c584c]">认同原帖</span>
+              <OpinionBar value={c.agreement_to_post} />
               <span className="text-[#243225] ml-1">{c.content}</span>
             </div>
           ))}

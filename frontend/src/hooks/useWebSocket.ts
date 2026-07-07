@@ -32,9 +32,9 @@ export function useWebSocket() {
           if (msg.type === 'init') {
             // init 表示后端给出一份完整初始快照；旧图表历史不再适用。
             resetHistory()
-            setStatus(msg.running ?? false, msg.speed ?? 1.0)
+            setStatus(msg.running ?? false, msg.speed ?? 1.0, msg.scenario_name, msg.scenarios, msg.archived_run ?? null)
           } else if (msg.type === 'status') {
-            setStatus(msg.running, msg.speed)
+            setStatus(msg.running, msg.speed, msg.scenario_name, msg.scenarios, msg.archived_run ?? undefined)
           }
         } catch {
           // 忽略格式错误的消息
