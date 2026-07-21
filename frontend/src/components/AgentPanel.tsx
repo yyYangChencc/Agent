@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useSimStore, AgentState, ObjectState, AgentHistoryPoint } from '../store/simStore'
 import { AgentCharts } from './AgentCharts'
+import { AgentMemoryModal } from './AgentMemoryModal'
 
 // 物品种类元数据：按 objects.py 中 self.kind 值为键，提供前端展示信息
 // desc 仅作为后端 get_desc() 返回空字符串时的兜底；func 始终展示
@@ -286,14 +287,14 @@ export function PsychologicalRoleCardBlock({ agent }: { agent: AgentState }) {
   )
 }
 
-function AgentDetail({ agent }: { agent: AgentState }) {
+function AgentDetail({ agent, onOpenMemory }: { agent: AgentState; onOpenMemory: () => void }) {
   // last_think 内容可能很长，默认折叠
   const [thinkOpen, setThinkOpen] = useState(false)
   const [chartOpen, setChartOpen] = useState(false)
   const history = useSimStore((s) => s.agentHistory[agent.id] ?? EMPTY_HISTORY)
   const stableHistory = useMemo(() => history, [history])
-  const openAgentWindow = (kind: 'memories' | 'trajectory') => {
-    window.open(`/agent/${encodeURIComponent(agent.id)}/${kind}`, '_blank', 'noopener,noreferrer')
+  const openTrajectoryWindow = () => {
+    window.open(`/agent/${encodeURIComponent(agent.id)}/trajectory`, '_blank', 'noopener,noreferrer')
   }
 
   return (
@@ -302,13 +303,13 @@ function AgentDetail({ agent }: { agent: AgentState }) {
       <div className="flex gap-2">
         <button
           className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600"
-          onClick={() => openAgentWindow('memories')}
+          onClick={onOpenMemory}
         >
           记忆
         </button>
         <button
           className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600"
-          onClick={() => openAgentWindow('trajectory')}
+          onClick={openTrajectoryWindow}
         >
           轨迹
         </button>
@@ -425,6 +426,7 @@ function AgentRow({ agent, selected, onClick }: { agent: AgentState; selected: b
 
 // 右侧智能体面板：上半部分为列表，下半部分为选中智能体或物品详情
 export function AgentPanel() {
+  const [memoryAgentId, setMemoryAgentId] = useState<string | null>(null)
   const worldState = useSimStore((s) => s.worldState)
   const selectedAgentId = useSimStore((s) => s.selectedAgentId)
   const selectedObjectId = useSimStore((s) => s.selectedObjectId)
@@ -455,13 +457,25 @@ export function AgentPanel() {
       {/* 详情区域固定在面板底部，智能体和物品互斥显示 */}
       {selected && (
         <div className="border-t border-gray-700 overflow-y-auto max-h-[32rem]">
-          <AgentDetail agent={selected} />
+          <AgentDetail
+            key={selected.id}
+            agent={selected}
+            onOpenMemory={() => setMemoryAgentId(selected.id)}
+          />
         </div>
       )}
       {!selected && selectedObject && (
         <div className="border-t border-gray-700 overflow-y-auto max-h-80">
           <ObjectDetail object={selectedObject} />
         </div>
+      )}
+      {/* 记忆面板通过 portal 挂到 body，避免被右侧栏裁剪。 */}
+      {memoryAgentId && (
+        <AgentMemoryModal
+          key={memoryAgentId}
+          agentId={memoryAgentId}
+          onClose={() => setMemoryAgentId(null)}
+        />
       )}
     </div>
   )

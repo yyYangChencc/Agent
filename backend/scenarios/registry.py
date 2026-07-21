@@ -8,6 +8,9 @@ SCENARIO_MODULES = {
     "default_town": "scenarios.default_town",
     "iac_gay_marriage": "scenarios.iac_gay_marriage",
     "iac_gay_marriage_10": "scenarios.iac_gay_marriage_10",
+    "iac_gay_marriage_30_balanced": "scenarios.iac_gay_marriage_30_balanced",
+    "iac_gay_marriage_30_cross_side": "scenarios.iac_gay_marriage_30_cross_side",
+    "iac_gay_marriage_30_same_side_isolated": "scenarios.iac_gay_marriage_30_same_side_isolated",
     "jiang_ping_polarization": "scenarios.jiang_ping_polarization",
 }
 

@@ -25,6 +25,30 @@ def _json_loads(value: str | None) -> Any:
         return value
 
 
+def _json_field_value(value: Any) -> str | None:
+    """把可选结构化字段转换为 SQLite JSON 文本。"""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            json.loads(value)
+            return value
+        except json.JSONDecodeError:
+            pass
+    return _json_dumps(value)
+
+
+def _provenance_value(value: Any) -> str | None:
+    """保留文本来源；结构化来源使用稳定 JSON 文本。"""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return _json_dumps(value)
+
+
 def _text_id(value: Any) -> str:
     """把实体、帖子等索引字段统一转成文本，避免 SQLite 主键类型漂移。"""
 
@@ -95,6 +119,17 @@ class StructuredMemoryStore:
                     related_agent_id TEXT,
                     object_id TEXT,
                     post_id TEXT,
+                    episode_id TEXT,
+                    platform_event_id TEXT,
+                    feed_request_id TEXT,
+                    comment_id TEXT,
+                    parent_comment_id TEXT,
+                    root_comment_id TEXT,
+                    topic TEXT NOT NULL DEFAULT '',
+                    before_state_json TEXT,
+                    after_state_json TEXT,
+                    outcome_json TEXT,
+                    provenance TEXT,
                     summary TEXT NOT NULL DEFAULT '',
                     payload_json TEXT NOT NULL,
                     importance REAL NOT NULL DEFAULT 0.5,
@@ -122,6 +157,10 @@ class StructuredMemoryStore:
                     first_seen_at INTEGER NOT NULL DEFAULT 0,
                     last_seen_at INTEGER NOT NULL DEFAULT 0,
                     source_type TEXT NOT NULL DEFAULT '',
+                    repost_of_post_id TEXT,
+                    root_post_id TEXT,
+                    source_author_id TEXT,
+                    feed_seen_count INTEGER NOT NULL DEFAULT 0,
                     payload_json TEXT NOT NULL,
                     importance REAL NOT NULL DEFAULT 0.5,
                     confidence REAL NOT NULL DEFAULT 0.5,
@@ -236,12 +275,16 @@ class StructuredMemoryStore:
                     memory_type TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     world_time INTEGER NOT NULL DEFAULT 0,
+                    episode_id TEXT,
                     entity_id TEXT,
                     related_agent_id TEXT,
                     object_id TEXT,
                     post_id TEXT,
                     task TEXT,
                     need_key TEXT,
+                    evidence_event_ids_json TEXT,
+                    valid_from INTEGER,
+                    valid_to INTEGER,
                     summary TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     importance REAL NOT NULL DEFAULT 0.5,
@@ -288,11 +331,75 @@ class StructuredMemoryStore:
                     ON memory_access_log(agent_id, world_time DESC, id DESC);
                 """
             )
-            self._ensure_columns_locked("social_posts", {"topic": "TEXT NOT NULL DEFAULT ''"})
+            self._ensure_columns_locked(
+                "memory_events",
+                {
+                    "episode_id": "TEXT",
+                    "platform_event_id": "TEXT",
+                    "feed_request_id": "TEXT",
+                    "comment_id": "TEXT",
+                    "parent_comment_id": "TEXT",
+                    "root_comment_id": "TEXT",
+                    "topic": "TEXT NOT NULL DEFAULT ''",
+                    "before_state_json": "TEXT",
+                    "after_state_json": "TEXT",
+                    "outcome_json": "TEXT",
+                    "provenance": "TEXT",
+                },
+            )
+            self._ensure_columns_locked(
+                "social_posts",
+                {
+                    "topic": "TEXT NOT NULL DEFAULT ''",
+                    "repost_of_post_id": "TEXT",
+                    "root_post_id": "TEXT",
+                    "source_author_id": "TEXT",
+                    "feed_seen_count": "INTEGER NOT NULL DEFAULT 0",
+                },
+            )
+            self._ensure_columns_locked(
+                "derived_memories",
+                {
+                    "episode_id": "TEXT",
+                    "evidence_event_ids_json": "TEXT",
+                    "valid_from": "INTEGER",
+                    "valid_to": "INTEGER",
+                },
+            )
             self._conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_social_posts_agent_topic
                     ON social_posts(agent_id, topic, last_seen_at DESC)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_events_agent_episode
+                    ON memory_events(agent_id, episode_id, world_time DESC, id DESC)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_events_agent_platform
+                    ON memory_events(agent_id, platform_event_id, world_time DESC, id DESC)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_events_agent_feed
+                    ON memory_events(agent_id, feed_request_id, world_time DESC, id DESC)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_social_posts_agent_root
+                    ON social_posts(agent_id, root_post_id, last_seen_at DESC)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_derived_agent_episode
+                    ON derived_memories(agent_id, episode_id, world_time DESC)
                 """
             )
             self._migrate_person_entity_states_locked()
@@ -383,6 +490,20 @@ class StructuredMemoryStore:
         related_agent_id: Any = None,
         object_id: Any = None,
         post_id: Any = None,
+        episode_id: Any = None,
+        platform_event_id: Any = None,
+        feed_request_id: Any = None,
+        comment_id: Any = None,
+        parent_comment_id: Any = None,
+        root_comment_id: Any = None,
+        topic: Any = None,
+        before_state: Any = None,
+        after_state: Any = None,
+        outcome: Any = None,
+        before_state_json: Any = None,
+        after_state_json: Any = None,
+        outcome_json: Any = None,
+        provenance: Any = None,
         importance: float = 0.5,
         confidence: float = 0.5,
         valid: bool = True,
@@ -393,16 +514,59 @@ class StructuredMemoryStore:
         后续状态更新、冲突调解和评测都可以追溯到这里的 payload。
         """
 
+        payload_data = payload if isinstance(payload, dict) else {}
+        post_data = payload_data.get("post") if isinstance(payload_data.get("post"), dict) else {}
+        episode_value = episode_id if episode_id is not None else payload_data.get("episode_id")
+        platform_event_value = (
+            platform_event_id
+            if platform_event_id is not None
+            else payload_data.get("platform_event_id")
+        )
+        feed_request_value = (
+            feed_request_id
+            if feed_request_id is not None
+            else payload_data.get("feed_request_id")
+        )
+        comment_value = comment_id if comment_id is not None else payload_data.get("comment_id")
+        parent_comment_value = (
+            parent_comment_id
+            if parent_comment_id is not None
+            else payload_data.get("parent_comment_id")
+        )
+        root_comment_value = (
+            root_comment_id
+            if root_comment_id is not None
+            else payload_data.get("root_comment_id")
+        )
+        if topic is not None:
+            topic_value = topic
+        elif payload_data.get("topic") is not None:
+            topic_value = payload_data.get("topic")
+        else:
+            topic_value = post_data.get("topic")
+        before_state_value = before_state_json if before_state_json is not None else before_state
+        if before_state_value is None:
+            before_state_value = payload_data.get("before_state_json", payload_data.get("before_state"))
+        after_state_value = after_state_json if after_state_json is not None else after_state
+        if after_state_value is None:
+            after_state_value = payload_data.get("after_state_json", payload_data.get("after_state"))
+        outcome_value = outcome_json if outcome_json is not None else outcome
+        if outcome_value is None:
+            outcome_value = payload_data.get("outcome_json", payload_data.get("outcome"))
+        provenance_value = provenance if provenance is not None else payload_data.get("provenance")
         now = time.time()
         with self._lock:
             cursor = self._conn.execute(
                 """
                 INSERT INTO memory_events (
                     agent_id, memory_type, source_type, event_type, world_time,
-                    entity_id, related_agent_id, object_id, post_id, summary,
-                    payload_json, importance, confidence, valid, created_at, updated_at
+                    entity_id, related_agent_id, object_id, post_id, episode_id,
+                    platform_event_id, feed_request_id, comment_id, parent_comment_id,
+                    root_comment_id, topic, before_state_json, after_state_json,
+                    outcome_json, provenance, summary, payload_json, importance,
+                    confidence, valid, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent_id,
@@ -414,6 +578,17 @@ class StructuredMemoryStore:
                     _text_id(related_agent_id) or None,
                     _text_id(object_id) or None,
                     _text_id(post_id) or None,
+                    _text_id(episode_value) or None,
+                    _text_id(platform_event_value) or None,
+                    _text_id(feed_request_value) or None,
+                    _text_id(comment_value) or None,
+                    _text_id(parent_comment_value) or None,
+                    _text_id(root_comment_value) or None,
+                    _text_id(topic_value),
+                    _json_field_value(before_state_value),
+                    _json_field_value(after_state_value),
+                    _json_field_value(outcome_value),
+                    _provenance_value(provenance_value),
                     summary,
                     _json_dumps(payload),
                     float(importance),
@@ -766,6 +941,10 @@ class StructuredMemoryStore:
         *,
         source_type: str,
         world_time: int,
+        repost_of_post_id: Any = None,
+        root_post_id: Any = None,
+        source_author_id: Any = None,
+        feed_seen_count: int | None = None,
         importance: float = 0.55,
         confidence: float = 0.8,
         valid: bool = True,
@@ -781,16 +960,30 @@ class StructuredMemoryStore:
             return
         now = time.time()
         with self._lock:
+            existing = self._conn.execute(
+                "SELECT feed_seen_count FROM social_posts WHERE agent_id = ? AND post_id = ?",
+                (agent_id, post_id),
+            ).fetchone()
+            # 浏览来源默认累计曝光次数；其他来源保持旧值，显式传值时直接采用。
+            if feed_seen_count is None:
+                old_seen_count = int(existing["feed_seen_count"] or 0) if existing is not None else 0
+                next_seen_count = old_seen_count + (1 if source_type == "social_browse" else 0)
+            else:
+                next_seen_count = max(0, int(feed_seen_count))
+            repost_of = repost_of_post_id if repost_of_post_id is not None else post.get("repost_of_post_id")
+            root_post = root_post_id if root_post_id is not None else post.get("root_post_id")
+            source_author = source_author_id if source_author_id is not None else post.get("source_author_id")
             self._conn.execute(
                 """
                 INSERT INTO social_posts (
                     agent_id, post_id, author_id, topic, content, post_time, likes,
                     dislikes, reposts, comments_count, opinion_index,
                     is_news, is_rumor, first_seen_at, last_seen_at,
-                    source_type, payload_json, importance, confidence, valid,
+                    source_type, repost_of_post_id, root_post_id, source_author_id,
+                    feed_seen_count, payload_json, importance, confidence, valid,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id, post_id)
                 DO UPDATE SET
                     author_id = excluded.author_id,
@@ -806,6 +999,10 @@ class StructuredMemoryStore:
                     is_rumor = excluded.is_rumor,
                     last_seen_at = excluded.last_seen_at,
                     source_type = excluded.source_type,
+                    repost_of_post_id = COALESCE(excluded.repost_of_post_id, social_posts.repost_of_post_id),
+                    root_post_id = COALESCE(excluded.root_post_id, social_posts.root_post_id),
+                    source_author_id = COALESCE(excluded.source_author_id, social_posts.source_author_id),
+                    feed_seen_count = excluded.feed_seen_count,
                     payload_json = excluded.payload_json,
                     importance = MAX(social_posts.importance, excluded.importance),
                     confidence = MAX(social_posts.confidence, excluded.confidence),
@@ -829,6 +1026,10 @@ class StructuredMemoryStore:
                     int(world_time or 0),
                     int(world_time or 0),
                     source_type,
+                    _text_id(repost_of) or None,
+                    _text_id(root_post) or None,
+                    _text_id(source_author) or None,
+                    next_seen_count,
                     _json_dumps(post),
                     float(importance),
                     float(confidence),
@@ -894,8 +1095,13 @@ class StructuredMemoryStore:
         related_agent_id: Any = None,
         object_id: Any = None,
         post_id: Any = None,
+        episode_id: Any = None,
         task: Any = None,
         need_key: Any = None,
+        evidence_event_ids: Any = None,
+        evidence_event_ids_json: Any = None,
+        valid_from: int | None = None,
+        valid_to: int | None = None,
         importance: float = 0.5,
         confidence: float = 0.5,
         valid: bool = True,
@@ -906,6 +1112,21 @@ class StructuredMemoryStore:
         对稳定类型记忆做同主体冲突检测，冲突只记录不自动覆盖结论。
         """
 
+        payload_data = payload if isinstance(payload, dict) else {}
+        metadata_data = payload_data.get("metadata") if isinstance(payload_data.get("metadata"), dict) else {}
+        episode_value = episode_id if episode_id is not None else metadata_data.get("episode_id")
+        evidence_value = (
+            evidence_event_ids_json
+            if evidence_event_ids_json is not None
+            else evidence_event_ids
+        )
+        if evidence_value is None:
+            evidence_value = metadata_data.get(
+                "evidence_event_ids_json",
+                metadata_data.get("evidence_event_ids"),
+            )
+        valid_from_value = valid_from if valid_from is not None else metadata_data.get("valid_from")
+        valid_to_value = valid_to if valid_to is not None else metadata_data.get("valid_to")
         now = time.time()
         with self._lock:
             stable_memory = memory_type in {"semantic", "procedural", "social"}
@@ -962,22 +1183,30 @@ class StructuredMemoryStore:
                 """
                 INSERT INTO derived_memories (
                     memory_id, agent_id, memory_type, source_type, world_time,
-                    entity_id, related_agent_id, object_id, post_id, task,
-                    need_key, summary, payload_json, importance, confidence,
-                    valid, access_count, last_accessed_at, created_at, updated_at
+                    episode_id, entity_id, related_agent_id, object_id, post_id,
+                    task, need_key, evidence_event_ids_json, valid_from, valid_to,
+                    summary, payload_json, importance, confidence, valid,
+                    access_count, last_accessed_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                 ON CONFLICT(memory_id)
                 DO UPDATE SET
                     memory_type = excluded.memory_type,
                     source_type = excluded.source_type,
                     world_time = excluded.world_time,
+                    episode_id = COALESCE(excluded.episode_id, derived_memories.episode_id),
                     entity_id = excluded.entity_id,
                     related_agent_id = excluded.related_agent_id,
                     object_id = excluded.object_id,
                     post_id = excluded.post_id,
                     task = excluded.task,
                     need_key = excluded.need_key,
+                    evidence_event_ids_json = COALESCE(
+                        excluded.evidence_event_ids_json,
+                        derived_memories.evidence_event_ids_json
+                    ),
+                    valid_from = COALESCE(excluded.valid_from, derived_memories.valid_from),
+                    valid_to = COALESCE(excluded.valid_to, derived_memories.valid_to),
                     summary = excluded.summary,
                     payload_json = excluded.payload_json,
                     importance = excluded.importance,
@@ -991,12 +1220,16 @@ class StructuredMemoryStore:
                     memory_type,
                     source_type,
                     int(world_time or 0),
+                    _text_id(episode_value) or None,
                     _text_id(entity_id) or None,
                     _text_id(related_agent_id) or None,
                     _text_id(object_id) or None,
                     _text_id(post_id) or None,
                     _text_id(task) or None,
                     _text_id(need_key) or None,
+                    _json_field_value(evidence_value),
+                    int(valid_from_value) if valid_from_value is not None else None,
+                    int(valid_to_value) if valid_to_value is not None else None,
                     summary,
                     _json_dumps(payload),
                     float(importance),
@@ -1059,9 +1292,8 @@ class StructuredMemoryStore:
         *,
         before_time: int,
         max_importance: float = 0.3,
-        max_confidence: float = 0.5,
     ) -> int:
-        """把长期未用且低重要性、低置信度的原始事件标记为失效。"""
+        """把超过保留窗口的低重要性原始事件标记为失效。"""
 
         with self._lock:
             cursor = self._conn.execute(
@@ -1072,12 +1304,102 @@ class StructuredMemoryStore:
                   AND valid = 1
                   AND world_time < ?
                   AND importance <= ?
-                  AND confidence <= ?
                 """,
-                (time.time(), agent_id, int(before_time), float(max_importance), float(max_confidence)),
+                (time.time(), agent_id, int(before_time), float(max_importance)),
             )
             self._conn.commit()
             return int(cursor.rowcount or 0)
+
+    def prune_events_to_limit(
+        self,
+        agent_id: str,
+        *,
+        active_limit: int,
+        protected_importance: float,
+    ) -> int:
+        """超过上限时优先失效低重要性、较早的原始事件。"""
+
+        with self._lock:
+            active_count = int(self._conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE agent_id = ? AND valid = 1",
+                (agent_id,),
+            ).fetchone()[0])
+            excess = max(0, active_count - max(1, int(active_limit)))
+            if excess == 0:
+                return 0
+            rows = self._conn.execute(
+                """
+                SELECT id FROM memory_events
+                WHERE agent_id = ? AND valid = 1 AND importance < ?
+                ORDER BY importance ASC, world_time ASC, id ASC
+                LIMIT ?
+                """,
+                (agent_id, float(protected_importance), excess),
+            ).fetchall()
+            ids = [int(row["id"]) for row in rows]
+            if not ids:
+                return 0
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(
+                f"UPDATE memory_events SET valid = 0, updated_at = ? WHERE id IN ({placeholders})",
+                [time.time(), *ids],
+            )
+            self._conn.commit()
+            return len(ids)
+
+    def get_valid_derived_memory_ids(
+        self,
+        memory_ids: list[Any],
+        *,
+        valid_at: int | None = None,
+    ) -> set[str]:
+        """批量返回仍允许召回且处于有效期内的长期记忆 ID。"""
+
+        ids = _text_ids(memory_ids)
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        clauses = [f"memory_id IN ({placeholders})", "valid = 1"]
+        params: list[Any] = list(ids)
+        if valid_at is not None:
+            clauses.append("(valid_from IS NULL OR valid_from <= ?)")
+            clauses.append("(valid_to IS NULL OR valid_to >= ?)")
+            params.extend([int(valid_at), int(valid_at)])
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT memory_id FROM derived_memories WHERE " + " AND ".join(clauses),
+                params,
+            ).fetchall()
+        return {str(row["memory_id"]) for row in rows}
+
+    def invalidate_derived_memories(self, memory_ids: list[Any]) -> int:
+        """批量将长期记忆标记为不可召回。"""
+
+        ids = _text_ids(memory_ids)
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            cursor = self._conn.execute(
+                f"UPDATE derived_memories SET valid = 0, updated_at = ? WHERE memory_id IN ({placeholders}) AND valid = 1",
+                [time.time(), *ids],
+            )
+            self._conn.commit()
+            return int(cursor.rowcount or 0)
+
+    def get_active_memory_counts(self, agent_id: str) -> dict[str, int]:
+        """返回记录和绘图需要的活跃记忆数量。"""
+
+        with self._lock:
+            event_count = int(self._conn.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE agent_id = ? AND valid = 1",
+                (agent_id,),
+            ).fetchone()[0])
+            derived_count = int(self._conn.execute(
+                "SELECT COUNT(*) FROM derived_memories WHERE agent_id = ? AND valid = 1",
+                (agent_id,),
+            ).fetchone()[0])
+        return {"active_memory_events": event_count, "active_derived_memories": derived_count}
 
     def record_conflict(
         self,
@@ -1374,11 +1696,27 @@ class StructuredMemoryStore:
         *,
         source_types: list[str] | None = None,
         memory_types: list[str] | None = None,
+        event_types: list[str] | None = None,
         entity_ids: list[Any] | None = None,
         post_ids: list[Any] | None = None,
+        episode_ids: list[Any] | None = None,
+        platform_event_ids: list[Any] | None = None,
+        feed_request_ids: list[Any] | None = None,
+        comment_ids: list[Any] | None = None,
+        parent_comment_ids: list[Any] | None = None,
+        root_comment_ids: list[Any] | None = None,
+        topics: list[Any] | None = None,
+        episode_id: Any = None,
+        platform_event_id: Any = None,
+        feed_request_id: Any = None,
+        comment_id: Any = None,
+        parent_comment_id: Any = None,
+        root_comment_id: Any = None,
+        topic: Any = None,
+        provenance: Any = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """按来源、记忆类型、实体和帖子过滤近期原始事件。"""
+        """按类型、实体、平台链路和 episode 过滤近期原始事件。"""
 
         clauses = ["agent_id = ?", "valid = 1"]
         params: list[Any] = [agent_id]
@@ -1390,6 +1728,10 @@ class StructuredMemoryStore:
             placeholders = ",".join("?" for _ in memory_types)
             clauses.append(f"memory_type IN ({placeholders})")
             params.extend(memory_types)
+        if event_types:
+            placeholders = ",".join("?" for _ in event_types)
+            clauses.append(f"event_type IN ({placeholders})")
+            params.extend(event_types)
         entity_texts = [_text_id(value) for value in entity_ids or [] if _text_id(value)]
         if entity_texts:
             placeholders = ",".join("?" for _ in entity_texts)
@@ -1404,6 +1746,32 @@ class StructuredMemoryStore:
             placeholders = ",".join("?" for _ in post_texts)
             clauses.append(f"post_id IN ({placeholders})")
             params.extend(post_texts)
+
+        # 新增字段只接受固定列名和参数值，避免调用方拼接 SQL。
+        exact_filters = [
+            ("episode_id", episode_ids, episode_id),
+            ("platform_event_id", platform_event_ids, platform_event_id),
+            ("feed_request_id", feed_request_ids, feed_request_id),
+            ("comment_id", comment_ids, comment_id),
+            ("parent_comment_id", parent_comment_ids, parent_comment_id),
+            ("root_comment_id", root_comment_ids, root_comment_id),
+            ("topic", topics, topic),
+        ]
+        for column_name, values, single_value in exact_filters:
+            texts = [_text_id(value) for value in values or [] if _text_id(value)]
+            single_text = _text_id(single_value)
+            if single_text:
+                texts.append(single_text)
+            texts = list(dict.fromkeys(texts))
+            if not texts:
+                continue
+            placeholders = ",".join("?" for _ in texts)
+            clauses.append(f"{column_name} IN ({placeholders})")
+            params.extend(texts)
+        provenance_text = _provenance_value(provenance)
+        if provenance_text is not None:
+            clauses.append("provenance = ?")
+            params.append(provenance_text)
         params.append(int(limit))
         sql = (
             "SELECT * FROM memory_events WHERE "
@@ -1418,6 +1786,9 @@ class StructuredMemoryStore:
         *,
         memory_types: list[str] | None = None,
         task: str = "",
+        episode_ids: list[Any] | None = None,
+        episode_id: Any = None,
+        valid_at: int | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """读取近期衍生记忆，优先返回高重要性和高置信度内容。"""
@@ -1431,6 +1802,18 @@ class StructuredMemoryStore:
         if task:
             clauses.append("(task = ? OR task IS NULL)")
             params.append(task)
+        episode_texts = [_text_id(value) for value in episode_ids or [] if _text_id(value)]
+        if _text_id(episode_id):
+            episode_texts.append(_text_id(episode_id))
+        episode_texts = list(dict.fromkeys(episode_texts))
+        if episode_texts:
+            placeholders = ",".join("?" for _ in episode_texts)
+            clauses.append(f"episode_id IN ({placeholders})")
+            params.extend(episode_texts)
+        if valid_at is not None:
+            clauses.append("(valid_from IS NULL OR valid_from <= ?)")
+            clauses.append("(valid_to IS NULL OR valid_to >= ?)")
+            params.extend([int(valid_at), int(valid_at)])
         params.append(int(limit))
         sql = (
             "SELECT * FROM derived_memories WHERE "
@@ -1469,90 +1852,79 @@ class StructuredMemoryStore:
         )
         return self._fetch_all(sql, params)
 
-    def list_agent_memory(self, agent_id: str, limit: int = 200) -> dict[str, list[dict[str, Any]]]:
-        """按表分类列出某个智能体的结构化记忆，供 API 和调试界面展示。"""
+    def list_agent_memory(self, agent_id: str, limit: int | None = None) -> dict[str, list[dict[str, Any]]]:
+        """按表分类列出结构化记忆；默认返回全部，显式 limit 时按表截断。"""
+
+        limit_clause = "" if limit is None else " LIMIT ?"
+        query_params = [agent_id] if limit is None else [agent_id, int(limit)]
+
+        def fetch(sql: str) -> list[dict[str, Any]]:
+            # limit 只作为查询参数传入，表名和排序字段均由本方法固定。
+            return self._fetch_all(sql + limit_clause, query_params)
 
         return {
-            "events": self._fetch_all(
+            "events": fetch(
                 """
                 SELECT * FROM memory_events
                 WHERE agent_id = ?
                 ORDER BY world_time DESC, id DESC
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "entity_states": self._fetch_all(
+            "entity_states": fetch(
                 """
                 SELECT * FROM entity_states
                 WHERE agent_id = ?
                 ORDER BY last_seen_at DESC, entity_type, entity_id
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "person_profiles": self._fetch_all(
+            "person_profiles": fetch(
                 """
                 SELECT * FROM person_profiles
                 WHERE agent_id = ?
                 ORDER BY MAX(last_seen_at, last_social_seen_at) DESC, target_agent_id
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "entity_relations": self._fetch_all(
+            "entity_relations": fetch(
                 """
                 SELECT * FROM entity_relations
                 WHERE agent_id = ?
                 ORDER BY last_seen_at DESC, id DESC
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "social_posts": self._fetch_all(
+            "social_posts": fetch(
                 """
                 SELECT * FROM social_posts
                 WHERE agent_id = ?
                 ORDER BY last_seen_at DESC, post_id
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "scene_snapshots": self._fetch_all(
+            "scene_snapshots": fetch(
                 """
                 SELECT * FROM scene_snapshots
                 WHERE agent_id = ?
                 ORDER BY world_time DESC
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "derived_memories": self._fetch_all(
+            "derived_memories": fetch(
                 """
                 SELECT * FROM derived_memories
                 WHERE agent_id = ?
                 ORDER BY world_time DESC, memory_type
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "memory_conflicts": self._fetch_all(
+            "memory_conflicts": fetch(
                 """
                 SELECT * FROM memory_conflicts
                 WHERE agent_id = ?
                 ORDER BY world_time DESC, id DESC
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
-            "memory_access_log": self._fetch_all(
+            "memory_access_log": fetch(
                 """
                 SELECT * FROM memory_access_log
                 WHERE agent_id = ?
                 ORDER BY world_time DESC, id DESC
-                LIMIT ?
-                """,
-                [agent_id, int(limit)],
+                """
             ),
         }
 

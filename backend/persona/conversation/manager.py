@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING
 
@@ -106,6 +107,78 @@ class ConversationManager:
                     logger.warning("[Conversation] agent=%s returned invalid conversation JSON: %r", agent.id, action)
                 except Exception as e:
                     logger.error("[Conversation] agent %s 对话轮次 %d 失败: %s", agent.id, round_n, e, exc_info=True)
+
+            conv_history.extend(round_history)
+            for session in active_sessions:
+                session.round = round_n
+
+        for session in active_sessions:
+            if session.status == "active":
+                session.mark_resolved("max_rounds")
+
+    async def arun_phase(self, agents: list["Agent"], policy: "Policy", max_rounds: int) -> None:
+        """并发生成同轮回复，再按选择顺序更新会话和世界状态。"""
+
+        for agent in agents:
+            agent.conversation_opted_out = False
+        active_sessions = self._seed_sessions_from_inboxes(agents, max_rounds)
+        self._resolve_mutual_speaks(agents, active_sessions)
+        conv_history = self._history_from_sessions(active_sessions)
+
+        for round_n in range(1, max_rounds + 1):
+            selected = self._select_speakers(active_sessions, agents)
+            if not selected:
+                self._mark_open_sessions_resolved(active_sessions, "no_respondents")
+                break
+
+            async def decide(session, agent):
+                try:
+                    action = await agent.aconversation_step(policy, round_n, max_rounds, list(conv_history))
+                    return session, agent, action, None
+                except Exception as exc:
+                    return session, agent, None, exc
+
+            results = await asyncio.gather(*[decide(session, agent) for session, agent in selected])
+            round_history: list[dict] = []
+            for session, agent, action, error in results:
+                if error is not None:
+                    logger.error("[Conversation] agent %s 对话轮次 %d 失败: %s", agent.id, round_n, error, exc_info=error)
+                    continue
+                if not action:
+                    if not self._session_has_pending_inbox(session, agents) and session.status == "active":
+                        session.mark_resolved("speaker_opted_out")
+                    continue
+                try:
+                    decision = json.loads(action)
+                except json.JSONDecodeError:
+                    logger.warning("[Conversation] agent=%s returned invalid conversation JSON: %r", agent.id, action)
+                    continue
+                data = self._action_from_decision(decision)
+                if not data:
+                    if not self._session_has_pending_inbox(session, agents) and session.status == "active":
+                        session.mark_resolved("speaker_opted_out")
+                    continue
+                if data.get("tool") != "speak":
+                    continue
+                self.world.execute(agent, action)
+                args = data.get("args", {})
+                message = self._new_message(
+                    session,
+                    round_n,
+                    agent.id,
+                    str(args.get("ID", "")),
+                    str(args.get("content", "")),
+                    args.get("response_to"),
+                    args.get("intent"),
+                    args.get("social_valence"),
+                    args.get("topic"),
+                    args.get("topic_stance"),
+                )
+                self._finalize_message(session, message, agents)
+                round_history.append(message.to_history_entry())
+                reason = self._termination_reason(session)
+                if reason:
+                    session.mark_resolved(reason)
 
             conv_history.extend(round_history)
             for session in active_sessions:

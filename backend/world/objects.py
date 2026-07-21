@@ -138,13 +138,23 @@ class company(building):
 class bed(Interactable):
     """床：可交互物品，供智能体休息恢复 relax。"""
 
-    def __init__(self, id: str, position: list, world, free_num=1):
+    def __init__(self, id: str, position: list, world, free_num=1, owner_agent_id: str | None = None):
+        if owner_agent_id is not None and (not isinstance(owner_agent_id, str) or not owner_agent_id):
+            raise ValueError("bed owner_agent_id must be None or a non-empty string")
         super().__init__(id,None, position, world)
         self.kind = "bed"
         self.free_num = free_num
         self.occupant_id = None  # 当前占用者的 agent ID，None 表示无人占用
+        self.owner_agent_id = owner_agent_id
+
+    def can_be_used_by(self, agent_id: str) -> bool:
+        """公共床允许所有人使用，专属床只允许绑定的智能体使用。"""
+
+        return self.owner_agent_id is None or self.owner_agent_id == agent_id
 
     def interact(self, agent) -> str:
+        if not self.can_be_used_by(agent.id):
+            return f"床 {self.id} 是 {self.owner_agent_id} 的专属床铺，{agent.id} 无法使用"
         if self.free_num <= 0:
             return f"床 {self.id} 已满，无法休息"
         self.occupant_id = agent.id
@@ -166,7 +176,11 @@ class bed(Interactable):
         return f"{agent.id} 不在床 {self.id} 上，无需离开"
 
     def get_desc(self) -> str:
-        return f"ID: {self.id}，类别: {self.kind}，功能：休息恢复，每张床只能同时供 1 个智能体使用，当前空闲床位 {self.free_num}"
+        owner_text = f"，专属使用者: {self.owner_agent_id}" if self.owner_agent_id else ""
+        return (
+            f"ID: {self.id}，类别: {self.kind}，功能：休息恢复，每张床只能同时供 1 个智能体使用，"
+            f"当前空闲床位 {self.free_num}{owner_text}"
+        )
 
 class food_shop(building):
     """食品店：建筑子类，智能体进入并停留时自动补充 satiety。"""

@@ -33,19 +33,25 @@ def observe(agent, r: int) -> Observation:
     actions = [_event_to_observation(agent, event) for event in agent.observed_events]
     agent.observed_events.clear()
 
+    raw_notifications = list(agent._pending_social_notifications)
+    notification_events = [
+        _structured_notification(agent, note)
+        for note in raw_notifications
+    ]
     notifications = [
         {
             "type": "notification",
-            "content": note,
+            "content": event["content"],
             "time": agent.world.time,
         }
-        for note in agent._pending_social_notifications
+        for event in notification_events
     ]
     agent._pending_social_notifications.clear()
 
     observation = {
         "schema_version": 1,
         "observer_id": agent.id,
+        "episode_id": str(getattr(agent, "_current_episode_id", "") or ""),
         "time": agent.world.time,
         "radius": r,
         "position": list(agent.position),
@@ -55,11 +61,65 @@ def observe(agent, r: int) -> Observation:
         "actions": actions,
         "social": {
             "notifications": notifications,
+            "notification_events": notification_events,
         },
     }
     agent.observation = observation
     logger.debug("[%s] structured observation: %s", agent.id, observation)
     return observation
+
+
+def _structured_notification(agent, note) -> dict[str, Any]:
+    """兼容旧字符串通知，并展开平台事件中的常用关联字段。"""
+
+    if isinstance(note, dict):
+        event = dict(note)
+        details = dict(event.get("details") or {})
+    else:
+        event = {"content": str(note or "")}
+        details = {}
+
+    platform_event_id = str(event.get("platform_event_id") or event.get("event_id") or "")
+    actor_id = str(event.get("actor_id") or "")
+    source_author_id = event.get("source_author_id")
+    if source_author_id in (None, ""):
+        source_author_id = details.get("source_author_id")
+    event_time = event.get("time")
+    if event_time is None:
+        event_time = event.get("tick")
+    if event_time is None:
+        event_time = agent.world.time
+
+    event.update(
+        {
+            "schema_version": int(event.get("schema_version") or 1),
+            "type": "notification",
+            "content": str(event.get("content") or ""),
+            "time": event_time,
+            "episode_id": str(
+                event.get("episode_id")
+                or getattr(agent, "_current_episode_id", "")
+                or ""
+            ),
+            "event_id": str(event.get("event_id") or platform_event_id),
+            "event_type": str(event.get("event_type") or "notification"),
+            "platform_event_id": platform_event_id,
+            "feed_request_id": str(event.get("feed_request_id") or ""),
+            "actor_id": actor_id,
+            "related_agent_id": str(event.get("related_agent_id") or actor_id or source_author_id or ""),
+            "post_id": event.get("post_id"),
+            "comment_id": event.get("comment_id", details.get("comment_id")),
+            "parent_comment_id": event.get("parent_comment_id", details.get("parent_comment_id")),
+            "root_comment_id": event.get("root_comment_id", details.get("root_comment_id")),
+            "target_agent_id": str(event.get("target_agent_id") or agent.id),
+            "source_post_id": event.get("source_post_id", details.get("source_post_id")),
+            "root_post_id": event.get("root_post_id", details.get("root_post_id")),
+            "source_author_id": source_author_id,
+            "topic": str(event.get("topic") or details.get("topic") or ""),
+            "details": details,
+        }
+    )
+    return event
 
 
 def _agent_to_observation(agent) -> dict[str, Any]:
@@ -80,6 +140,9 @@ def _object_to_observation(obj) -> dict[str, Any]:
         "type": type(obj).__name__,
         "position": list(obj.position),
         "region": _region_for_object(obj),
+        "owner_agent_id": getattr(obj, "owner_agent_id", None),
+        "free_num": getattr(obj, "free_num", None),
+        "occupant_id": getattr(obj, "occupant_id", None),
         "description": obj.get_desc() if hasattr(obj, "get_desc") else "",
     }
 

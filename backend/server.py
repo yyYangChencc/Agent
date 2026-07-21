@@ -48,11 +48,26 @@ HISTORY_VIEW_FILES = {
     "config_snapshot.json",
     "experiment_summary.md",
     "opinion_trends.svg",
+    "opinion_dashboard.html",
+    "opinion_distribution.svg",
+    "opinion_distribution.csv",
+    "opinion_analysis.json",
+    "opinion_voting_trends.svg",
+    "opinion_voting_polarization_trends.svg",
     "effective_pressure_trends.svg",
     "mediator_peak_trends.svg",
+    "memory_event_trends.svg",
+    "memory_vector_trends.svg",
     "polarization_report.md",
     "polarization_metrics.csv",
     "polarization_agent_shift.csv",
+    "opinion_voting_polarization_report.md",
+    "opinion_voting_polarization_metrics.csv",
+    "opinion_voting_agent_metrics.csv",
+    "opinion_voting_skipped_records.csv",
+    "opinion_voting_posthoc.json",
+    "platform_exposure_events.jsonl",
+    "platform_events.jsonl",
 }
 
 
@@ -90,22 +105,58 @@ def _build_runtime(scenario_name: str | None = None) -> SimulationRuntime:
     global _recorder, current_scenario_name
     if _recorder is not None:
         _recorder.close()
-    _recorder = HistoryRecorder()
 
     selected = scenario_name or current_scenario_name
     scenario = get_scenario(selected)
+    _recorder = HistoryRecorder(scenario_name=selected)
     current_scenario_name = selected
     return scenario.build_runtime(history_recorder=_recorder)
 
 
-def _finalize_current_run(reason: str) -> dict | None:
-    """在重建 runtime 前归档当前已运行 tick 的 CSV、JSONL、摘要和图表。"""
+def _finalize_current_run(reason: str, voting_results: list[dict] | None = None) -> dict | None:
+    """归档当前运行；同一个输出目录只执行一次结束后投票。"""
 
     global _last_archived_run
-    archived = archive_runtime_run(rt, _recorder, reason=reason, scenario_name=current_scenario_name)
+    if (
+        _last_archived_run is not None
+        and _recorder is not None
+        and str(_last_archived_run.get("output_dir") or "") == str(_recorder.output_dir)
+    ):
+        return _last_archived_run
+    archived = archive_runtime_run(
+        rt,
+        _recorder,
+        reason=reason,
+        scenario_name=current_scenario_name,
+        voting_results=voting_results,
+    )
     if archived is not None:
         _last_archived_run = archived
     return archived
+
+
+async def _finalize_completed_run(reason: str = "simulation_complete") -> dict | None:
+    """先异步并行投票，再在线程池中串行归档。"""
+
+    if (
+        _last_archived_run is not None
+        and _recorder is not None
+        and str(_last_archived_run.get("output_dir") or "") == str(_recorder.output_dir)
+    ):
+        return _last_archived_run
+    voting_results = None
+    if rt is not None and int(getattr(rt.world, "time", 0) or 0) > 0:
+        voting_results = await rt.world.opinion_assessor.afinalize_voting(
+            list(rt.world.agents.values()),
+            rt.world.time,
+        )
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        _finalize_current_run,
+        reason,
+        voting_results,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +190,8 @@ async def do_step() -> float:
     """
     if _limit_reached():
         sim_state["running"] = False
+        # 达到最大时间步后立即执行十步窗口投票，不等待下一次 reset。
+        await _finalize_completed_run()
         await broadcast(_status_payload(limit_reached=True))
         return 0.0
 
@@ -156,6 +209,7 @@ async def do_step() -> float:
 
     if _limit_reached():
         sim_state["running"] = False
+        await _finalize_completed_run()
         await broadcast(_status_payload(limit_reached=True))
 
     total_elapsed = time.perf_counter() - start
@@ -176,6 +230,7 @@ async def _sim_loop() -> None:
     while sim_state["running"]:
         if _limit_reached():
             sim_state["running"] = False
+            await _finalize_completed_run()
             await broadcast(_status_payload(limit_reached=True))
             break
         elapsed = await do_step()
@@ -259,11 +314,17 @@ async def agent_memories(agent_id: str):
     if hasattr(rt.mem, "list_agent_structured_memories"):
         # 保留旧 memories 字段给现有前端，同时追加 SQLite 分表结果供新记忆窗口使用。
         structured = rt.mem.list_agent_structured_memories(agent.id)
+    # 两类存储按来源分别展示，总计数以响应记录为准，不跨存储去重。
+    structured_counts = {name: len(rows) for name, rows in structured.items()}
+    structured_count = sum(structured_counts.values())
     return {
         "agent_id": agent.id,
         "count": len(memories),
         "memories": memories,
         "structured": structured,
+        "structured_counts": structured_counts,
+        "structured_count": structured_count,
+        "total_count": len(memories) + structured_count,
     }
 
 
@@ -459,7 +520,7 @@ async def _handle_cmd(msg: dict) -> None:
                 "scenarios": list_scenarios(),
             })
             return
-        archived_run = await loop.run_in_executor(None, _finalize_current_run, "reset")
+        archived_run = await _finalize_completed_run("reset")
         rt = await loop.run_in_executor(None, _build_runtime, scenario_name)
         await broadcast({
             "type": "init",

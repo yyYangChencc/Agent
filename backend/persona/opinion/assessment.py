@@ -3,12 +3,22 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from typing import TYPE_CHECKING
 
 from persona.logger import get_logger
+from persona.opinion.scale import classify_voting_stance
 from persona.llm.interface import JSON_OBJECT_RESPONSE_FORMAT
 from persona.llm.json_utils import parse_json_object
-from persona.opinion.scale import clamp_opinion, get_opinion_topic_definition
+from persona.opinion.scale import (
+    VOTING_POLARIZATION_ROLES,
+    VOTING_ROLE_OPPOSE,
+    VOTING_ROLE_SUPPORT,
+    VOTING_ROLE_UNKNOWN,
+    clamp_opinion,
+    get_opinion_topic_definition,
+)
+from persona.opinion.flan_scorer import FlanT5OpinionScorer
 
 if TYPE_CHECKING:
     from persona.agents.agent import Agent
@@ -27,17 +37,38 @@ class OpinionAssessmentCoordinator:
     评测得到的 score 会写回 `agent.opinion`，不执行线上/线下加权平均式的公式化观念更新。
     """
 
-    def __init__(self, config: "AgentConfig", llm: "LLMClient | None" = None):
+    def __init__(
+        self,
+        config: "AgentConfig",
+        llm: "LLMClient | None" = None,
+        flan_scorer: FlanT5OpinionScorer | None = None,
+    ):
         self.config = config
         self.llm = llm
+        self.flan_scorer = flan_scorer or FlanT5OpinionScorer(
+            str(getattr(config, "opinion_flan_model_name", "google/flan-t5-large"))
+        )
+        # 投票使用独立信号量和启动间隔，不改变其他 LLM 请求的全局上限。
+        self._voting_concurrency = max(1, int(getattr(config, "opinion_voting_max_concurrent_requests", 3)))
+        self._voting_request_interval = max(
+            0.0,
+            float(getattr(config, "opinion_voting_request_interval_seconds", 1.0)),
+        )
+        self._voting_semaphore = None
+        self._voting_semaphore_loop = None
+        self._voting_start_lock = None
+        self._voting_start_lock_loop = None
+        self._voting_next_start_at = 0.0
 
     def assess_agent(self, agent: "Agent", tick: int) -> dict:
         topic = self._current_topic(agent)
         if not self.should_assess_agent(agent, tick):
             return self._unchanged_assessment(agent, tick, topic, reason="no_new_evidence")
-        context = self._build_context(agent, topic)
+        if self._assessment_mode() == "llm_voting":
+            return self._unchanged_assessment(agent, tick, topic, reason="voting_runs_after_simulation")
+        context = self._build_context(agent, topic, tick)
         if not self._context_has_assessment_evidence(context):
-            return self._unchanged_assessment(agent, tick, topic, context=context, reason="no_cycle_evidence")
+            return self._unchanged_assessment(agent, tick, topic, context=context, reason="no_window_evidence")
         assessment_payload = self._assess_with_configured_method(agent, topic, context)
         return self._store_assessment(agent, tick, topic, context, assessment_payload)
 
@@ -45,9 +76,11 @@ class OpinionAssessmentCoordinator:
         topic = self._current_topic(agent)
         if not self.should_assess_agent(agent, tick):
             return self._unchanged_assessment(agent, tick, topic, reason="no_new_evidence")
-        context = await self._abuild_context(agent, topic)
+        if self._assessment_mode() == "llm_voting":
+            return self._unchanged_assessment(agent, tick, topic, reason="voting_runs_after_simulation")
+        context = await self._abuild_context(agent, topic, tick)
         if not self._context_has_assessment_evidence(context):
-            return self._unchanged_assessment(agent, tick, topic, context=context, reason="no_cycle_evidence")
+            return self._unchanged_assessment(agent, tick, topic, context=context, reason="no_window_evidence")
         assessment_payload = await self._aassess_with_configured_method(agent, topic, context)
         return self._store_assessment(agent, tick, topic, context, assessment_payload)
 
@@ -70,6 +103,9 @@ class OpinionAssessmentCoordinator:
             "confidence": assessment_payload["confidence"],
             "reason": assessment_payload["reason"],
             "evidence": assessment_payload["evidence"],
+            "current_honest_belief": assessment_payload.get("current_honest_belief", ""),
+            "flan_rating": assessment_payload.get("flan_rating"),
+            "flan_model": assessment_payload.get("flan_model", ""),
             "current_focus": agent.current_focus,
             "task": agent.task,
             "context": context,
@@ -101,6 +137,66 @@ class OpinionAssessmentCoordinator:
         )
         return assessment
 
+    def _store_voting(
+        self,
+        agent: "Agent",
+        tick: int,
+        topic: str,
+        speech_history: list[dict],
+        voting_payload: dict,
+        *,
+        window_start_tick: int | None = None,
+        window_end_tick: int | None = None,
+    ) -> dict:
+        """独立保存投票结果，不把投票合成为 agent.opinion。"""
+
+        option_roles = self._voting_option_roles(topic, voting_payload["options"])
+        vote_metrics = self._voting_metrics(voting_payload, option_roles)
+        stance_metrics = classify_voting_stance(
+            requested_voters=voting_payload["requested_voters"],
+            successful_votes=voting_payload["successful_votes"],
+            choice_counts=voting_payload["choice_counts"],
+            option_roles=option_roles,
+        )
+        voting = {
+            "agent_id": agent.id,
+            "tick": tick,
+            "topic": topic,
+            "method": "llm_voting",
+            "window_start_tick": (
+                int(window_start_tick)
+                if window_start_tick is not None
+                else max(1, tick - self._assessment_interval() + 1)
+            ),
+            "window_end_tick": int(window_end_tick) if window_end_tick is not None else tick,
+            "options": voting_payload["options"],
+            "requested_voters": voting_payload["requested_voters"],
+            "successful_votes": voting_payload["successful_votes"],
+            "failed_votes": voting_payload["failed_votes"],
+            "choice_counts": voting_payload["choice_counts"],
+            "option_roles": option_roles,
+            **vote_metrics,
+            **stance_metrics,
+            "votes": voting_payload["votes"],
+            "speech_history": speech_history,
+            "skipped_reason": voting_payload.get("skipped_reason", ""),
+        }
+        agent.last_opinion_voting = voting
+        agent.opinion_voting_history.append(voting)
+        agent._last_opinion_assessment_tick = tick
+        agent.opinion_seen_posts_buffer = []
+        max_history = max(1, self.config.opinion_assessment_history_limit)
+        if len(agent.opinion_voting_history) > max_history:
+            agent.opinion_voting_history = agent.opinion_voting_history[-max_history:]
+        logger.debug(
+            "[OpinionVoting] tick=%d agent=%s votes=%d failed=%d",
+            tick,
+            agent.id,
+            voting["successful_votes"],
+            voting["failed_votes"],
+        )
+        return voting
+
     def assess_all(self, agents: list["Agent"], tick: int) -> None:
         for agent in agents:
             self.assess_agent(agent, tick)
@@ -120,22 +216,100 @@ class OpinionAssessmentCoordinator:
                     result,
                 )
 
+    async def afinalize_voting(self, agents: list["Agent"], final_tick: int) -> list[dict]:
+        """模拟结束后按固定十步窗口评测全部发帖和评论。"""
+
+        window_size = max(1, int(getattr(self.config, "opinion_voting_window_size", 10)))
+        all_results = []
+        for window_start in range(1, max(0, int(final_tick)) + 1, window_size):
+            window_end = min(window_start + window_size - 1, int(final_tick))
+            results = await asyncio.gather(
+                *(
+                    self._aposthoc_vote_agent(agent, window_start, window_end)
+                    for agent in agents
+                ),
+                return_exceptions=True,
+            )
+            for agent, result in zip(agents, results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "[OpinionVoting] posthoc vote failed agent=%s window=%d-%d: %s",
+                        agent.id,
+                        window_start,
+                        window_end,
+                        result,
+                    )
+                    continue
+                all_results.append(result)
+            completed = [result for result in results if isinstance(result, dict)]
+            logger.info(
+                "[OpinionVoting] posthoc window=%d-%d agents=%d requested=%d successful=%d skipped=%d",
+                window_start,
+                window_end,
+                len(agents),
+                sum(int(item.get("requested_voters", 0) or 0) for item in completed),
+                sum(int(item.get("successful_votes", 0) or 0) for item in completed),
+                sum(bool(item.get("skipped_reason")) for item in completed),
+            )
+        return all_results
+
+    def finalize_voting(self, agents: list["Agent"], final_tick: int) -> list[dict]:
+        """同步归档入口；按十步窗口依次完成结束后投票。"""
+
+        window_size = max(1, int(getattr(self.config, "opinion_voting_window_size", 10)))
+        all_results = []
+        for window_start in range(1, max(0, int(final_tick)) + 1, window_size):
+            window_end = min(window_start + window_size - 1, int(final_tick))
+            for agent in agents:
+                topic = self._current_topic(agent)
+                speech_history = self._online_speech_window(agent, window_start, window_end)
+                if self._skip_empty_voting_window(speech_history):
+                    voting_payload = self._empty_voting_payload(topic)
+                else:
+                    voting_payload = self._assess_with_llm_voting(agent, topic, speech_history)
+                all_results.append(
+                    self._store_voting(
+                        agent,
+                        window_end,
+                        topic,
+                        speech_history,
+                        voting_payload,
+                        window_start_tick=window_start,
+                        window_end_tick=window_end,
+                    )
+                )
+        return all_results
+
+    async def _aposthoc_vote_agent(self, agent: "Agent", window_start: int, window_end: int) -> dict:
+        """执行单个智能体单个结束后窗口的全部投票。"""
+
+        topic = self._current_topic(agent)
+        speech_history = self._online_speech_window(agent, window_start, window_end)
+        if self._skip_empty_voting_window(speech_history):
+            voting_payload = self._empty_voting_payload(topic)
+        else:
+            voting_payload = await self._aassess_with_llm_voting(agent, topic, speech_history)
+        return self._store_voting(
+            agent,
+            window_end,
+            topic,
+            speech_history,
+            voting_payload,
+            window_start_tick=window_start,
+            window_end_tick=window_end,
+        )
+
     def _current_topic(self, agent: "Agent") -> str:
         # 观念评测只面向系统投放新闻配置的主题；current_focus 仅是 micro-reflect 的策略焦点。
         return self.config.default_opinion_topic
 
     def should_assess_agent(self, agent: "Agent", tick: int) -> bool:
-        """事件触发加间隔兜底；没有新证据时不进入 LLM 评测。"""
+        """只在固定窗口末端执行观念评测；投票在模拟结束后执行。"""
 
-        if not getattr(self.config, "opinion_assessment_triggered_only", True):
-            return True
-        topic = self._current_topic(agent)
-        if self._seen_posts_since_last_assessment(agent):
-            context = self._light_context_for_signature(agent, topic)
-            return self._evidence_signature(context) != getattr(agent, "_last_opinion_evidence_signature", "")
-        interval = max(1, int(getattr(self.config, "opinion_assessment_interval", 5)))
-        last_tick = int(getattr(agent, "_last_opinion_assessment_tick", 0) or 0)
-        return tick - last_tick >= interval and self._has_cycle_evidence(agent, topic)
+        if self._assessment_mode() == "llm_voting":
+            return False
+        interval = self._assessment_interval()
+        return int(tick) > 0 and int(tick) % interval == 0
 
     def _unchanged_assessment(
         self,
@@ -164,7 +338,7 @@ class OpinionAssessmentCoordinator:
 
     def _assess_with_configured_method(self, agent: "Agent", topic: str, context: dict) -> dict:
         # 默认优先走 LLM；任何调用或解析异常都会回退到规则评测，避免中断 tick。
-        if self.config.opinion_assessment_mode == "llm" and self.llm is not None:
+        if self._assessment_mode() == "llm_as_judge" and self.llm is not None:
             try:
                 return self._assess_with_llm(agent, topic, context)
             except Exception as exc:
@@ -177,7 +351,7 @@ class OpinionAssessmentCoordinator:
         return self._assess_with_rules(agent, topic, context)
 
     async def _aassess_with_configured_method(self, agent: "Agent", topic: str, context: dict) -> dict:
-        if self.config.opinion_assessment_mode == "llm" and self.llm is not None:
+        if self._assessment_mode() == "llm_as_judge" and self.llm is not None:
             try:
                 return await self._aassess_with_llm(agent, topic, context)
             except Exception as exc:
@@ -188,6 +362,16 @@ class OpinionAssessmentCoordinator:
                     exc,
                 )
         return self._assess_with_rules(agent, topic, context)
+
+    def _assessment_mode(self) -> str:
+        """返回配置中的精确观念评测方式。"""
+
+        return str(getattr(self.config, "opinion_assessment_mode", "llm_as_judge"))
+
+    def _assessment_interval(self) -> int:
+        """返回投票周期及发言窗口共同使用的时间步数。"""
+
+        return max(1, int(getattr(self.config, "opinion_assessment_interval", 5)))
 
     def _assess_with_rules(self, agent: "Agent", topic: str, context: dict) -> dict:
         # 规则评测是 LLM 的兜底路径：以当前观念为锚点，只做小幅上下文修正。
@@ -224,138 +408,441 @@ class OpinionAssessmentCoordinator:
         }
 
     def _assess_with_llm(self, agent: "Agent", topic: str, context: dict) -> dict:
-        # prompt 保持项目统一风格：system 说明角色，user 传 JSON 上下文和输出 schema。
+        # 通用 LLM 只生成自然语言观念，评分完全交给本地 FLAN 分类器。
         topic_definition = get_opinion_topic_definition(topic)
-        system = (
-            "你是生活在沙盒世界中的智能体，正在接受新闻观念调研，请结合你的近期经历、近期发帖/评论、相关记忆，给出 user JSON 中 topic 字段所示系统新闻主题的观念分数。"
-            f"本次分数评测对象是“{topic_definition.narrative}”，不是对 system 账号或某一条新闻帖子的相信度。"
-            "你的观念表现受到动态角色卡约束，请给出符合动态角色卡的观念分数。"
-            "previous_topic_score 只能作为上一轮记录参考，不能把同一证据重复累加。"
-            f"分数必须在 -1 到 1 之间，{topic_definition.direction_prompt}"
-            "只输出 JSON，不要输出额外文字。"
-        )
-        user = json.dumps(
-            {
-                "agent_id": agent.id,
-                "topic": topic,
-                "current_opinion": agent.opinion,
-                "previous_topic_score": getattr(agent, "opinion_scores", {}).get(topic),
-                "topic_narrative": topic_definition.narrative,
-                "score_direction": topic_definition.direction_prompt,
-                "opinion_scale": topic_definition.scale,
-                "context": context,
-                "output_schema": {
-                    "delta": "float in [-1,1], optional change from current_opinion",
-                    "score": "float in [-1,1], optional absolute score after this assessment",
-                    "confidence": "float in [0,1]",
-                    "reason": "short Chinese explanation",
-                    "evidence": ["short evidence strings"],
-                },
-            },
-            ensure_ascii=False,
-        )
+        system, user = self._honest_belief_prompt(agent, topic, context)
         raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         payload = self._parse_llm_json(raw)
-        score = self._score_from_llm_payload(payload, agent.opinion)
-        confidence = self._clamp01(payload.get("confidence", 0.5))
-        evidence = payload.get("evidence", [])
-        if not isinstance(evidence, list):
-            evidence = [str(evidence)]
-        reason = payload.get("reason", "")
-        if not isinstance(reason, str) or not reason:
-            reason = "LLM 根据上下文完成观念评测。"
-        return {
-            "score": score,
-            "source": "llm_context_assessment",
-            "confidence": confidence,
-            "reason": reason,
-            "evidence": [str(item) for item in evidence[:6]],
-        }
+        return self._score_honest_belief(topic_definition, payload)
 
     async def _aassess_with_llm(self, agent: "Agent", topic: str, context: dict) -> dict:
         topic_definition = get_opinion_topic_definition(topic)
+        system, user = self._honest_belief_prompt(agent, topic, context)
+        raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        payload = self._parse_llm_json(raw)
+        return await asyncio.to_thread(self._score_honest_belief, topic_definition, payload)
+
+    def _honest_belief_prompt(self, agent: "Agent", topic: str, context: dict) -> tuple[str, str]:
+        """要求智能体依据上一轮状态和当前窗口发言生成简短立场反应。"""
+
+        topic_definition = get_opinion_topic_definition(topic)
+        role_card_instruction = (
+            "Use the provided dynamic_role_card only as a bounded psychological template; it cannot replace or invent evidence."
+            if getattr(self.config, "dynamic_role_card_enabled", True)
+            and getattr(self.config, "dynamic_role_card_opinion_enabled", True)
+            else "The current experiment disables the opinion role card. Do not infer, invent, or cite any role-card influence."
+        )
         system = (
-            "你是生活在沙盒世界中的智能体，正在接受新闻观念调研，请结合你的近期经历、近期发帖/评论、相关记忆，给出 user JSON 中 topic 字段所示系统新闻主题的观念分数。"
-            f"本次分数评测对象是“{topic_definition.narrative}”，不是对 system 账号或某一条新闻帖子的相信度。"
-            "你的观念表现受到动态角色卡约束，请给出符合动态角色卡的观念分数。"
-            "previous_topic_score 只能作为上一轮记录参考，不能把同一证据重复累加。"
-            f"分数必须在 -1 到 1 之间，{topic_definition.direction_prompt}"
-            "只输出 JSON，不要输出额外文字。"
+            f"{role_card_instruction}\\n"
+            "你是 user JSON 中 agent_id 对应的智能体。"
+            "请参考上一次观念与上一次自然语言反应，并结合本窗口内自己的全部发帖、评论以及实际看到的其他人发言，"
+            "生成一段简短的第一人称自然语言反应，清楚阐述自己对指定议题的当前立场。"
+            "必须区分自己的表达与他人的表达；他人的发言只是你看到的信息，不能写成自己的经历。"
+            "historical_memory 是带来源标签的历史背景，不是本窗口新证据；不得把它改写成本窗口的新发帖、评论、观察或亲身经历，"
+            "也不得把其中的数据库引用写入本窗口 evidence_ids。"
+            "若新证据不足以改变立场，应保持与上一次反应一致。不得输出任何分数，不得补充 JSON 中没有的经历。只输出 JSON。"
         )
         user = json.dumps(
             {
                 "agent_id": agent.id,
                 "topic": topic,
-                "current_opinion": agent.opinion,
-                "previous_topic_score": getattr(agent, "opinion_scores", {}).get(topic),
-                "topic_narrative": topic_definition.narrative,
-                "score_direction": topic_definition.direction_prompt,
-                "opinion_scale": topic_definition.scale,
-                "context": context,
+                "topic_statement": topic_definition.narrative,
+                "window_start_tick": context.get("window_start_tick"),
+                "window_end_tick": context.get("window_end_tick"),
+                "previous_honest_belief": context.get("previous_honest_belief", ""),
+                "dynamic_role_card": context.get("dynamic_role_card", {}),
+                "evidence_counts": context.get("evidence_counts", {}),
+                "evidence": {
+                    "self_authored_posts": context.get("self_authored_posts", []),
+                    "self_authored_comments": context.get("self_authored_comments", []),
+                    "observed_other_speech": context.get("observed_other_speech", []),
+                    "likes_and_dislikes": context.get("likes_and_dislikes", []),
+                },
+                "historical_memory": context.get("recalled_memories", []),
                 "output_schema": {
-                    "delta": "float in [-1,1], optional change from current_opinion",
-                    "score": "float in [-1,1], optional absolute score after this assessment",
-                    "confidence": "float in [0,1]",
-                    "reason": "short Chinese explanation",
-                    "evidence": ["short evidence strings"],
+                    "current_honest_belief": "brief natural-language first-person stance",
+                    "evidence_ids": ["exact post or comment identifiers used in this window"],
                 },
             },
             ensure_ascii=False,
         )
-        raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
-        payload = self._parse_llm_json(raw)
-        score = self._score_from_llm_payload(payload, agent.opinion)
-        confidence = self._clamp01(payload.get("confidence", 0.5))
-        evidence = payload.get("evidence", [])
-        if not isinstance(evidence, list):
-            evidence = [str(evidence)]
-        reason = payload.get("reason", "")
-        if not isinstance(reason, str) or not reason:
-            reason = "LLM 根据上下文完成观念评测。"
+        return system, user
+
+    def _score_honest_belief(self, topic_definition, payload: dict) -> dict:
+        """使用 FLAN 五级评分并映射到项目的连续观念区间。"""
+
+        honest_belief = payload.get("current_honest_belief")
+        if not isinstance(honest_belief, str) or not honest_belief.strip():
+            raise ValueError("current_honest_belief must be a non-empty string")
+        evidence_ids = payload.get("evidence_ids", [])
+        if not isinstance(evidence_ids, list):
+            raise ValueError("evidence_ids must be a list")
+        rating = self.flan_scorer.score(
+            topic_statement=topic_definition.narrative,
+            honest_belief=honest_belief.strip(),
+        )
         return {
-            "score": score,
-            "source": "llm_context_assessment",
-            "confidence": confidence,
-            "reason": reason,
-            "evidence": [str(item) for item in evidence[:6]],
+            "score": rating / 2.0,
+            "source": "llm_as_judge",
+            "confidence": 0.0,
+            "reason": honest_belief.strip(),
+            "evidence": [str(item) for item in evidence_ids[:12]],
+            "current_honest_belief": honest_belief.strip(),
+            "flan_rating": rating,
+            "flan_model": self.flan_scorer.model_name,
         }
+
+    def _assess_with_llm_voting(self, agent: "Agent", topic: str, speech_history: list[dict]) -> dict:
+        """同步兼容入口；正式异步运行使用全并行投票路径。"""
+
+        options = self._voting_options(topic)
+        voter_count = self._voter_count()
+        votes = []
+        for voter_index in range(voter_count):
+            try:
+                votes.append(self._one_vote(agent, topic, speech_history, options, voter_index))
+            except Exception as exc:
+                votes.append({"voter_index": voter_index, "status": "failed", "error": str(exc)})
+        return self._summarize_votes(options, voter_count, votes)
+
+    async def _aassess_with_llm_voting(
+        self,
+        agent: "Agent",
+        topic: str,
+        speech_history: list[dict],
+    ) -> dict:
+        """创建该智能体的投票任务，实际启动受独立并发和间隔限制。"""
+
+        options = self._voting_options(topic)
+        voter_count = self._voter_count()
+        votes = await asyncio.gather(
+            *(
+                self._aone_vote(agent, topic, speech_history, options, voter_index)
+                for voter_index in range(voter_count)
+            )
+        )
+        return self._summarize_votes(options, voter_count, votes)
+
+    def _one_vote(
+        self,
+        agent: "Agent",
+        topic: str,
+        speech_history: list[dict],
+        options: list[str],
+        voter_index: int,
+    ) -> dict:
+        if self.llm is None:
+            return {"voter_index": voter_index, "status": "failed", "error": "LLM client is not configured"}
+        system, user = self._voting_prompt(agent, topic, speech_history, options)
+        self._wait_for_sync_voting_start_slot()
+        raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        return self._parse_vote(raw, options, voter_index)
+
+    async def _aone_vote(
+        self,
+        agent: "Agent",
+        topic: str,
+        speech_history: list[dict],
+        options: list[str],
+        voter_index: int,
+    ) -> dict:
+        if self.llm is None:
+            return {"voter_index": voter_index, "status": "failed", "error": "LLM client is not configured"}
+        system, user = self._voting_prompt(agent, topic, speech_history, options)
+        try:
+            async with self._current_voting_semaphore():
+                await self._wait_for_voting_start_slot()
+                raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            return self._parse_vote(raw, options, voter_index)
+        except Exception as exc:
+            return {"voter_index": voter_index, "status": "failed", "error": str(exc)}
+
+    def _current_voting_semaphore(self) -> asyncio.Semaphore:
+        """为当前事件循环返回投票信号量，兼容重复调用同步 step。"""
+
+        loop = asyncio.get_running_loop()
+        if self._voting_semaphore is None or self._voting_semaphore_loop is not loop:
+            self._voting_semaphore = asyncio.Semaphore(self._voting_concurrency)
+            self._voting_semaphore_loop = loop
+        return self._voting_semaphore
+
+    def _current_voting_start_lock(self) -> asyncio.Lock:
+        """为当前事件循环返回投票启动节流锁。"""
+
+        loop = asyncio.get_running_loop()
+        if self._voting_start_lock is None or self._voting_start_lock_loop is not loop:
+            self._voting_start_lock = asyncio.Lock()
+            self._voting_start_lock_loop = loop
+            self._voting_next_start_at = 0.0
+        return self._voting_start_lock
+
+    async def _wait_for_voting_start_slot(self) -> None:
+        """按统一间隔启动投票请求，避免同一时刻形成请求尖峰。"""
+
+        if self._voting_request_interval <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        async with self._current_voting_start_lock():
+            while True:
+                delay = self._voting_next_start_at - loop.time()
+                if delay <= 0:
+                    break
+                # Windows 计时器可能提前唤醒，必须按单调时钟复核截止时间。
+                await asyncio.sleep(delay)
+            self._voting_next_start_at = loop.time() + self._voting_request_interval
+
+    def _wait_for_sync_voting_start_slot(self) -> None:
+        """同步路径按相同间隔启动投票请求，避免归档时形成请求尖峰。"""
+
+        if self._voting_request_interval <= 0:
+            return
+        while True:
+            delay = self._voting_next_start_at - time.monotonic()
+            if delay <= 0:
+                break
+            # Windows 计时器可能提前唤醒，必须按单调时钟复核截止时间。
+            time.sleep(delay)
+        self._voting_next_start_at = time.monotonic() + self._voting_request_interval
+
+    def _skip_empty_voting_window(self, speech_history: list[dict]) -> bool:
+        """仅在配置允许且窗口没有线上表达时跳过 LLM 投票。"""
+
+        return bool(getattr(self.config, "opinion_voting_skip_empty_windows", True)) and not speech_history
+
+    def _empty_voting_payload(self, topic: str) -> dict:
+        """为空发言窗口生成结构完整、零请求的投票结果。"""
+
+        options = self._voting_options(topic)
+        payload = self._summarize_votes(options, 0, [])
+        payload["skipped_reason"] = "no_online_speech_in_window"
+        return payload
+
+    def _voting_prompt(
+        self,
+        agent: "Agent",
+        topic: str,
+        speech_history: list[dict],
+        options: list[str],
+    ) -> tuple[str, str]:
+        """构造只依据线上发帖和评论的单选投票提示词。"""
+
+        option_roles = self._voting_option_roles(topic, options)
+        system = (
+            "你是观念评测投票者。你只能根据 user JSON 中该用户最近时间窗内的全部线上帖子和评论，"
+            "判断该用户对指定议题的立场。不得使用线下发言，不得补充未提供的信息。"
+            "你必须且只能从 options 中原样选择一项，并只输出 JSON。"
+        )
+        user = json.dumps(
+            {
+                "agent_id": agent.id,
+                "topic": topic,
+                "options": options,
+                "option_roles": option_roles,
+                "online_speech_history": speech_history,
+                "output_schema": {"choice": "options 中一个完全相同的字符串"},
+            },
+            ensure_ascii=False,
+        )
+        return system, user
+
+    def _parse_vote(self, raw: str, options: list[str], voter_index: int) -> dict:
+        payload = parse_json_object(raw, context="LLM opinion voting output")
+        choice = payload.get("choice")
+        if not isinstance(choice, str) or choice not in options:
+            raise ValueError(f"vote choice must exactly match one configured option: {choice!r}")
+        return {"voter_index": voter_index, "status": "success", "choice": choice}
+
+    def _summarize_votes(self, options: list[str], voter_count: int, votes: list[dict]) -> dict:
+        choice_counts = {option: 0 for option in options}
+        for vote in votes:
+            if vote.get("status") == "success":
+                choice_counts[vote["choice"]] += 1
+        successful_votes = sum(choice_counts.values())
+        return {
+            "options": options,
+            "requested_voters": voter_count,
+            "successful_votes": successful_votes,
+            "failed_votes": voter_count - successful_votes,
+            "choice_counts": choice_counts,
+            "votes": votes,
+        }
+
+    def _voting_options(self, topic: str) -> list[str]:
+        options = list(get_opinion_topic_definition(topic).voting_options)
+        if not options or any(not isinstance(option, str) or not option for option in options):
+            raise ValueError(f"topic has no valid voting options: {topic!r}")
+        if len(set(options)) != len(options):
+            raise ValueError(f"topic voting options must be unique: {topic!r}")
+        self._voting_option_roles(topic, options)
+        return options
+
+    def _voting_option_roles(self, topic: str, options: list[str]) -> dict[str, str]:
+        """校验每个选项都有明确且唯一的极化统计角色。"""
+
+        roles = dict(get_opinion_topic_definition(topic).voting_option_roles)
+        if set(roles) != set(options):
+            raise ValueError(f"topic voting option roles must exactly match options: {topic!r}")
+        invalid_roles = sorted(set(roles.values()) - VOTING_POLARIZATION_ROLES)
+        if invalid_roles:
+            raise ValueError(f"topic voting option roles are invalid: {invalid_roles!r}")
+        if not any(role == VOTING_ROLE_SUPPORT for role in roles.values()):
+            raise ValueError(f"topic voting options have no support role: {topic!r}")
+        if not any(role == VOTING_ROLE_OPPOSE for role in roles.values()):
+            raise ValueError(f"topic voting options have no oppose role: {topic!r}")
+        return roles
+
+    def _voting_metrics(self, voting_payload: dict, option_roles: dict[str, str]) -> dict:
+        """计算单个智能体的投票份额，不生成连续 opinion。"""
+
+        successful_votes = int(voting_payload["successful_votes"] or 0)
+        counts = voting_payload["choice_counts"]
+        shares = {
+            option: (int(counts.get(option, 0) or 0) / successful_votes if successful_votes else 0.0)
+            for option in voting_payload["options"]
+        }
+        role_shares = {
+            role: sum(shares[option] for option, option_role in option_roles.items() if option_role == role)
+            for role in VOTING_POLARIZATION_ROLES
+        }
+        support_share = role_shares[VOTING_ROLE_SUPPORT]
+        oppose_share = role_shares[VOTING_ROLE_OPPOSE]
+        unknown_share = role_shares[VOTING_ROLE_UNKNOWN]
+        known_share = support_share + oppose_share
+        decisiveness = abs(support_share - oppose_share) / known_share if known_share else 0.0
+        return {
+            "choice_shares": shares,
+            "support_share": support_share,
+            "oppose_share": oppose_share,
+            "unknown_share": unknown_share,
+            "known_share": known_share,
+            "decisiveness": decisiveness,
+        }
+
+    def _voter_count(self) -> int:
+        return max(1, int(getattr(self.config, "opinion_voter_count", 10)))
+
+    def _recent_online_speech(self, agent: "Agent", tick: int) -> list[dict]:
+        """读取最近 n 个时间步内本人发布的全部帖子和评论。"""
+
+        return self._online_speech_window(agent, tick - self._assessment_interval() + 1, tick)
+
+    def _online_speech_window(self, agent: "Agent", window_start: int, window_end: int) -> list[dict]:
+        """读取闭区间窗口内本人发布的全部帖子和评论。"""
+
+        platform = getattr(agent, "platform", None)
+        if platform is None:
+            return []
+        speech = []
+        for post in getattr(platform, "posts", []) or []:
+            post_time = getattr(post, "time", None)
+            if getattr(post, "author_id", None) == agent.id and self._time_in_closed_window(
+                post_time, window_start, window_end
+            ):
+                speech.append({
+                    "type": "post",
+                    "id": getattr(post, "id", None),
+                    "time": post_time,
+                    "topic": getattr(post, "topic", ""),
+                    "content": getattr(post, "content", ""),
+                })
+            for comment in getattr(post, "comments_list", []) or []:
+                comment_time = getattr(comment, "time", None)
+                if getattr(comment, "author_id", None) != agent.id:
+                    continue
+                if not self._time_in_closed_window(comment_time, window_start, window_end):
+                    continue
+                speech.append({
+                    "type": "comment",
+                    "id": getattr(comment, "id", None),
+                    "time": comment_time,
+                    "post_id": getattr(post, "id", None),
+                    "post_topic": getattr(post, "topic", ""),
+                    "content": getattr(comment, "content", ""),
+                })
+        return sorted(speech, key=lambda item: (int(item["time"]), str(item["id"])))
+
+    def _time_in_closed_window(self, value, start_tick: int, end_tick: int) -> bool:
+        """判断整数时间是否落入指定闭区间。"""
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        return int(start_tick) <= value <= int(end_tick)
+
+    def _time_in_window(self, value, start_tick: int, end_tick: int) -> bool:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return False
+        return start_tick < value <= end_tick
 
     def _parse_llm_json(self, raw: str) -> dict:
         return parse_json_object(raw, context="LLM opinion assessment output")
+
+    def _llm_system_prompt(self, topic_definition) -> str:
+        """统一同步/异步观念评测提示词，强调证据来源不可混用。"""
+
+        role_card_instruction = (
+            "当前实验版本启用动态角色卡；它只能约束信息解释、表达风格和合法动作偏好，不能改写证据。"
+            if getattr(self.config, "dynamic_role_card_enabled", True)
+            and getattr(self.config, "dynamic_role_card_opinion_enabled", True)
+            else "当前实验版本关闭观念角色卡；不得假设、补造或引用任何角色卡影响。"
+        )
+        return (
+            "你是生活在沙盒世界中的智能体，正在接受新闻观念调研。"
+            "你只能评估 user JSON 中 topic 字段所示系统新闻主题的观念分数。"
+            f"本次分数评测对象是“{topic_definition.narrative}”，不是对 system 账号或某一条新闻帖子的相信度。"
+            "必须严格区分证据来源："
+            "context.self_authored_posts 是你自己发布的帖子，是你的直接表达；"
+            "context.self_authored_comments 是你自己写过的评论，是你的直接表达；"
+            "context.observed_posts 是你看到的他人、官方新闻或投放者帖子，只能表示你接触到的信息环境，不能写成你的发言、你的立场或你的亲身经历。"
+            "若依据 observed_posts 调整分数，reason 和 evidence 必须明确写成“看到/接触到他人帖子/新闻/投放内容”，不能写成“我发布”“我认为过”“我的帖子显示”。"
+            f"{role_card_instruction}"
+            "previous_topic_score 只能作为上一轮记录参考，不能把同一证据重复累加。"
+            f"分数必须在 -1 到 1 之间，{topic_definition.direction_prompt}"
+            "只输出 JSON，不要输出额外文字。"
+        )
 
     def _base_topic_score(self, agent: "Agent", topic: str) -> float:
         # `agent.opinion` 是系统新闻主题立场的唯一权威状态，opinion_scores 只是历史/展示镜像。
         return clamp_opinion(agent.opinion)
 
-    def _build_context(self, agent: "Agent", topic: str) -> dict:
-        # 观念评测的周期证据只来自本周期实际看过的当前主题帖子。
+    def _build_context(self, agent: "Agent", topic: str, tick: int) -> dict:
+        """构造固定窗口证据，并附加独立标注的历史记忆背景。"""
+
+        context = self._build_window_context(agent, topic, tick)
+        recalled = self._recall_opinion_memories(agent, topic, tick, context)
+        context["recalled_memories"] = recalled
+        context["evidence_counts"]["recalled_memories"] = len(recalled)
+        return context
+
+    def _build_window_context(self, agent: "Agent", topic: str, tick: int) -> dict:
+        """只构造本次观念评测固定时间窗口内的新证据。"""
+
         topic_definition = get_opinion_topic_definition(topic)
-        recent_social = self._recent_social_texts(agent, topic)
-        memory_query = self._memory_query(topic, recent_social)
-        memories = []
-        try:
-            # 使用 opinion_assessment 场景召回，优先取社交、对话和历史观念证据。
-            memories = agent.recall(memory_query, context="opinion_assessment")
-        except Exception as exc:
-            logger.debug(
-                "[OpinionAssessment] memory recall failed for %s topic=%s: %s",
-                agent.id,
-                topic,
-                exc,
-            )
+        window_end = int(tick)
+        window_start = max(1, window_end - self._assessment_interval() + 1)
+        personal_evidence = self._window_personal_evidence(agent, window_start, window_end)
+        observed_other_speech = self._window_observed_other_speech(agent, window_start, window_end)
+        reactions = self._window_reactions(agent, window_start, window_end)
+        last_assessment = getattr(agent, "last_opinion_assessment", None)
+        previous_belief = ""
+        if isinstance(last_assessment, dict):
+            previous_belief = str(last_assessment.get("current_honest_belief") or "")
         return {
             "topic": topic,
             "topic_narrative": topic_definition.narrative,
             "score_direction": topic_definition.direction_prompt,
-            "current_opinion": clamp_opinion(agent.opinion),
-            "previous_topic_score": getattr(agent, "opinion_scores", {}).get(topic),
-            "recent_social": recent_social,
-            "seen_posts": recent_social,
-            "memories": memories,
+            "window_start_tick": window_start,
+            "window_end_tick": window_end,
+            "previous_honest_belief": previous_belief,
             "dynamic_role_card": self._dynamic_role_card(agent),
-            "needs": {
-                "satisfaction": dict(agent.satisfaction),
-                "effective_pressure": dict(agent.effective_pressure),
+            "self_authored_posts": personal_evidence["self_authored_posts"],
+            "self_authored_comments": personal_evidence["self_authored_comments"],
+            "observed_other_speech": observed_other_speech,
+            "likes_and_dislikes": reactions,
+            "evidence_counts": {
+                "self_authored_posts": len(personal_evidence["self_authored_posts"]),
+                "self_authored_comments": len(personal_evidence["self_authored_comments"]),
+                "observed_other_speech": len(observed_other_speech),
+                "likes_and_dislikes": len(reactions),
             },
         }
 
@@ -385,38 +872,165 @@ class OpinionAssessmentCoordinator:
                     texts.append(f"评论帖子 {getattr(post, 'id', '')}: {getattr(comment, 'content', '')}")
         return texts[-self.config.opinion_assessment_recent_social:]
 
-    async def _abuild_context(self, agent: "Agent", topic: str) -> dict:
-        """异步构造观念评测上下文，避免评测阶段同步记忆召回阻塞事件循环。"""
+    async def _abuild_context(self, agent: "Agent", topic: str, tick: int) -> dict:
+        """异步构造固定窗口，并使用异步记忆召回。"""
 
-        topic_definition = get_opinion_topic_definition(topic)
-        recent_social = self._recent_social_texts(agent, topic)
-        memory_query = self._memory_query(topic, recent_social)
-        memories = []
+        context = self._build_window_context(agent, topic, tick)
+        recalled = await self._arecall_opinion_memories(agent, topic, tick, context)
+        context["recalled_memories"] = recalled
+        context["evidence_counts"]["recalled_memories"] = len(recalled)
+        return context
+
+    def _recall_opinion_memories(
+        self,
+        agent: "Agent",
+        topic: str,
+        tick: int,
+        context: dict,
+    ) -> list[str]:
+        """同步召回观念历史背景，不把它计为当前窗口新证据。"""
+
+        if not getattr(self.config, "memory_forced_recall_enabled", True):
+            return []
+        recall = getattr(agent, "recall", None)
+        if not callable(recall):
+            return []
         try:
-            # 观念评测召回只补充社交/对话事实，旧 opinion_assessment 不再作为证据。
-            memories = await agent.arecall(memory_query, context="opinion_assessment")
+            return list(recall(self._opinion_memory_observation(topic, tick, context), context="opinion_assessment"))
         except Exception as exc:
-            logger.debug(
-                "[OpinionAssessment] async memory recall failed for %s topic=%s: %s",
-                agent.id,
-                topic,
-                exc,
+            logger.warning("[OpinionAssessment] memory recall failed for %s: %s", agent.id, exc)
+            return []
+
+    async def _arecall_opinion_memories(
+        self,
+        agent: "Agent",
+        topic: str,
+        tick: int,
+        context: dict,
+    ) -> list[str]:
+        """异步召回观念历史背景，失败时保留当前窗口证据。"""
+
+        if not getattr(self.config, "memory_forced_recall_enabled", True):
+            return []
+        recall = getattr(agent, "arecall", None)
+        if not callable(recall):
+            return []
+        try:
+            return list(
+                await recall(
+                    self._opinion_memory_observation(topic, tick, context),
+                    context="opinion_assessment",
+                )
             )
+        except Exception as exc:
+            logger.warning("[OpinionAssessment] async memory recall failed for %s: %s", agent.id, exc)
+            return []
+
+    def _opinion_memory_observation(self, topic: str, tick: int, context: dict) -> dict:
+        """生成只含主题、时间和窗口证据标识的结构化召回输入。"""
+
         return {
+            "schema_version": 1,
+            "type": "opinion_assessment",
+            "time": int(tick),
             "topic": topic,
-            "topic_narrative": topic_definition.narrative,
-            "score_direction": topic_definition.direction_prompt,
-            "current_opinion": clamp_opinion(agent.opinion),
-            "previous_topic_score": getattr(agent, "opinion_scores", {}).get(topic),
-            "recent_social": recent_social,
-            "seen_posts": recent_social,
-            "memories": memories,
-            "dynamic_role_card": self._dynamic_role_card(agent),
-            "needs": {
-                "satisfaction": dict(agent.satisfaction),
-                "effective_pressure": dict(agent.effective_pressure),
-            },
+            "window_start_tick": context.get("window_start_tick"),
+            "window_end_tick": context.get("window_end_tick"),
+            "self_authored_post_ids": [
+                item.get("id")
+                for item in context.get("self_authored_posts", [])
+                if isinstance(item, dict) and item.get("id") is not None
+            ],
+            "self_authored_comment_ids": [
+                item.get("comment_id")
+                for item in context.get("self_authored_comments", [])
+                if isinstance(item, dict) and item.get("comment_id") is not None
+            ],
+            "observed_speech_ids": [
+                item.get("id")
+                for item in context.get("observed_other_speech", [])
+                if isinstance(item, dict) and item.get("id") is not None
+            ],
         }
+
+    def _window_personal_evidence(self, agent: "Agent", window_start: int, window_end: int) -> dict:
+        """读取窗口内本人发布的全部帖子和评论，不按主题删除。"""
+
+        platform = getattr(agent, "platform", None)
+        posts = []
+        comments = []
+        if platform is not None:
+            for post in getattr(platform, "posts", []) or []:
+                snapshot = post.to_dict() if hasattr(post, "to_dict") else {}
+                if (
+                    str(getattr(post, "author_id", "") or "") == agent.id
+                    and self._time_in_closed_window(getattr(post, "time", None), window_start, window_end)
+                ):
+                    posts.append(self._post_evidence_snapshot(snapshot))
+                for comment in self._self_comments_from_post(agent, snapshot):
+                    if self._time_in_closed_window(comment.get("comment_time"), window_start, window_end):
+                        comments.append(comment)
+        return {
+            "self_authored_posts": sorted(posts, key=lambda item: (int(item.get("time") or 0), str(item.get("id")))),
+            "self_authored_comments": sorted(
+                comments,
+                key=lambda item: (int(item.get("comment_time") or 0), str(item.get("comment_id"))),
+            ),
+        }
+
+    def _window_observed_other_speech(self, agent: "Agent", window_start: int, window_end: int) -> list[dict]:
+        """展开窗口内实际看到的其他人帖子和评论。"""
+
+        speech = []
+        for post in getattr(agent, "opinion_seen_posts_buffer", []) or []:
+            if not isinstance(post, dict):
+                continue
+            if (
+                str(post.get("author_id") or "") != agent.id
+                and self._time_in_closed_window(post.get("time"), window_start, window_end)
+            ):
+                speech.append({
+                    "type": "post",
+                    "id": post.get("id"),
+                    "author_id": post.get("author_id"),
+                    "time": post.get("time"),
+                    "topic": post.get("topic"),
+                    "content": post.get("content"),
+                })
+            for comment in post.get("comments") if isinstance(post.get("comments"), list) else []:
+                if not isinstance(comment, dict) or str(comment.get("author_id") or "") == agent.id:
+                    continue
+                if not self._time_in_closed_window(comment.get("time"), window_start, window_end):
+                    continue
+                speech.append({
+                    "type": "comment",
+                    "id": comment.get("id"),
+                    "author_id": comment.get("author_id"),
+                    "time": comment.get("time"),
+                    "post_id": post.get("id"),
+                    "post_topic": post.get("topic"),
+                    "content": comment.get("content"),
+                })
+        return sorted(speech, key=lambda item: (int(item.get("time") or 0), str(item.get("id"))))
+
+    def _window_reactions(self, agent: "Agent", window_start: int, window_end: int) -> list[dict]:
+        """读取窗口内点赞和点踩，且不向评测器暴露目标帖预设分数。"""
+
+        reactions = []
+        for item in getattr(agent, "social_reaction_history", []) or []:
+            if not isinstance(item, dict) or not self._time_in_closed_window(
+                item.get("tick"), window_start, window_end
+            ):
+                continue
+            reactions.append({
+                "action": item.get("action"),
+                "tick": item.get("tick"),
+                "post_id": item.get("post_id"),
+                "post_author_id": item.get("post_author_id"),
+                "post_topic": item.get("post_topic"),
+                "post_content": item.get("post_content"),
+            })
+        return sorted(reactions, key=lambda item: (int(item.get("tick") or 0), str(item.get("post_id"))))
 
     def _recent_social_texts(self, agent: "Agent", topic: str) -> list[dict]:
         """观念评测只使用本评测周期内实际看过且 topic 等于当前主题的帖子。"""
@@ -428,6 +1042,92 @@ class OpinionAssessmentCoordinator:
             if isinstance(post, dict) and self._post_matches_topic(post, topic):
                 out.append(self._post_evidence_snapshot(post))
         return out[-self.config.opinion_assessment_recent_social:]
+
+    def _structured_social_evidence(self, agent: "Agent", topic: str) -> dict:
+        """把本轮社交证据拆成自发表达和他人暴露，避免 LLM 混淆身份。"""
+
+        seen_posts = self._recent_social_texts(agent, topic)
+        self_authored_posts = []
+        observed_posts = []
+        self_authored_comments = []
+        for post in seen_posts:
+            if str(post.get("author_id") or "") == agent.id:
+                self_authored_posts.append(post)
+            else:
+                observed_posts.append(post)
+            self_authored_comments.extend(self._self_comments_from_post(agent, post))
+        return {
+            "seen_posts": seen_posts,
+            "self_authored_posts": self_authored_posts,
+            "self_authored_comments": self_authored_comments[-self.config.opinion_assessment_recent_social:],
+            "observed_posts": observed_posts,
+        }
+
+    def _complete_personal_evidence(self, agent: "Agent", topic: str) -> dict:
+        """读取当前议题下本人截至当前时间的全部发帖、评论和反应。"""
+
+        platform = getattr(agent, "platform", None)
+        posts = []
+        comments = []
+        if platform is not None:
+            for post in getattr(platform, "posts", []) or []:
+                if str(getattr(post, "topic", "") or "") != topic:
+                    continue
+                snapshot = post.to_dict() if hasattr(post, "to_dict") else {}
+                if str(getattr(post, "author_id", "") or "") == agent.id:
+                    posts.append(self._post_evidence_snapshot(snapshot))
+                comments.extend(self._self_comments_from_post(agent, snapshot))
+        reactions = [
+            dict(item)
+            for item in (getattr(agent, "social_reaction_history", []) or [])
+            if isinstance(item, dict) and str(item.get("post_topic") or "") == topic
+        ]
+        return {
+            "self_authored_posts": sorted(
+                posts,
+                key=lambda item: (int(item.get("time") or 0), str(item.get("id"))),
+            ),
+            "self_authored_comments": sorted(
+                comments,
+                key=lambda item: (int(item.get("comment_time") or 0), str(item.get("comment_id"))),
+            ),
+            "likes_and_dislikes": sorted(
+                reactions,
+                key=lambda item: (int(item.get("tick") or 0), str(item.get("post_id"))),
+            ),
+        }
+
+    def _self_comments_from_post(self, agent: "Agent", post: dict) -> list[dict]:
+        """抽取智能体自己写过的评论，并保留被评论帖子的来源信息。"""
+
+        comments = post.get("comments") if isinstance(post.get("comments"), list) else []
+        out = []
+        for comment in comments:
+            if not isinstance(comment, dict) or str(comment.get("author_id") or "") != agent.id:
+                continue
+            out.append(
+                {
+                    "post_id": post.get("id"),
+                    "post_author_id": post.get("author_id"),
+                    "post_topic": post.get("topic"),
+                    "post_content": post.get("content"),
+                    "comment_id": comment.get("id"),
+                    "comment_content": comment.get("content"),
+                    "comment_time": comment.get("time"),
+                    "agreement_to_post": comment.get("agreement_to_post"),
+                }
+            )
+        return out
+
+    def _evidence_contract(self) -> list[str]:
+        """写给 LLM 的结构化证据使用规则。"""
+
+        return [
+            "self_authored_posts：智能体自己发布的帖子，可作为自身立场直接证据。",
+            "self_authored_comments：智能体自己写的评论，可作为自身立场直接证据。",
+            "observed_posts：他人、官方新闻或投放者的帖子，只能作为信息暴露和环境输入。",
+            "reason/evidence 必须标明证据来源，不能把 observed_posts 写成智能体自己的发言或经历。",
+        ]
 
     def _post_matches_topic(self, post: dict, topic: str) -> bool:
         """按帖子 topic 判断是否属于当前观念主题。"""
@@ -443,10 +1143,6 @@ class OpinionAssessmentCoordinator:
             "topic": post.get("topic"),
             "content": post.get("content"),
             "time": post.get("time"),
-            "likes": post.get("likes"),
-            "dislikes": post.get("dislikes"),
-            "comments_count": post.get("comments_count"),
-            "opinion_index": post.get("opinion_index"),
             "is_news": post.get("is_news"),
             "is_rumor": post.get("is_rumor"),
             "source_type": post.get("source_type"),
@@ -455,15 +1151,18 @@ class OpinionAssessmentCoordinator:
 
     def _joined_context_text(self, context: dict) -> str:
         chunks = []
-        for field in ["recent_social", "memories"]:
+        for field in ["self_authored_posts", "self_authored_comments", "observed_other_speech"]:
             values = context.get(field, [])
             if isinstance(values, list):
-                chunks.extend(str(item) for item in values)
+                chunks.extend(f"{field}: {item}" for item in values)
             elif values:
-                chunks.append(str(values))
+                chunks.append(f"{field}: {values}")
         dynamic_role_card = context.get("dynamic_role_card", {})
         if dynamic_role_card:
             chunks.append(json.dumps(dynamic_role_card, ensure_ascii=False))
+        recalled_memories = context.get("recalled_memories", [])
+        if isinstance(recalled_memories, list):
+            chunks.extend(f"historical_memory: {item}" for item in recalled_memories)
         return "\n".join(chunks)
 
     def _keyword_adjustment(self, topic: str, text: str) -> tuple[float, list[str]]:
@@ -494,9 +1193,17 @@ class OpinionAssessmentCoordinator:
         return self._seen_posts_since_last_assessment(agent)
 
     def _context_has_assessment_evidence(self, context: dict) -> bool:
-        """没有本周期实际看过的当前主题帖子时沿用当前 opinion，不写新评测记忆。"""
+        """窗口没有任何新表达、信息暴露或反应时跳过模型评测。"""
 
-        return bool(context.get("seen_posts"))
+        return any(
+            bool(context.get(field))
+            for field in [
+                "self_authored_posts",
+                "self_authored_comments",
+                "observed_other_speech",
+                "likes_and_dislikes",
+            ]
+        )
 
     def _light_context_for_signature(self, agent: "Agent", topic: str) -> dict:
         """只用周期证据生成签名，不额外触发记忆检索。"""
@@ -566,11 +1273,12 @@ class OpinionAssessmentCoordinator:
         history_size = len(getattr(agent, "history", []) or [])
         recent_activity = min(1.0, history_size / 10.0)
         evidence_bonus = min(0.2, 0.04 * len(evidence))
-        memory_bonus = 0.1 if context.get("memories") else 0.0
-        return self._clamp01(0.45 + 0.25 * recent_activity + evidence_bonus + memory_bonus)
+        return self._clamp01(0.45 + 0.25 * recent_activity + evidence_bonus)
 
     def _dynamic_role_card(self, agent: "Agent") -> dict:
         if not getattr(self.config, "dynamic_role_card_enabled", True):
+            return {}
+        if not getattr(self.config, "dynamic_role_card_opinion_enabled", True):
             return {}
         assessment = getattr(agent, "last_psychological_assessment", None)
         if not isinstance(assessment, dict):
@@ -578,10 +1286,16 @@ class OpinionAssessmentCoordinator:
         role_card = assessment.get("role_card_delta")
         if not isinstance(role_card, dict):
             return {}
+        # 原文溯源只用于记录审计，不重复发送给观念评测 LLM。
+        prompt_role_card = {
+            key: value
+            for key, value in role_card.items()
+            if key != "behavior_derivations"
+        }
         return {
             "status": assessment.get("status"),
             "activated_needs": assessment.get("activated_needs", []),
-            "role_card_delta": dict(role_card),
+            "role_card_delta": prompt_role_card,
         }
 
     def _clamp01(self, value: float) -> float:

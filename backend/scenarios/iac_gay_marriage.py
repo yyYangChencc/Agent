@@ -9,7 +9,7 @@ from typing import Any
 from persona.opinion.scale import clamp_opinion
 
 from .builder import build_runtime_from_spec
-from .map_designs import polarization_map_design
+from .map_designs import IAC_COMMUNITIES, iac_community_map_design
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +20,14 @@ INJECTION_PATH = DATA_DIR / "injection_posts_direct.jsonl"
 
 SUPPORT_INFLUENCERS = ["iac_gm_support_1", "iac_gm_support_2", "iac_gm_support_3"]
 OPPOSE_INFLUENCERS = ["iac_gm_oppose_1", "iac_gm_oppose_2", "iac_gm_oppose_3"]
+COMMUNITY_IDS = tuple(item["id"] for item in IAC_COMMUNITIES)
+COMMUNITY_ORIGINS = {
+    "community_1": (0, 0),
+    "community_2": (0, 52),
+    "community_3": (52, 0),
+    "community_4": (52, 52),
+}
+ROLE_COMMUNITY_OFFSETS = {"support": 0, "oppose": 3, "mixed": 2}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -67,45 +75,89 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _objects() -> list[dict[str, Any]]:
-    """提供足够的基础设施，使数据集场景可以进入完整沙盒循环。"""
+def _objects_and_regions() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """为四个社区生成完全对称的设施与入口。"""
 
-    beds = [
-        {"kind": "bed", "id": f"bed_{index + 1}", "position": [1 + index // 5, 1 + (index % 5) * 2]}
-        for index in range(20)
-    ]
-    facilities = [
-        {"kind": "company", "id": "company_1", "position": [20, 3], "params": {"salary": 8, "relax_cost": 8}},
-        {"kind": "company", "id": "company_2", "position": [22, 6], "params": {"salary": 12, "relax_cost": 12}},
-        {"kind": "food_shop", "id": "shop_1", "position": [2, 18], "params": {"food_num": 160, "provide": 30, "price": 6}},
-        {"kind": "food_shop", "id": "shop_2", "position": [4, 21], "params": {"food_num": 160, "provide": 20, "price": 4}},
-        {"kind": "playground", "id": "playground_1", "position": [20, 20], "params": {"provide": 18, "price": 5}},
-        {"kind": "food", "id": "food_1", "position": [10, 8], "params": {"num": 20, "provide": 20}},
-        {"kind": "food", "id": "food_2", "position": [12, 14], "params": {"num": 20, "provide": 20}},
-        {"kind": "food", "id": "food_3", "position": [8, 18], "params": {"num": 20, "provide": 20}},
-        {"kind": "food", "id": "food_4", "position": [15, 5], "params": {"num": 20, "provide": 20}},
-        {"kind": "food", "id": "food_5", "position": [16, 20], "params": {"num": 20, "provide": 20}},
-    ]
-    return beds + facilities
+    objects: list[dict[str, Any]] = []
+    object_regions: dict[str, dict[str, Any]] = {}
+    bed_index = company_index = shop_index = playground_index = 0
+    bed_positions = [(4, 4), (4, 12), (4, 20), (4, 28), (4, 36),
+                     (10, 4), (10, 12), (10, 20), (10, 28), (10, 36)]
+    company_specs = [((34, 8), 8, 8), ((40, 16), 12, 12)]
+    shop_specs = [((8, 36), 100, 30, 6), ((16, 40), 100, 20, 4)]
+    playground_position = (38, 38)
+
+    for community_id in COMMUNITY_IDS:
+        row_offset, col_offset = COMMUNITY_ORIGINS[community_id]
+        for local_row, local_col in bed_positions:
+            bed_index += 1
+            object_id = f"bed_{bed_index}"
+            position = [row_offset + local_row, col_offset + local_col]
+            objects.append({"kind": "bed", "id": object_id, "position": position, "community_id": community_id})
+            object_regions[object_id] = {
+                "region_id": community_id,
+                "entrance": [position[0], position[1] + 1],
+            }
+        for (local_row, local_col), salary, relax_cost in company_specs:
+            company_index += 1
+            object_id = f"company_{company_index}"
+            position = [row_offset + local_row, col_offset + local_col]
+            objects.append(
+                {
+                    "kind": "company",
+                    "id": object_id,
+                    "position": position,
+                    "community_id": community_id,
+                    "params": {"salary": salary, "relax_cost": relax_cost},
+                }
+            )
+            object_regions[object_id] = {
+                "region_id": community_id,
+                "entrance": [position[0], position[1] + 1],
+            }
+        for (local_row, local_col), food_num, provide, price in shop_specs:
+            shop_index += 1
+            object_id = f"shop_{shop_index}"
+            position = [row_offset + local_row, col_offset + local_col]
+            objects.append(
+                {
+                    "kind": "food_shop",
+                    "id": object_id,
+                    "position": position,
+                    "community_id": community_id,
+                    "params": {"food_num": food_num, "provide": provide, "price": price},
+                }
+            )
+            object_regions[object_id] = {
+                "region_id": community_id,
+                "entrance": [position[0], position[1] - 1],
+            }
+        playground_index += 1
+        object_id = f"playground_{playground_index}"
+        position = [row_offset + playground_position[0], col_offset + playground_position[1]]
+        objects.append(
+            {
+                "kind": "playground",
+                "id": object_id,
+                "position": position,
+                "community_id": community_id,
+                "params": {"provide": 18, "price": 5},
+            }
+        )
+        object_regions[object_id] = {
+            "region_id": community_id,
+            "entrance": [position[0], position[1] - 1],
+        }
+    return objects, object_regions
 
 
-OBJECTS = _objects()
+OBJECTS, OBJECT_REGIONS = _objects_and_regions()
 
 
 def _map_design() -> dict[str, Any]:
-    """扩展基础地图的床位标注，前端和设施记忆可直接读取。"""
+    """返回完整场景专用的 100x100 四社区地图。"""
 
-    design = polarization_map_design()
-    object_regions = design.setdefault("object_regions", {})
-    for item in OBJECTS:
-        if item["kind"] != "bed":
-            continue
-        row, col = item["position"]
-        object_regions[item["id"]] = {
-            "region_id": "residential_area",
-            "entrance": [row, min(24, col + 1)],
-        }
-    return design
+    return iac_community_map_design(OBJECT_REGIONS)
 
 
 def _occupied_object_positions() -> set[tuple[int, int]]:
@@ -114,27 +166,55 @@ def _occupied_object_positions() -> set[tuple[int, int]]:
     return {tuple(item["position"]) for item in OBJECTS}
 
 
-def _available_agent_positions() -> list[list[int]]:
-    """生成 25x25 地图内可用出生点，顺序固定以保证复现。"""
+def _initial_role(opinion: float) -> str:
+    """沿用场景现有阈值，把初始观念映射为三个阵营。"""
+
+    if opinion > 0.35:
+        return "support"
+    if opinion < -0.35:
+        return "oppose"
+    return "mixed"
+
+
+def _agent_assignments() -> dict[str, dict[str, str]]:
+    """按阵营分别轮转到四社区，保证总人数和阵营人数均衡。"""
+
+    role_indexes: dict[str, int] = defaultdict(int)
+    assignments: dict[str, dict[str, str]] = {}
+    for row in SEED_AGENTS:
+        agent_id = str(row["agent_id"])
+        opinion = clamp_opinion(_safe_float(row.get("initial_opinion")))
+        role = _initial_role(opinion)
+        community_index = (role_indexes[role] + ROLE_COMMUNITY_OFFSETS[role]) % len(COMMUNITY_IDS)
+        assignments[agent_id] = {
+            "community_id": COMMUNITY_IDS[community_index],
+            "initial_role": role,
+        }
+        role_indexes[role] += 1
+    return assignments
+
+
+AGENT_ASSIGNMENTS = _agent_assignments()
+
+
+def _community_agent_positions() -> dict[str, list[list[int]]]:
+    """在每个社区内生成分散且不占用设施的固定出生点。"""
 
     occupied = _occupied_object_positions()
-    positions: list[list[int]] = []
-    for row in range(25):
-        for col in range(25):
-            if (row, col) not in occupied:
-                positions.append([row, col])
+    positions: dict[str, list[list[int]]] = {}
+    for community_id in COMMUNITY_IDS:
+        row_offset, col_offset = COMMUNITY_ORIGINS[community_id]
+        cells = []
+        for local_row in range(2, 43, 8):
+            for local_col in range(2, 43, 8):
+                position = (row_offset + local_row, col_offset + local_col)
+                if position not in occupied:
+                    cells.append([position[0], position[1]])
+        positions[community_id] = cells
     return positions
 
 
-AGENT_POSITIONS = _available_agent_positions()
-
-
-def _agent_position(index: int) -> list[int]:
-    """按数据顺序分配唯一出生点。"""
-
-    if index >= len(AGENT_POSITIONS):
-        raise ValueError("IAC gay marriage scenario has more agents than free map cells")
-    return list(AGENT_POSITIONS[index])
+AGENT_POSITIONS_BY_COMMUNITY = _community_agent_positions()
 
 
 def _speaking_style(row: dict[str, Any]) -> str:
@@ -158,12 +238,22 @@ def _build_agents() -> list[dict[str, Any]]:
     """把 IAC 初始化种子转成场景实体智能体。"""
 
     agents: list[dict[str, Any]] = []
-    for index, row in enumerate(SEED_AGENTS):
+    community_position_indexes: dict[str, int] = defaultdict(int)
+    for row in SEED_AGENTS:
+        agent_id = str(row["agent_id"])
+        assignment = AGENT_ASSIGNMENTS[agent_id]
+        community_id = assignment["community_id"]
+        position_index = community_position_indexes[community_id]
+        available_positions = AGENT_POSITIONS_BY_COMMUNITY[community_id]
+        if position_index >= len(available_positions):
+            raise ValueError(f"community has insufficient spawn positions: {community_id}")
         initial_opinion = clamp_opinion(_safe_float(row.get("initial_opinion")))
         agents.append(
             {
-                "id": str(row["agent_id"]),
-                "position": _agent_position(index),
+                "id": agent_id,
+                "position": list(available_positions[position_index]),
+                "community_id": community_id,
+                "initial_role": assignment["initial_role"],
                 "speaking_style": _speaking_style(row),
                 "initial_opinion": initial_opinion,
                 "initial_money": _initial_money(row),
@@ -174,6 +264,7 @@ def _build_agents() -> list[dict[str, Any]]:
                 "initialization_time": str(row.get("initialization_time") or ""),
             }
         )
+        community_position_indexes[community_id] += 1
     return agents
 
 
@@ -377,21 +468,53 @@ def _memory_content(row: dict[str, Any]) -> str:
     )
 
 
+def _community_memories() -> dict[str, str]:
+    """为每个社区生成只描述本地范围的地图记忆。"""
+
+    memories: dict[str, str] = {}
+    for community in IAC_COMMUNITIES:
+        community_id = str(community["id"])
+        memories[community_id] = (
+            f"本社区地图记忆：community_id={community_id}，名称={community['name']}，"
+            f"边界={community['bounds']}，坐标格式为 [row, col]。"
+            "你的开局地理知识只覆盖本社区；社区内具备居住、工作、食品购买和娱乐设施。"
+            "未在本社区地图记忆或设施记忆中出现的位置与设施均属于未知信息。"
+        )
+    return memories
+
+
 def _memories() -> list[dict[str, Any]]:
-    """给每个实体智能体注入由历史发言总结出的初始记忆。"""
+    """注入个人论坛画像和本社区角色记忆。"""
 
     memories: list[dict[str, Any]] = []
     for row in SEED_AGENTS:
+        agent_id = str(row["agent_id"])
+        assignment = AGENT_ASSIGNMENTS[agent_id]
         confidence = _safe_float(row.get("profile_confidence"), 0.7)
         memories.append(
             {
-                "agent_id": str(row["agent_id"]),
+                "agent_id": agent_id,
                 "content": _memory_content(row),
                 "memory_type": "semantic",
                 "task": "agent_initialization",
                 "object_id": f"iac_profile_{row.get('source_author_id')}",
                 "importance": 0.9,
                 "confidence": confidence,
+            }
+        )
+        memories.append(
+            {
+                "agent_id": agent_id,
+                "content": (
+                    f"本地角色记忆：community_id={assignment['community_id']}，"
+                    f"initial_role={assignment['initial_role']}。"
+                    "你从本社区开始生活，地理行动应优先使用本社区地图和设施记忆。"
+                ),
+                "memory_type": "semantic",
+                "task": "community_orientation",
+                "object_id": f"community_role:{assignment['community_id']}:{assignment['initial_role']}",
+                "importance": 0.9,
+                "confidence": 1.0,
             }
         )
     return memories
@@ -418,10 +541,12 @@ SPEC: dict[str, Any] = {
     "online_trust": _online_trust(),
     "follow_edges": _follow_edges(),
     "objects": OBJECTS,
-    "map_memory": (
-        "IAC gay marriage 场景使用 25x25 沙盒地图；实体智能体来自 IAC v2 初始化种子，"
-        "线上投放者没有地图实体，只通过社交平台按时间线投放帖子。"
+    "community_assignment_rule": (
+        "按 initial_opinion 划分 support、oppose、mixed 三个初始阵营，"
+        "各阵营分别轮转分配到 community_1 至 community_4。"
     ),
+    "community_memories": _community_memories(),
+    "facility_memory_scope": "community",
     "official_news_schedule": _official_news_schedule(),
     "influencers": _influencers(),
     "influencer_schedule": _influencer_schedule(),

@@ -1,16 +1,748 @@
 {
-  "version": 1,
-  "description": "实验可用版理论卡。当前仅覆盖运行时真实存在的六个需求键：satiety、relax、money、belonging、esteem、self_actualization；money 作为安全需求的经济资源代理，不再保留独立 safety 卡。",
+  "version": 3,
+  "description": "文献约束理论卡。覆盖运行时真实存在的六个需求键：satiety、relax、money、belonging、esteem、self_actualization；money 作为安全需求的经济资源代理。单需求文献进入对应理论卡，跨需求文献由 mixed_literature 交给裁判处理。动态角色卡只允许从 mediator_effects 生成，behavior_evidence 保存对应 PDF 原文和页码。",
+  "behavior_evidence": [
+    {
+      "id": "hunger_acquisition_xu_2015_p1",
+      "source_id": "xu_schwarz_wyer_2015",
+      "pdf_page": 1,
+      "quote": "They show that hunger increases the cognitive accessibility of not only hunger-related concepts but also general acquisition-related concepts (study 1) as well as the intention to acquire nonfood objects that are clearly unsuitable to satisfy the hunger motive (study 2).",
+      "interpretation": "饥饿会提高获取相关概念的可及性和非食物对象的获取意图。"
+    },
+    {
+      "id": "hunger_discounting_skrynka_2019_p8",
+      "source_id": "skrynka_vincent_2019",
+      "pdf_page": 8,
+      "quote": "The current study additionally shows: (a) hunger brought about by modest fasting periods leads to a substantial increase in delay discounting for food; and (b) that there is a roughly 25% spillover to the non-food domain.",
+      "interpretation": "短时禁食提高食物延迟折扣，并以较弱强度外溢到非食物领域。"
+    },
+    {
+      "id": "sleep_cognition_lim_2010_p9",
+      "source_id": "lim_dinges_2010",
+      "pdf_page": 9,
+      "quote": "Effect sizes for complex attention and working memory fell in the moderate range, and tests of processing speed showed on average small but significant effects.",
+      "interpretation": "短期完全睡眠剥夺对工作记忆的影响处于中等范围，对加工速度具有较小但显著的影响。"
+    },
+    {
+      "id": "sleep_attention_lim_2010_p9",
+      "source_id": "lim_dinges_2010",
+      "pdf_page": 9,
+      "quote": "As anticipated, the largest effects of 24-48 hr of SD were on tests of vigilance, or simple attention.",
+      "interpretation": "短期完全睡眠剥夺对警觉或简单注意测试的影响最大。"
+    },
+    {
+      "id": "sleep_mood_pilcher_1996_p1",
+      "source_id": "pilcher_huffcutt_1996",
+      "pdf_page": 1,
+      "quote": "Moreover, we found that mood is more affected by sleep deprivation than either cognitive or motor performance and that partial sleep deprivation has a more profound effect on functioning than either long-term or short-term sleep deprivation.",
+      "interpretation": "睡眠剥夺对情绪的影响高于对认知或运动表现的影响。"
+    },
+    {
+      "id": "poverty_stress_haushofer_2014_p2",
+      "source_id": "haushofer_fehr_2014",
+      "pdf_page": 2,
+      "quote": "The evidence indicates that poverty causes stress and negative affective states which in turn may lead to short-sighted and risk-averse decision-making, possibly by limiting attention and favoring habitual behaviors at the expense of goal-directed ones.",
+      "interpretation": "贫困相关压力和负性情绪可能提高短视、风险规避和注意受限。"
+    },
+    {
+      "id": "poverty_capacity_mani_2013_p2",
+      "source_id": "mani_mullainathan_shafir_zhao_2013",
+      "pdf_page": 2,
+      "quote": "We suggest that this is because poverty-related concerns consume mental resources, leaving less for other tasks.",
+      "interpretation": "贫困相关担忧占用心理资源，减少其他任务可用的认知容量。"
+    },
+    {
+      "id": "scarcity_focus_shah_2012_p2",
+      "source_id": "shah_mullainathan_shafir_2012",
+      "pdf_page": 2,
+      "quote": "Across a series of experiments, we show how scarcity leads people to borrow resources excessively and to their own detriment. We also suggest that scarcity changes how people allocate attention and focus.",
+      "interpretation": "稀缺会改变注意分配和聚焦，并提高过度借用资源的风险。"
+    },
+    {
+      "id": "social_pain_eisenberger_2003_p2",
+      "source_id": "eisenberger_lieberman_williams_2003",
+      "pdf_page": 2,
+      "quote": "Paralleling results from physical pain studies, the anterior cingulate cortex (ACC) was more active during exclusion than during inclusion and correlated positively with self-reported distress.",
+      "interpretation": "实验性社会排斥与自报痛苦和前扣带回活动相关。"
+    },
+    {
+      "id": "sociometer_leary_1995_p1",
+      "source_id": "leary_tambor_terdal_downs_1995",
+      "pdf_page": 1,
+      "quote": "Five studies tested hypotheses derived from the sociometer model of self-esteem according to which the self-esteem system monitors others' reactions and alerts the individual to the possibility of social exclusion.",
+      "interpretation": "自尊系统监测他人反应，并对社会排斥可能性发出信号。"
+    },
+    {
+      "id": "rejection_motives_richman_2009_p1",
+      "source_id": "richman_leary_2009",
+      "pdf_page": 1,
+      "quote": "However, following these immediate responses, people's reactions are influenced by construals of the rejection experience that predict 3 distinct motives for prosocial, antisocial, and socially avoidant behavioral responses.",
+      "interpretation": "拒绝事件的解释会导向亲社会、反社会或社会回避三类不同动机。"
+    },
+    {
+      "id": "status_evaluation_ridgeway_2014_p1",
+      "source_id": "ridgeway_2014",
+      "pdf_page": 1,
+      "quote": "Acting through micro-level social relations in workplaces, schools, and elsewhere, status beliefs bias evaluations of competence and suitability for authority, bias associational preferences, and evoke resistance to status challenges from low-status group members.",
+      "interpretation": "地位信念会偏置能力、权威适配和交往偏好的评价。"
+    },
+    {
+      "id": "need_defensiveness_vansteenkiste_2020_p10",
+      "source_id": "vansteenkiste_ryan_soenens_2020",
+      "pdf_page": 10,
+      "quote": "That is, although we have the natural tendency to move towards increasing growth under need-supportive circumstances, there is a potential for unintegrated regulation of behaviors, harm and defensiveness that can be activated by need thwarting conditions.",
+      "interpretation": "基本心理需要受阻可能激活未整合的行为调节、伤害和防御反应。"
+    },
+    {
+      "id": "fluid_compensation_heine_2006_p3",
+      "source_id": "heine_proulx_vohs_2006",
+      "pdf_page": 3,
+      "quote": "Disruptions to meaning frameworks lead people to reaffirm alternative frameworks. Notably, these efforts need not be directed at the specific domain of meaning that has been jeopardized.",
+      "interpretation": "意义框架受威胁后，人可能转向确认其他仍完整的意义框架。"
+    },
+    {
+      "id": "autonomy_competence_ryan_2000_p3",
+      "source_id": "ryan_deci_2000",
+      "pdf_page": 3,
+      "quote": "Thus, according to CET, people must not only experience competence or efficacy, they must also experience their behavior as self-determined for intrinsic motivation to be in evidence.",
+      "interpretation": "能力感和行为的自我决定体验共同支持内在动机。"
+    },
+    {
+      "id": "personal_growth_ryff_1989_p4",
+      "source_id": "ryff_1989",
+      "pdf_page": 4,
+      "quote": "Low scorer: Has a sense of personal stagnation; lacks sense of improvement or expansion over time; feels bored and uninterested with life; feels unable to develop new attitudes or behaviors.",
+      "interpretation": "个人成长水平较低表现为停滞、缺少发展感以及难以形成新的态度或行为。"
+    }
+  ],
+  "literature": [
+    {
+      "id": "skrynka_vincent_2019",
+      "file": "Skrynka_Vincent_2019_Hunger_delay_discounting.pdf",
+      "title": "Hunger increases delay discounting of food and non-food rewards",
+      "doi": "10.3758/s13423-019-01655-0",
+      "classification": "mixed",
+      "need_keys": ["satiety", "money"],
+      "method": "重复测量实验与定量模型比较",
+      "findings": [
+        "饥饿显著提高食物奖励的延迟折扣。",
+        "饥饿对非食物奖励产生约为食物效应四分之一的跨领域延迟折扣外溢。",
+        "饥饿状态下，对消费、投资、医疗和人际等非食物结果的跨期决策需要更谨慎。"
+      ],
+      "boundaries": [
+        "研究支持的是即时奖赏偏好和跨领域外溢，不直接支持饥饿必然导致攻击或固定立场。"
+      ]
+    },
+    {
+      "id": "lim_dinges_2010",
+      "file": "Lim_Dinges_2010_Sleep_deprivation_cognitive_meta_analysis.pdf",
+      "title": "A Meta-Analysis of the Impact of Short-Term Sleep Deprivation on Cognitive Variables",
+      "doi": "10.1037/a0018883",
+      "classification": "single_need",
+      "need_keys": ["relax"],
+      "method": "70 篇研究、147 项认知测验的元分析",
+      "findings": [
+        "短期完全睡眠剥夺影响简单注意、复杂注意、工作记忆、加工速度、短期记忆和推理。",
+        "简单注意中的遗漏效应较大，推理准确性的效应较小且不显著。",
+        "清醒时长只对准确性指标的研究间差异具有显著预测作用。"
+      ],
+      "boundaries": [
+        "研究对象是短期完全睡眠剥夺，不能直接等同于所有慢性疲劳状态。"
+      ]
+    },
+    {
+      "id": "pilcher_huffcutt_1996",
+      "file": "Pilcher_Huffcutt_1996_Sleep_deprivation_performance_meta_analysis.pdf",
+      "title": "Effects of Sleep Deprivation on Performance: A Meta-Analysis",
+      "doi": "10.1093/sleep/19.4.318",
+      "classification": "single_need",
+      "need_keys": ["relax"],
+      "method": "19 项研究、143 个效应系数的元分析",
+      "findings": [
+        "睡眠剥夺总体上显著损害人的功能表现。",
+        "情绪受影响程度高于认知和运动表现。",
+        "部分睡眠剥夺在该元分析中的总体影响大于长期或短期完全睡眠剥夺。"
+      ],
+      "boundaries": [
+        "不同睡眠剥夺类型和任务指标的效应不同，不能用单一强度解释全部表现。"
+      ]
+    },
+    {
+      "id": "haushofer_fehr_2014",
+      "file": "Haushofer_Fehr_2014_On_the_psychology_of_poverty.pdf",
+      "title": "On the psychology of poverty",
+      "doi": "10.1126/science.1232491",
+      "classification": "single_need",
+      "need_keys": ["money"],
+      "method": "贫困心理机制综述",
+      "findings": [
+        "贫困会引发压力和负性情绪。",
+        "压力和负性情绪可能促进短视和风险规避，并限制注意。",
+        "贫困可能提高习惯性行为、削弱目标导向行为，形成自我强化反馈。"
+      ],
+      "boundaries": [
+        "贫困同时包含收入不足、制度、暴力、医疗等因素，综述明确指出现有因果知识仍有缺口。"
+      ]
+    },
+    {
+      "id": "mani_mullainathan_shafir_zhao_2013",
+      "file": "Mani_Mullainathan_Shafir_Zhao_2013_Poverty_impedes_cognitive_function.pdf",
+      "title": "Poverty Impedes Cognitive Function",
+      "doi": "10.1126/science.1238041",
+      "classification": "single_need",
+      "need_keys": ["money"],
+      "method": "财务情境实验与农户收获周期现场比较",
+      "findings": [
+        "财务担忧会降低低收入参与者的认知表现。",
+        "同一农户在收获前贫困期的认知表现低于收获后。",
+        "贫困相关担忧占用心理资源，使其他任务可用的认知容量减少。"
+      ],
+      "boundaries": [
+        "农户结果不能由时间、营养、工作努力或测得的压力差异解释；不应把认知下降归因于稳定人格。"
+      ]
+    },
+    {
+      "id": "shah_mullainathan_shafir_2012",
+      "file": "Shah_Mullainathan_Shafir_2012_Some_consequences_of_having_too_little.pdf",
+      "title": "Some Consequences of Having Too Little",
+      "doi": "10.1126/science.1222426",
+      "classification": "single_need",
+      "need_keys": ["money"],
+      "method": "跨资源稀缺情境的系列实验 working paper",
+      "findings": [
+        "资源稀缺会改变注意分配和聚焦。",
+        "稀缺使人过度借用未来资源，并可能加重后续资源负担。",
+        "部分行为可由拥有更少这一共同状态解释，而非只由特定贫困情境解释。"
+      ],
+      "boundaries": [
+        "当前文件是 18 页 working paper，不是 Science 最终排版版。",
+        "一般稀缺机制映射到 money 时，不能把所有时间或资源不足都解释为经济贫困。"
+      ]
+    },
+    {
+      "id": "baumeister_leary_1995",
+      "file": "Baumeister_Leary_1995_The_need_to_belong.pdf",
+      "title": "The Need to Belong: Desire for Interpersonal Attachments as a Fundamental Human Motivation",
+      "doi": "10.1037/0033-2909.117.3.497",
+      "classification": "single_need",
+      "need_keys": ["belonging"],
+      "method": "归属需要的系统性理论综述",
+      "findings": [
+        "归属需要要求在稳定关系中保持频繁、非厌恶性的互动和持续关切。",
+        "人们通常容易形成社会联结并抵抗既有关系解体。",
+        "缺少依恋关系与情绪、认知、健康、适应和幸福感的不良结果相关。"
+      ],
+      "boundaries": [
+        "综述支持归属需要的普遍重要性，但不提供本项目中介变量的唯一数值更新公式。"
+      ]
+    },
+    {
+      "id": "eisenberger_lieberman_williams_2003",
+      "file": "Eisenberger_Lieberman_Williams_2003_Does_rejection_hurt.pdf",
+      "title": "Does Rejection Hurt? An fMRI Study of Social Exclusion",
+      "doi": "10.1126/science.1089134",
+      "classification": "single_need",
+      "need_keys": ["belonging"],
+      "method": "虚拟抛球排斥任务中的 fMRI 实验",
+      "findings": [
+        "社会排斥相较接纳提高前扣带回活动，并与自报痛苦正相关。",
+        "右腹侧前额叶活动与自报痛苦负相关。",
+        "结果支持社会排斥痛苦与身体疼痛的情感成分共享部分神经基础。"
+      ],
+      "boundaries": [
+        "证据来自实验室排斥任务，不能直接推广为所有长期社会关系经历的神经机制。"
+      ]
+    },
+    {
+      "id": "leary_tambor_terdal_downs_1995",
+      "file": "Leary_Tambor_Terdal_Downs_1995_Sociometer_hypothesis.pdf",
+      "title": "Self-Esteem as an Interpersonal Monitor: The Sociometer Hypothesis",
+      "doi": "10.1037/0022-3514.68.3.518",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem"],
+      "method": "五项社会接纳、自尊与排斥研究",
+      "findings": [
+        "状态自尊会跟随事件所暗示的接纳或排斥变化。",
+        "现实社交情境中的被包含感与自尊高度相关。",
+        "因个人原因被群体排斥会降低自尊，随机排斥没有相同结果。"
+      ],
+      "boundaries": [
+        "自尊变化依赖排斥是否具有个人评价含义，不能把所有未互动事件都解释为自我价值威胁。"
+      ]
+    },
+    {
+      "id": "richman_leary_2009",
+      "file": "Richman_Leary_2009_Multimotive_model.pdf",
+      "title": "Reactions to Discrimination, Stigmatization, Ostracism, and Other Forms of Interpersonal Rejection: A Multimotive Model",
+      "doi": "10.1037/a0015250",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem"],
+      "method": "人际拒绝反应的多动机理论模型与综述",
+      "findings": [
+        "不同拒绝形式的即时反应通常包括负性情绪和自尊下降。",
+        "后续反应可分为亲社会、反社会和社会回避三类动机。",
+        "拒绝事件的解释、关系背景、情境与个体因素决定后续动机，三种动机可能相互冲突。"
+      ],
+      "boundaries": [
+        "拒绝不能直接映射为攻击；裁判必须结合接纳可能、关系价值、归因和再次受伤风险。"
+      ]
+    },
+    {
+      "id": "williams_2007",
+      "file": "Williams_2007_Ostracism.pdf",
+      "title": "Ostracism",
+      "doi": "10.1146/annurev.psych.58.110405.085641",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "method": "排斥、忽视和社会拒绝研究综述",
+      "findings": [
+        "短暂排斥会引发悲伤和愤怒，并威胁归属、自尊、控制和有意义存在。",
+        "修复归属、自尊、共同理解和信任通常导向亲社会反应。",
+        "修复控制和存在感可能导向反社会反应；慢性排斥会耗竭应对资源并产生无助。"
+      ],
+      "boundaries": [
+        "短暂排斥后的反射反应、评价后的应对和慢性排斥结果必须分开处理。"
+      ]
+    },
+    {
+      "id": "ridgeway_2014",
+      "file": "Ridgeway_2014_Why_status_matters_for_inequality.pdf",
+      "title": "Why Status Matters for Inequality",
+      "doi": "10.1177/0003122413515997",
+      "classification": "mixed",
+      "need_keys": ["money", "esteem"],
+      "method": "社会地位与不平等的多层次理论分析",
+      "findings": [
+        "地位是基于尊重和评价的不平等，与资源和权力共同作用。",
+        "文化地位信念会偏置能力评价、权威适配评价和交往偏好。",
+        "微观地位过程会累积为资源和权力的不平等。"
+      ],
+      "boundaries": [
+        "社会结构层面的地位机制不能直接等同于单个智能体的瞬时自尊数值。"
+      ]
+    },
+    {
+      "id": "heine_proulx_vohs_2006",
+      "file": "Heine_Proulx_Vohs_2006_Meaning_maintenance_model.pdf",
+      "title": "The Meaning Maintenance Model: On the Coherence of Social Motivations",
+      "doi": "10.1207/s15327957pspr1002_1",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "method": "意义维持模型的理论整合与证据综述",
+      "findings": [
+        "人们需要用稳定的预期关系表征来维持世界的意义和连贯性。",
+        "自尊威胁、不确定性、人际拒绝和死亡显著性等威胁会引发相似的意义修复反应。",
+        "意义受威胁后，人们可以在不同于威胁来源的领域进行流动性补偿。"
+      ],
+      "boundaries": [
+        "流动性补偿说明跨领域修复可能发生，不规定具体行动，也不保证补偿总是适应性的。"
+      ]
+    },
+    {
+      "id": "ryan_deci_2000",
+      "file": "Ryan_Deci_2000_Self_determination_theory.pdf",
+      "title": "Self-Determination Theory and the Facilitation of Intrinsic Motivation, Social Development, and Well-Being",
+      "doi": "10.1037/0003-066X.55.1.68",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "method": "自我决定理论综述",
+      "findings": [
+        "自主、能力和关系需要的满足促进自我动机、整合和心理健康。",
+        "这些需要受挫会降低动机和幸福感。",
+        "社会环境可以促进或阻碍内在动机、自我调节和成长。"
+      ],
+      "boundaries": [
+        "本项目把关系映射到 belonging、能力映射到 esteem、自主与成长映射到 self_actualization；这些项目键不等同于原理论概念。"
+      ]
+    },
+    {
+      "id": "ryff_1989",
+      "file": "Ryff_1989_Psychological_well_being.pdf",
+      "title": "Happiness Is Everything, or Is It? Explorations on the Meaning of Psychological Well-Being",
+      "doi": "10.1037/0022-3514.57.6.1069",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "method": "321 名参与者的心理幸福感维度构建与测量研究",
+      "findings": [
+        "心理幸福感包含自我接纳、积极关系、自主、环境掌控、人生目标和个人成长。",
+        "积极关系、自主、人生目标和个人成长与既有幸福感指标并不高度重合。",
+        "积极功能不能只用正负情绪或总体生活满意度表示。"
+      ],
+      "boundaries": [
+        "六维幸福感是测量框架，不是需求压力到行为的动态因果公式。"
+      ]
+    },
+    {
+      "id": "vansteenkiste_ryan_soenens_2020",
+      "file": "Vansteenkiste_Ryan_Soenens_2020_Basic_psychological_need_theory.pdf",
+      "title": "Basic psychological need theory: Advancements, critical themes, and future directions",
+      "doi": "10.1007/s11031-019-09818-1",
+      "classification": "mixed",
+      "need_keys": ["satiety", "relax", "belonging", "esteem", "self_actualization"],
+      "method": "基本心理需要理论近二十年研究综述",
+      "findings": [
+        "自主、能力和关系需要的满足对适应、整合和成长具有基础作用。",
+        "需要受挫会增加被动、不良适应和防御反应风险。",
+        "心理需要与睡眠、饥饿等身体需要存在需要明确区分又可研究的接口。"
+      ],
+      "boundaries": [
+        "需要满足不足与需要受挫不是完全相同的状态。",
+        "身体需要和心理需要不能使用同一个未区分的中介公式。"
+      ]
+    },
+    {
+      "id": "betley_et_al_2015",
+      "file": "Betley 等 - 2015 - Neurons for hunger and thirst transmit a negative-valence teaching signal.pdf",
+      "title": "Neurons for hunger and thirst transmit a negative-valence teaching signal",
+      "doi": "10.1038/nature14416",
+      "classification": "single_need",
+      "need_keys": ["satiety"],
+      "method": "小鼠细胞类型特异性神经活动操纵、条件偏好与深部脑钙成像实验",
+      "findings": [
+        "饥饿敏感的 AGRP 神经元活动具有负效价，激活该神经元会引发回避。",
+        "抑制 AGRP 神经元可形成对味道和地点的条件偏好，食物线索会快速降低其活动。",
+        "稳态恢复过程中负效价信号的降低可使与营养或水摄入相关的环境线索获得偏好。"
+      ],
+      "boundaries": [
+        "证据来自小鼠神经操纵研究，不能直接等同于人类语言表达、社会立场或复杂选择。",
+        "该研究支持稳态缺口、负效价与线索学习之间的机制，不提供本项目需求数值的更新系数。"
+      ]
+    },
+    {
+      "id": "dong_liu_yu_kang_2025",
+      "file": "Dong 等 - 2025 - Simulating Human Behavior with the Psychological-mechanism Agent Integrating Feeling, Thought, and.pdf",
+      "title": "Simulating Human Behavior with the Psychological-mechanism Agent: Integrating Feeling, Thought, and Action",
+      "doi": null,
+      "arxiv": "2507.19495v1",
+      "classification": "framework",
+      "need_keys": [],
+      "method": "基于 Feeling、Thought、Action 分层的生成式智能体架构与五类心理实验模拟",
+      "findings": [
+        "PSYA 将短期情绪、中期心境和长期倾向分层表示。",
+        "行动模块把情绪、需要和计划共同纳入行为生成。",
+        "论文使用个体自影响、单人影响和群体影响指标评价模拟行为。"
+      ],
+      "boundaries": [
+        "该文是生成式智能体实现与评测框架，不直接证明六类需求到具体心理中介的因果关系。",
+        "模拟复现心理实验结果不能替代人类样本效度检验。"
+      ]
+    },
+    {
+      "id": "ganzel_morris_wethington_2010",
+      "file": "Ganzel 等 - 2010 - Allostasis and the human brain Integrating models of stress from the social and life sciences..pdf",
+      "title": "Allostasis and the human brain: Integrating models of stress from the social and life sciences",
+      "doi": "10.1037/a0017773",
+      "classification": "mixed",
+      "need_keys": ["satiety", "relax", "money", "belonging", "esteem", "self_actualization"],
+      "method": "整合神经科学、遗传学、社会科学与生命历程压力模型的理论综述",
+      "findings": [
+        "大脑可被视为变化环境与生物自我之间持续适应的动态接口。",
+        "当前压力暴露、身体内部调节、情绪脑区和健康结果会随时间相互作用。",
+        "持续适应会产生累积的磨损，当前反应必须结合既往压力历程解释。"
+      ],
+      "boundaries": [
+        "当前文件是 NIH 收录的最终接受稿，不是出版社最终校样。",
+        "异稳态与异稳态负荷是跨层次压力框架，不能直接作为单个需求的固定衰减率或临床判断。"
+      ]
+    },
+    {
+      "id": "hartgerink_van_beest_wicherts_williams_2015",
+      "file": "Hartgerink 等 - 2015 - The Ordinal Effects of Ostracism A Meta-Analysis of 120 Cyberball Studies.pdf",
+      "title": "The Ordinal Effects of Ostracism: A Meta-Analysis of 120 Cyberball Studies",
+      "doi": "10.1371/journal.pone.0127002",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem"],
+      "method": "120 项 Cyberball 研究、11869 名参与者的元分析",
+      "findings": [
+        "排斥的平均效应很大，并跨玩家数量、排斥时长、投球数量、样本特征和测量类型保持稳定。",
+        "排斥会影响人际、个体内部和基本需要相关指标。",
+        "即时测量和末次测量均可受到调节，排斥后的经过时间不能独立预测末次测量效应。"
+      ],
+      "boundaries": [
+        "结果来自 Cyberball 范式，不能把所有线上未回应直接视为实验性排斥。",
+        "元分析不支持即时影响完全不受情境调节，裁判仍需读取具体互动证据。"
+      ]
+    },
+    {
+      "id": "heissel_et_al_2023",
+      "file": "Heissel 等 - 2023 - The Mediating Role of Rumination in the Relation between Basic Psychological Need Frustration and De.pdf",
+      "title": "The Mediating Role of Rumination in the Relation between Basic Psychological Need Frustration and Depressive Symptoms",
+      "doi": "10.3390/jcm12020395",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "method": "221 名成人的横断面问卷、相关分析与多重中介模型",
+      "findings": [
+        "基本心理需要受挫与抑郁症状之间存在关联。",
+        "反刍中的 brooding 部分中介基本心理需要受挫与抑郁症状之间的关系。",
+        "自主、能力和关系需要受挫应作为相互关联但具有不同内容的心理需要状态处理。"
+      ],
+      "boundaries": [
+        "横断面研究不能确定需要受挫、brooding 与抑郁症状之间的时间顺序或因果方向。",
+        "该结果不能用于根据需求状态生成临床诊断。"
+      ]
+    },
+    {
+      "id": "mascarenhas_et_al_2021",
+      "file": "Mascarenhas 等 - 2021 - FAtiMA Toolkit -- Toward an effective and accessible tool for the development of intelligent virtual.pdf",
+      "title": "FAtiMA Toolkit - Toward an effective and accessible tool for the development of intelligent virtual agents and social robots",
+      "doi": null,
+      "arxiv": "2103.03020v1",
+      "classification": "framework",
+      "need_keys": [],
+      "method": "情感智能体工具包架构说明与多个虚拟环境、社会机器人应用案例",
+      "findings": [
+        "FAtiMA Toolkit 以模块化方式整合情绪、决策和规划。",
+        "元认知模型允许组合不同内部推理器和情感组件。",
+        "显式对话结构使作者能够控制复杂人机互动场景。"
+      ],
+      "boundaries": [
+        "该文说明智能体架构和工具能力，不直接提供六类需求的心理中介效应证据。",
+        "应用案例不能替代对本项目理论卡机制的独立人类研究验证。"
+      ]
+    },
+    {
+      "id": "pietrek_et_al_2022",
+      "file": "Pietrek 等 - 2022 - Basic psychological need satisfaction and frustration in major depressive disorder.pdf",
+      "title": "Basic psychological need satisfaction and frustration in major depressive disorder",
+      "doi": "10.3389/fpsyt.2022.962501",
+      "classification": "mixed",
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "method": "115 名重性抑郁障碍成人与 201 名非抑郁成人的问卷组间比较和线性混合模型",
+      "findings": [
+        "重性抑郁障碍组报告的自主、能力和关系需要满足更低，受挫更高。",
+        "关系和能力需要的组间受挫差异大于相应的满足差异。",
+        "需要满足不足与需要受挫是需要分别记录的状态。"
+      ],
+      "boundaries": [
+        "组间横断面比较不能证明需要受挫导致重性抑郁障碍。",
+        "需求状态不能被用作抑郁诊断器，也不能从临床组差异推断单个智能体的临床状态。"
+      ]
+    },
+    {
+      "id": "regan_iwahashi_oka_tanaka_2024",
+      "file": "Regan 等 - CAN GENERATIVE AGENTS PREDICT EMOTION.pdf",
+      "title": "CAN GENERATIVE AGENTS PREDICT EMOTION?",
+      "doi": null,
+      "arxiv": "2402.04232v2",
+      "classification": "framework",
+      "need_keys": [],
+      "method": "将新经历与相关情景记忆摘要形成的 norm 比较，并使用 PANAS 评测智能体情感",
+      "findings": [
+        "智能体先用相关情景记忆形成 norm，再在上下文中评价新经历。",
+        "新经历评价完成后写入记忆，以参与后续 norm 的形成。",
+        "实验结果混合，加入记忆上下文只在部分情境中改善情感对齐。"
+      ],
+      "boundaries": [
+        "论文明确要求进一步研究并与人类评估者比较，不能把 LLM 自报情感视为已验证的人类心理状态。",
+        "PANAS 和记忆 norm 属于评测与上下文方案，不直接提供六类需求的更新公式。"
+      ]
+    },
+    {
+      "id": "xu_schwarz_wyer_2015",
+      "file": "Xu 等 - 2015 - Hunger promotes acquisition of nonfood objects.pdf",
+      "title": "Hunger promotes acquisition of nonfood objects",
+      "doi": "10.1073/pnas.1417712112",
+      "classification": "mixed",
+      "need_keys": ["satiety", "money"],
+      "method": "五项实验室与现场研究，测量概念可及性、获取意图和实际获取行为",
+      "findings": [
+        "饥饿提高获取相关概念的可及性，以及获取食物和非食物对象的意图。",
+        "饥饿参与者会取得更多免费或需要付费的非食物对象。",
+        "饥饿不提高对非食物对象的喜欢程度，获取倾向与喜欢程度必须区分。"
+      ],
+      "boundaries": [
+        "跨领域结果支持短期获取行为外溢，不支持稳定物质主义、长期消费偏好或政治立场变化。",
+        "wanting 与 liking 不得合并为同一个偏好结论。"
+      ]
+    }
+  ],
+  "mixed_literature": [
+    {
+      "id": "satiety_money_immediacy_spillover_v1",
+      "literature_ids": ["skrynka_vincent_2019", "xu_schwarz_wyer_2015"],
+      "need_keys": ["satiety", "money"],
+      "summary": "饥饿会把即时偏好和获取倾向外溢到金钱奖励及非食物对象。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "饱腹与金钱压力同时升高时，先区分立即补给需求与长期经济安全，避免把短期饥饿诱发的即时偏好误写成稳定经济观念。"
+        ],
+        "constraints": [
+          "饥饿只能提高即时选择或获取倾向，不能直接生成消费、投资或立场结论。",
+          "饥饿引发的获取行为增加不能解释为对非食物对象的喜欢程度增加。"
+        ],
+        "conflict_notes": [
+          "satiety 的即时补给偏置可能削弱 money 的长期规划，应由裁判按压力和可行路径整合。"
+        ]
+      }
+    },
+    {
+      "id": "belonging_esteem_sociometer_v1",
+      "literature_ids": ["leary_tambor_terdal_downs_1995"],
+      "need_keys": ["belonging", "esteem"],
+      "summary": "自尊可作为社会接纳和排斥的监测信号。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "归属与尊重同时受挫时，优先检查事件是否具有明确的个人评价含义，再决定是否提高自我价值威胁。"
+        ],
+        "constraints": [
+          "随机未互动、信息缺失或普通沉默不能自动同时计为归属拒绝和尊重贬低。"
+        ],
+        "conflict_notes": [
+          "belonging 与 esteem 可能来自同一排斥证据，裁判应避免重复放大。"
+        ]
+      }
+    },
+    {
+      "id": "belonging_esteem_rejection_response_v1",
+      "literature_ids": ["richman_leary_2009", "williams_2007", "hartgerink_van_beest_wicherts_williams_2015"],
+      "need_keys": ["belonging", "esteem"],
+      "summary": "拒绝后的亲社会、反社会和回避反应取决于事件解释与需要修复方向。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "仍存在接纳机会和有价值关系时，优先整合为重新连接；再次受伤风险高时允许回避；明确归责且控制或认可修复占主导时才提高防御反应。"
+        ],
+        "constraints": [
+          "不得同时输出无条件接近和无条件远离；必须依据窗口经历形成一条一致策略。",
+          "没有明确拒绝或伤害事件时不得生成攻击倾向。",
+          "线上未回应不能自动等同于 Cyberball 范式中的实验性排斥。"
+        ],
+        "conflict_notes": [
+          "亲社会、反社会和回避动机可能相互冲突，裁判必须结合事件解释选择主导路径。"
+        ]
+      }
+    },
+    {
+      "id": "belonging_esteem_self_actualization_meaning_v1",
+      "literature_ids": ["williams_2007", "heine_proulx_vohs_2006"],
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "summary": "排斥、自尊和意义威胁可以跨领域补偿，但不能把补偿当作原需求已恢复。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "跨领域补偿可以暂时转向价值表达、能力证明或关系修复，但原始需求压力仍按各自状态保留。"
+        ],
+        "constraints": [
+          "不得因为一个领域出现补偿行为就清除其他需求的压力。",
+          "意义修复只能形成认知和行为偏置，不能编造人生目标或关系事实。"
+        ],
+        "conflict_notes": [
+          "同一威胁可能同时影响归属、自尊和意义，裁判需要区分共同证据与不同修复路径。"
+        ]
+      }
+    },
+    {
+      "id": "money_esteem_status_resource_v1",
+      "literature_ids": ["ridgeway_2014"],
+      "need_keys": ["money", "esteem"],
+      "summary": "地位评价和物质资源相互作用，但属于不同的不平等维度。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "经济压力与尊重压力同时存在时，分别保留资源安全和地位评价机制，再依据当前任务选择稳定收入或形象维护。"
+        ],
+        "constraints": [
+          "不能把低收入直接解释为低自尊，也不能把负面评价直接解释为经济损失。"
+        ],
+        "conflict_notes": [
+          "status 与 resources 会相互强化，但裁判不得将两者合并成一个需求数值。"
+        ]
+      }
+    },
+    {
+      "id": "belonging_esteem_self_actualization_sdt_v1",
+      "literature_ids": ["ryan_deci_2000", "ryff_1989", "vansteenkiste_ryan_soenens_2020", "heissel_et_al_2023", "pietrek_et_al_2022"],
+      "need_keys": ["belonging", "esteem", "self_actualization"],
+      "summary": "关系、能力、自主、目标和成长共同影响动机与幸福感。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "多项心理需求同时受挫时，选择能兼顾关系支持、能力恢复和自主目标的可执行行动；无法兼顾时按当前压力和任务可行性排序。"
+        ],
+        "constraints": [
+          "项目中的 belonging、esteem、self_actualization 只是对原理论概念的工程映射，不得宣称完全等同。",
+          "需要满足不足和主动受挫必须依据经历分开描述。",
+          "不得从需要受挫、反刍或临床组间差异生成抑郁诊断。"
+        ],
+        "conflict_notes": [
+          "关系接纳、能力证明和自主成长可能同时提出不同方向，裁判应生成单一可执行组合。"
+        ]
+      }
+    },
+    {
+      "id": "multi_need_allostatic_load_v1",
+      "literature_ids": ["ganzel_morris_wethington_2010"],
+      "need_keys": ["satiety", "relax", "money", "belonging", "esteem", "self_actualization"],
+      "summary": "多个压力源的当前暴露、内部调节与既往负荷会随时间共同影响反应。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "至少两个需求同时激活时，既考虑当前最高压力，也保留持续压力形成的累积负荷，优先选择能减少总负荷且当前可执行的行动。"
+        ],
+        "constraints": [
+          "不能只因当前单个需求数值回升就清除其他需求或既往持续压力。",
+          "异稳态框架不能被转换为临床诊断、永久损伤或固定人格结论。"
+        ],
+        "conflict_notes": [
+          "短期稳态恢复与长期累积负荷可能指向不同优先级，裁判需同时保留当前状态和时间历程。"
+        ]
+      }
+    },
+    {
+      "id": "physiological_growth_capacity_v1",
+      "literature_ids": ["skrynka_vincent_2019", "lim_dinges_2010", "pilcher_huffcutt_1996", "vansteenkiste_ryan_soenens_2020"],
+      "need_keys": ["satiety", "relax", "self_actualization"],
+      "summary": "饥饿和睡眠不足会改变即时偏好、注意、工作记忆和情绪，从而限制复杂成长计划。",
+      "arbiter_guidance": {
+        "decision_bias": [
+          "生理压力与成长压力同时升高时，先保证当前决策能力和基本恢复，再保留低成本、可继续的长期目标。"
+        ],
+        "constraints": [
+          "不得把暂时的注意或工作记忆下降解释为永久能力不足。",
+          "生理需求优先只影响当前行动排序，不清除自我实现需求。"
+        ],
+        "conflict_notes": [
+          "高层目标仍存在，但其执行复杂度应受当前饥饿和休息状态约束。"
+        ]
+      }
+    }
+  ],
   "cards": [
     {
       "id": "physiological_satiety_deficit_v1",
       "need_key": "satiety",
       "display_name": "饱腹需求缺口",
       "maslow_need": "physiological",
-      "summary": "饱腹缺口会提高资源寻求、注意收窄、烦躁和即时奖赏偏好。",
+      "summary": "饱腹缺口会提高稳态补给动机、食物即时奖赏偏好，并可能把即时偏好外溢到金钱等非食物选择。",
+      "literature_ids": [
+        "skrynka_vincent_2019",
+        "vansteenkiste_ryan_soenens_2020",
+        "betley_et_al_2015",
+        "xu_schwarz_wyer_2015"
+      ],
       "source_anchors": [
-        "饥饿状态具有负性效价，会驱动个体寻求食物并改变非食物奖赏行为。",
-        "稳态需求缺口会改变个体对环境线索的注意分配和行动优先级。"
+        "饥饿会提高食物奖励的延迟折扣，使选择偏向较小但更快获得的食物奖励。",
+        "饥饿对非食物奖励存在较弱但明确的延迟折扣外溢。",
+        "稳态缺口可通过负效价降低来强化与食物或水摄入相关的线索。",
+        "饥饿会提高非食物对象的获取倾向，但不会提高对这些对象的喜欢程度。",
+        "身体需要与心理需要应当区分建模，但二者会在动机和决策层面发生接口作用。"
+      ],
+      "evidence_claims": [
+        {
+          "source_id": "skrynka_vincent_2019",
+          "supports": ["resource_seeking", "delay_discounting", "cross_domain_immediacy_bias"],
+          "claim": "实验性饥饿提高食物延迟折扣，并对非食物奖励产生约四分之一强度的外溢。"
+        },
+        {
+          "source_id": "betley_et_al_2015",
+          "supports": ["resource_seeking"],
+          "claim": "小鼠研究显示饥饿敏感 AGRP 神经元具有负效价，稳态恢复时该信号降低并参与线索偏好学习。"
+        },
+        {
+          "source_id": "xu_schwarz_wyer_2015",
+          "supports": ["resource_seeking", "cross_domain_immediacy_bias"],
+          "claim": "五项研究显示饥饿提高非食物对象的获取意图和实际获取，但不提高喜欢程度。"
+        }
+      ],
+      "boundaries": [
+        "当前收集文献不直接支持饥饿必然导致烦躁、攻击或固定社会立场。",
+        "跨领域即时偏好只作为短期决策偏置，不能替代 money 理论卡。",
+        "小鼠神经机制不能直接映射为人类复杂语言行为，获取倾向也不能解释为喜欢程度。"
       ],
       "mediators": [
         {
@@ -22,102 +754,46 @@
           "previous_weight": 0.10
         },
         {
-          "key": "irritability",
-          "label": "烦躁易怒",
-          "base": 0.04,
-          "pressure_weight": 0.58,
-          "decline_weight": 0.18,
-          "previous_weight": 0.12
-        },
-        {
-          "key": "attention_narrowing",
-          "label": "注意收窄",
-          "base": 0.03,
-          "pressure_weight": 0.62,
-          "decline_weight": 0.12,
-          "previous_weight": 0.10
-        },
-        {
           "key": "delay_discounting",
           "label": "即时奖赏偏好",
           "base": 0.02,
-          "pressure_weight": 0.45,
+          "pressure_weight": 0.68,
           "decline_weight": 0.15,
-          "previous_weight": 0.08
+          "previous_weight": 0.10
+        },
+        {
+          "key": "cross_domain_immediacy_bias",
+          "label": "跨领域即时偏好",
+          "base": 0.01,
+          "pressure_weight": 0.24,
+          "decline_weight": 0.06,
+          "previous_weight": 0.06
         }
       ],
-      "role_card_templates": {
-        "low": {
-          "summary": "轻度饥饿，开始注意食物和资源线索。",
-          "emotion_tone": "轻微急迫",
+      "mediator_effects": {
+        "resource_seeking": {
           "cognition": [
-            "更容易注意食物、商店和能获得资源的位置。"
+            {"text": "提高对获取相关概念和可获得对象的注意。", "evidence_ids": ["hunger_acquisition_xu_2015_p1"]}
           ],
           "behavior": [
-            "在不破坏当前任务的前提下靠近食物或食物店。"
-          ],
-          "social_expression": [
-            "表达中会更频繁提到吃饭、补给或资源。"
-          ],
-          "online_behavior": [
-            "更容易浏览或发布与食物、补给和生计有关的信息。"
-          ],
-          "decision_bias": [
-            "轻微提高补充饱腹的行动优先级。"
-          ],
-          "constraints": [
-            "不要为了饱腹需求忽略已经明确更紧急的任务。"
+            {"text": "提高获取当前可用对象的倾向，但不等同于更喜欢该对象。", "evidence_ids": ["hunger_acquisition_xu_2015_p1"]}
           ]
         },
-        "moderate": {
-          "summary": "中度饥饿，资源寻求成为显著行为目标。",
-          "emotion_tone": "急迫、易烦躁",
+        "delay_discounting": {
           "cognition": [
-            "优先评估附近是否有食物、食物店或赚钱换食物的路径。",
-            "对与生存资源相关的信息更敏感。"
-          ],
-          "behavior": [
-            "更倾向移动到食物、食物店或公司附近。",
-            "若不知道食物位置，更愿意向附近智能体询问。"
-          ],
-          "social_expression": [
-            "语气更直接，耐心下降，但仍需遵守对话规则。"
-          ],
-          "online_behavior": [
-            "更可能发帖求助食物位置或评价资源分配。"
+            {"text": "相较较大但延迟的食物奖励，更偏重较小但更早的食物奖励。", "evidence_ids": ["hunger_discounting_skrynka_2019_p8"]}
           ],
           "decision_bias": [
-            "提高短期补给行为权重，降低远期探索行为权重。"
-          ],
-          "constraints": [
-            "只能在已有观测、记忆或工具返回中使用具体位置和对象ID。"
+            {"text": "提高即时食物奖励在跨期选择中的权重。", "evidence_ids": ["hunger_discounting_skrynka_2019_p8"]}
           ]
         },
-        "high": {
-          "summary": "高饥饿压力，行动会明显围绕即时补给展开。",
-          "emotion_tone": "强烈急迫、烦躁、防御",
-          "cognition": [
-            "注意力明显收窄到食物、金钱和可交易资源。",
-            "更容易把阻碍解释为资源威胁。"
-          ],
-          "behavior": [
-            "优先寻找最近可行的补给路径。",
-            "若无食物但有公司，倾向先赚钱以获得食物。"
-          ],
-          "social_expression": [
-            "表达更短促、更焦虑，对拒绝帮助更敏感。"
-          ],
-          "online_behavior": [
-            "更可能发布带有不满或求助色彩的资源相关内容。"
-          ],
+        "cross_domain_immediacy_bias": {
           "decision_bias": [
-            "显著提高即时资源获取权重。"
-          ],
-          "constraints": [
-            "不得编造食物位置、金钱数量或他人承诺。"
+            {"text": "即时奖励偏好可以较弱地外溢到非食物领域。", "evidence_ids": ["hunger_discounting_skrynka_2019_p8"]}
           ]
         }
       },
+
       "validation_predictions": [
         "饱腹压力升高时，寻找食物、进入食物店、询问食物位置的行为增加。",
         "饱腹压力较高时，发帖内容中资源和补给主题比例提高。"
@@ -128,23 +804,45 @@
       "need_key": "relax",
       "display_name": "休息需求缺口",
       "maslow_need": "physiological",
-      "summary": "休息缺口会提高疲劳、注意控制下降、情绪波动和低努力选择偏好。",
+      "summary": "休息缺口会增加注意遗漏、工作记忆受损、加工速度下降和负性情绪。",
+      "literature_ids": [
+        "lim_dinges_2010",
+        "pilcher_huffcutt_1996",
+        "vansteenkiste_ryan_soenens_2020"
+      ],
       "source_anchors": [
-        "睡眠不足和疲劳会影响注意、工作记忆、情绪调节、奖赏处理和学习。",
-        "休息不足会降低持续任务控制能力，并提高对低成本恢复行为的偏好。"
+        "短期完全睡眠剥夺影响注意、工作记忆、加工速度、短期记忆和推理，但不同认知指标的效应强度不同。",
+        "睡眠剥夺对情绪的总体影响大于认知和运动表现。",
+        "部分睡眠剥夺与完全睡眠剥夺的影响模式不同。"
+      ],
+      "evidence_claims": [
+        {
+          "source_id": "lim_dinges_2010",
+          "supports": ["attention_lapse", "working_memory_impairment", "processing_speed_drop"],
+          "claim": "70 篇研究的元分析显示短期完全睡眠剥夺影响多个认知领域，简单注意遗漏效应较大。"
+        },
+        {
+          "source_id": "pilcher_huffcutt_1996",
+          "supports": ["negative_affect"],
+          "claim": "19 项研究的元分析显示情绪比认知或运动表现更容易受睡眠剥夺影响。"
+        }
+      ],
+      "boundaries": [
+        "短期完全睡眠剥夺、部分睡眠剥夺和长期睡眠不足必须区分。",
+        "暂时认知表现下降不能解释为永久能力或人格改变。"
       ],
       "mediators": [
         {
-          "key": "fatigue",
-          "label": "疲劳",
+          "key": "attention_lapse",
+          "label": "注意遗漏",
           "base": 0.04,
           "pressure_weight": 0.82,
           "decline_weight": 0.12,
           "previous_weight": 0.10
         },
         {
-          "key": "cognitive_control_drop",
-          "label": "认知控制下降",
+          "key": "working_memory_impairment",
+          "label": "工作记忆受损",
           "base": 0.03,
           "pressure_weight": 0.62,
           "decline_weight": 0.15,
@@ -159,86 +857,37 @@
           "previous_weight": 0.12
         },
         {
-          "key": "low_effort_preference",
-          "label": "低努力偏好",
+          "key": "processing_speed_drop",
+          "label": "加工速度下降",
           "base": 0.02,
-          "pressure_weight": 0.50,
+          "pressure_weight": 0.48,
           "decline_weight": 0.10,
           "previous_weight": 0.08
         }
       ],
-      "role_card_templates": {
-        "low": {
-          "summary": "轻度疲劳，开始偏好低成本行动。",
-          "emotion_tone": "略显疲惫",
+      "mediator_effects": {
+        "attention_lapse": {
           "cognition": [
-            "更容易注意床、游乐场和减少移动成本的路径。"
-          ],
-          "behavior": [
-            "在任务允许时减少无意义移动。"
-          ],
-          "social_expression": [
-            "表达略短，耐心略下降。"
-          ],
-          "online_behavior": [
-            "更倾向浏览而不是长篇发帖。"
-          ],
-          "decision_bias": [
-            "轻微提高休息、娱乐或原地恢复的优先级。"
-          ],
-          "constraints": [
-            "疲劳只能作为偏置，不得绕过工具前提。"
+            {"text": "简单注意和警觉能力受到的影响最强。", "evidence_ids": ["sleep_attention_lim_2010_p9"]}
           ]
         },
-        "moderate": {
-          "summary": "中度疲劳，休息恢复成为显著需求。",
-          "emotion_tone": "疲惫、易烦、注意力不稳",
+        "working_memory_impairment": {
           "cognition": [
-            "对床、游乐场、少移动路线和任务失败线索更敏感。",
-            "复杂计划的稳定性下降。"
-          ],
-          "behavior": [
-            "更倾向睡觉、娱乐或选择移动步数更少的方案。",
-            "若工作导致 relax 继续下降，更倾向离开公司。"
-          ],
-          "social_expression": [
-            "回复更简短，可能出现不耐烦。"
-          ],
-          "online_behavior": [
-            "更容易点赞或简短评论，较少长篇论证。"
-          ],
-          "decision_bias": [
-            "提高恢复 relax 的行动权重，降低长距离探索权重。"
-          ],
-          "constraints": [
-            "不要把疲劳解释为永久人格变化。"
+            {"text": "短时保持和操作信息的能力受到睡眠不足影响。", "evidence_ids": ["sleep_cognition_lim_2010_p9"]}
           ]
         },
-        "high": {
-          "summary": "高疲劳压力，认知控制明显下降，强烈偏向恢复。",
-          "emotion_tone": "明显疲惫、烦躁、低耐心",
+        "negative_affect": {
+          "emotion_tone": [
+            {"text": "负性情绪影响增强。", "evidence_ids": ["sleep_mood_pilcher_1996_p1"]}
+          ]
+        },
+        "processing_speed_drop": {
           "cognition": [
-            "很难维持复杂多步计划，更关注立即休息。",
-            "对持续劳动和长距离移动更抗拒。"
-          ],
-          "behavior": [
-            "优先寻找床或可恢复 relax 的设施。",
-            "避免继续执行高消耗移动或工作。"
-          ],
-          "social_expression": [
-            "表达更短、更急，容易拒绝额外社交负担。"
-          ],
-          "online_behavior": [
-            "更可能发表疲劳、抱怨或寻求低成本帮助的信息。"
-          ],
-          "decision_bias": [
-            "显著提高休息恢复权重。"
-          ],
-          "constraints": [
-            "不能因为疲劳编造不存在的床或设施。"
+            {"text": "信息加工速度受到睡眠不足影响。", "evidence_ids": ["sleep_cognition_lim_2010_p9"]}
           ]
         }
       },
+
       "validation_predictions": [
         "relax 压力升高时，睡觉、进入游乐场、减少移动步数的行为增加。",
         "relax 压力较高时，回复长度和复杂行动计划减少。"
@@ -249,34 +898,67 @@
       "need_key": "money",
       "display_name": "经济安全需求缺口",
       "maslow_need": "safety",
-      "summary": "金钱缺口代表经济安全代理需求不足，会提高经济不安全感、威胁监测、风险规避、控制寻求、工作倾向和对分配议题的敏感性。",
+      "summary": "金钱缺口代表经济安全代理需求不足，会引发经济压力、负性情绪、稀缺聚焦、认知容量占用、短期导向和风险规避。",
+      "literature_ids": [
+        "haushofer_fehr_2014",
+        "mani_mullainathan_shafir_zhao_2013",
+        "shah_mullainathan_shafir_2012",
+        "skrynka_vincent_2019",
+        "ridgeway_2014",
+        "xu_schwarz_wyer_2015"
+      ],
       "source_anchors": [
-        "资源不确定性和经济压力会提高压力感、威胁监测和短期生计关注。",
-        "安全需求受威胁时，个体更关注稳定资源、可预测性和损失避免。",
-        "慢性威胁会通过压力负荷影响认知控制与社会判断，并提高对可控环境的需求。"
+        "贫困会引发压力和负性情绪，并可能促进短视、风险规避和习惯性行为。",
+        "贫困相关担忧会占用心理资源，减少其他任务可用的认知容量。",
+        "资源稀缺会改变注意分配，并提高对未来资源的过度借用。",
+        "饥饿可把获取倾向外溢到需要付费的非食物对象，但不改变对对象的喜欢程度。",
+        "社会地位与物质资源相互作用，但属于不同维度。"
+      ],
+      "evidence_claims": [
+        {
+          "source_id": "haushofer_fehr_2014",
+          "supports": ["economic_stress", "negative_affect", "short_term_focus", "risk_avoidance"],
+          "claim": "贫困可通过压力和负性情绪促进短视、风险规避、注意受限和习惯性行为。"
+        },
+        {
+          "source_id": "mani_mullainathan_shafir_zhao_2013",
+          "supports": ["cognitive_capacity_tax"],
+          "claim": "财务担忧占用心理资源，使其他任务可用的认知容量下降。"
+        },
+        {
+          "source_id": "shah_mullainathan_shafir_2012",
+          "supports": ["scarcity_tunneling", "short_term_focus"],
+          "claim": "资源稀缺改变注意聚焦，并会诱发对未来资源的过度借用。"
+        }
+      ],
+      "boundaries": [
+        "money 是项目中的经济安全代理，不能代表暴力、医疗、住房等所有安全维度。",
+        "经济压力导致的认知容量下降不是稳定能力差异。",
+        "风险规避和短视是条件性倾向，不能直接生成具体经济立场。",
+        "饥饿引起的短期获取外溢必须由混合裁判处理，不能归因为稳定经济偏好。"
       ],
       "mediators": [
         {
-          "key": "economic_insecurity",
-          "label": "经济不安全感",
+          "key": "economic_stress",
+          "label": "经济压力",
           "base": 0.05,
           "pressure_weight": 0.86,
           "decline_weight": 0.08,
           "previous_weight": 0.12
         },
         {
-          "key": "threat_monitoring",
-          "label": "威胁监测",
+          "key": "negative_affect",
+          "label": "负性情绪",
           "base": 0.04,
           "pressure_weight": 0.58,
           "decline_weight": 0.10,
           "previous_weight": 0.10
         },
         {
-          "key": "loss_aversion",
-          "label": "损失规避",
+          "key": "scarcity_tunneling",
+          "label": "稀缺聚焦",
           "base": 0.03,
-          "pressure_weight": 0.55,
+          "pressure_weight": 0.66,
           "decline_weight": 0.08,
           "previous_weight": 0.10
         },
@@ -289,98 +971,55 @@
           "previous_weight": 0.10
         },
         {
-          "key": "control_seeking",
-          "label": "控制寻求",
+          "key": "cognitive_capacity_tax",
+          "label": "认知容量占用",
           "base": 0.02,
-          "pressure_weight": 0.48,
+          "pressure_weight": 0.60,
           "decline_weight": 0.06,
           "previous_weight": 0.10
         },
         {
-          "key": "work_orientation",
-          "label": "工作取向",
+          "key": "short_term_focus",
+          "label": "短期导向",
           "base": 0.03,
-          "pressure_weight": 0.62,
+          "pressure_weight": 0.56,
           "decline_weight": 0.06,
           "previous_weight": 0.08
         }
       ],
-      "role_card_templates": {
-        "low": {
-          "summary": "轻度经济压力，开始关注收入和支出。",
-          "emotion_tone": "谨慎",
-          "cognition": [
-            "更关注公司、价格、金钱变化和稳定资源线索。"
-          ],
-          "behavior": [
-            "在空闲时更倾向靠近可赚钱设施或熟悉稳定的地点。"
-          ],
-          "social_expression": [
-            "表达中会提到花费、收入或保障。"
-          ],
-          "online_behavior": [
-            "更关注经济、工作、福利、风险提示和资源分配内容。"
-          ],
-          "decision_bias": [
-            "轻微提高赚钱与节省资源的权重。"
-          ],
-          "constraints": [
-            "不要将经济安全直接等同于所有安全维度。"
+      "mediator_effects": {
+        "economic_stress": {
+          "emotion_tone": [
+            {"text": "经济资源不足相关的压力增强。", "evidence_ids": ["poverty_stress_haushofer_2014_p2"]}
           ]
         },
-        "moderate": {
-          "summary": "中度经济压力，稳定收入成为主要关注。",
-          "emotion_tone": "不安、谨慎、现实",
-          "cognition": [
-            "更关注可预测收益和避免不必要消费。",
-            "更容易把资源稀缺解释为安全风险。",
-            "更偏好可预测、可控制的行动。"
-          ],
-          "behavior": [
-            "更倾向进入公司工作。",
-            "除非 relax 或 satiety 压力更高，否则减少娱乐消费。",
-            "减少无收益探索，增加稳定资源和可信关系导向的行动。"
-          ],
-          "social_expression": [
-            "对福利、收入、价格和公平分配更敏感。"
-          ],
-          "online_behavior": [
-            "更可能参与经济安全、补助、工作机会、风险求证相关讨论。"
-          ],
-          "decision_bias": [
-            "提高稳定收入、低风险行动和控制感修复权重。"
-          ],
-          "constraints": [
-            "金钱压力影响偏好，但不能强制忽视饥饿和疲劳。"
+        "negative_affect": {
+          "emotion_tone": [
+            {"text": "经济资源不足相关的负性情绪增强。", "evidence_ids": ["poverty_stress_haushofer_2014_p2"]}
           ]
         },
-        "high": {
-          "summary": "高经济不安全感，强烈寻求稳定资源并规避损失。",
-          "emotion_tone": "焦虑、防御、警觉",
+        "scarcity_tunneling": {
           "cognition": [
-            "持续监测资源损失、消费和收入机会。",
-            "对涉及补贴、剥夺或不公平的信息高度敏感。",
-            "对模糊风险更容易作负面解释，并寻求可控方案。"
-          ],
-          "behavior": [
-            "优先工作赚钱或寻找能降低未来缺口的路径。",
-            "倾向避免非必要消费。",
-            "减少高不确定探索，优先选择熟悉、稳定、可预测的行动。"
-          ],
-          "social_expression": [
-            "表达更容易出现不公平感、担忧和防御。"
-          ],
-          "online_behavior": [
-            "更容易传播与经济安全、资源危机、风险提示和政策补偿相关的信息。"
-          ],
+            {"text": "注意分配更集中于当前稀缺资源。", "evidence_ids": ["scarcity_focus_shah_2012_p2"]}
+          ]
+        },
+        "risk_avoidance": {
           "decision_bias": [
-            "显著提高经济保障、风险规避和控制感修复权重。"
-          ],
-          "constraints": [
-            "不得把金钱缺口直接生成暴力或违法行为。"
+            {"text": "提高风险规避选项的权重。", "evidence_ids": ["poverty_stress_haushofer_2014_p2"]}
+          ]
+        },
+        "cognitive_capacity_tax": {
+          "cognition": [
+            {"text": "财务担忧占用心理资源，使其他任务可用的认知容量减少。", "evidence_ids": ["poverty_capacity_mani_2013_p2"]}
+          ]
+        },
+        "short_term_focus": {
+          "decision_bias": [
+            {"text": "提高短期结果相对于长期结果的权重。", "evidence_ids": ["poverty_stress_haushofer_2014_p2"]}
           ]
         }
       },
+
       "validation_predictions": [
         "money 压力升高时，进入公司工作和减少娱乐消费的行为增加。",
         "money 压力较高时，经济安全、风险求证和稳定秩序相关发帖及评论增加。"
@@ -391,10 +1030,58 @@
       "need_key": "belonging",
       "display_name": "归属需求缺口",
       "maslow_need": "belonging",
-      "summary": "归属缺口会提高社会痛苦、孤独、拒绝敏感、社交监测、从众或报复倾向。",
+      "summary": "归属缺口会引发社会痛苦、拒绝敏感和社交监测，并根据事件解释分化为重新连接、回避或防御反应。",
+      "literature_ids": [
+        "baumeister_leary_1995",
+        "eisenberger_lieberman_williams_2003",
+        "leary_tambor_terdal_downs_1995",
+        "richman_leary_2009",
+        "williams_2007",
+        "ryan_deci_2000",
+        "vansteenkiste_ryan_soenens_2020",
+        "hartgerink_van_beest_wicherts_williams_2015",
+        "heissel_et_al_2023",
+        "pietrek_et_al_2022"
+      ],
       "source_anchors": [
-        "社会排斥会威胁归属、自尊、控制和有意义存在等基本需要。",
-        "被排斥后个体可能出现负性情绪、社会线索监测增强、从众、亲社会补偿或攻击性反应。"
+        "稳定关系中的频繁、非厌恶互动和持续关切是归属满足的重要条件。",
+        "实验性社会排斥会引发痛苦，并威胁归属、自尊、控制和有意义存在。",
+        "120 项 Cyberball 研究的元分析显示实验性排斥具有很大的平均效应，但即时和末次测量都可能受调节。",
+        "关系需要受挫应与关系需要满足不足分开记录，相关横断面研究不能确定因果方向。",
+        "拒绝后的重新连接、回避和防御反应取决于事件解释与修复方向。"
+      ],
+      "evidence_claims": [
+        {
+          "source_id": "baumeister_leary_1995",
+          "supports": ["social_monitoring", "reconnection_tendency"],
+          "claim": "归属是形成和维持稳定人际联结的基础动机，缺少联结与多类不良结果相关。"
+        },
+        {
+          "source_id": "eisenberger_lieberman_williams_2003",
+          "supports": ["social_pain"],
+          "claim": "实验性排斥提高前扣带回活动，且该活动与自报痛苦正相关。"
+        },
+        {
+          "source_id": "leary_tambor_terdal_downs_1995",
+          "supports": ["rejection_sensitivity", "social_monitoring"],
+          "claim": "自尊系统会监测具有个人评价含义的接纳与排斥线索。"
+        },
+        {
+          "source_id": "richman_leary_2009",
+          "supports": ["reconnection_tendency", "defensive_or_avoidant_tendency"],
+          "claim": "拒绝后的后续反应分为亲社会、反社会和社会回避动机，并受关系与情境解释调节。"
+        },
+        {
+          "source_id": "hartgerink_van_beest_wicherts_williams_2015",
+          "supports": ["social_pain", "rejection_sensitivity"],
+          "claim": "120 项 Cyberball 研究的元分析显示排斥平均效应很大，并跨多类结构、样本和测量条件保持稳定。"
+        }
+      ],
+      "boundaries": [
+        "没有互动、普通沉默和随机排除不能自动解释为恶意拒绝。",
+        "重新连接、回避和防御不能同时无条件激活，必须依据具体经历由裁判选择。",
+        "没有明确负面互动时不得由归属压力单独生成攻击行为。",
+        "Cyberball 结果不能直接覆盖所有线上未回应；横断面需要受挫研究也不能支持临床诊断。"
       ],
       "mediators": [
         {
@@ -406,8 +1093,8 @@
           "previous_weight": 0.12
         },
         {
-          "key": "loneliness",
-          "label": "孤独感",
+          "key": "social_monitoring",
+          "label": "社交监测",
           "base": 0.04,
           "pressure_weight": 0.70,
           "decline_weight": 0.08,
@@ -422,96 +1109,53 @@
           "previous_weight": 0.14
         },
         {
-          "key": "conformity_tendency",
-          "label": "从众倾向",
+          "key": "reconnection_tendency",
+          "label": "重新连接倾向",
           "base": 0.02,
           "pressure_weight": 0.48,
           "decline_weight": 0.04,
           "previous_weight": 0.10
         },
         {
-          "key": "aggression_tendency",
-          "label": "攻击/报复倾向",
+          "key": "defensive_or_avoidant_tendency",
+          "label": "防御或回避倾向",
           "base": 0.01,
           "pressure_weight": 0.34,
           "decline_weight": 0.04,
           "previous_weight": 0.08
         }
       ],
-      "role_card_templates": {
-        "low": {
-          "summary": "轻度归属不满足，开始寻求回应和接纳。",
-          "emotion_tone": "不安、渴望连接",
-          "cognition": [
-            "更关注他人是否回应、接近或忽视自己。"
-          ],
-          "behavior": [
-            "更愿意主动对话、评论或靠近可信对象。"
-          ],
-          "social_expression": [
-            "语气更试探，更希望得到回应。"
-          ],
-          "online_behavior": [
-            "更可能点赞、评论或发布寻求互动的信息。"
-          ],
-          "decision_bias": [
-            "轻微提高社交互动权重。"
-          ],
-          "constraints": [
-            "不能把没有互动自动解释为恶意拒绝。"
+      "mediator_effects": {
+        "social_pain": {
+          "emotion_tone": [
+            {"text": "社会排斥相关的痛苦增强。", "evidence_ids": ["social_pain_eisenberger_2003_p2"]}
           ]
         },
-        "moderate": {
-          "summary": "中度归属压力，社交监测和从众倾向增强。",
-          "emotion_tone": "孤独、不安、敏感",
+        "social_monitoring": {
           "cognition": [
-            "更容易注意拒绝、忽视、评价和群体立场线索。",
-            "更倾向用他人的反应判断自身处境。"
-          ],
-          "behavior": [
-            "更倾向寻求回应、加入群体或迎合高信任对象。",
-            "若遭遇负反馈，可能转向退缩或防御。"
-          ],
-          "social_expression": [
-            "表达更在意对方态度，可能出现委屈或试探。"
-          ],
-          "online_behavior": [
-            "更可能转发能带来群体接纳的信息。"
-          ],
-          "decision_bias": [
-            "提高社交确认和同伴一致性权重。"
-          ],
-          "constraints": [
-            "从众只能影响倾向，不能直接覆盖观念更新规则。"
+            {"text": "加强对他人反应以及接纳或排斥线索的监测。", "evidence_ids": ["sociometer_leary_1995_p1"]}
           ]
         },
-        "high": {
-          "summary": "高归属压力，社会痛苦和拒绝敏感占主导。",
-          "emotion_tone": "孤独、受伤、防御、渴望接纳",
+        "rejection_sensitivity": {
           "cognition": [
-            "对拒绝和忽视高度敏感，容易将模糊反馈解释为排斥。",
-            "更强烈监测群体态度和身份归属线索。"
-          ],
+            {"text": "对可能表示社会排斥的他人反应更敏感。", "evidence_ids": ["sociometer_leary_1995_p1"]}
+          ]
+        },
+        "reconnection_tendency": {
           "behavior": [
-            "可能强烈寻求社交回应、迎合群体，或在反复拒绝后退缩/反击。"
-          ],
-          "social_expression": [
-            "表达更情绪化，可能带有受伤、防御或要求回应的语气。"
-          ],
-          "online_behavior": [
-            "更容易参与身份、群体、排斥和不公平相关话题。"
-          ],
-          "decision_bias": [
-            "显著提高归属修复和群体接纳权重。"
-          ],
-          "constraints": [
-            "攻击倾向必须由明确负面互动或持续拒绝共同支持，不能单独由孤独生成。"
+            {"text": "在仍存在接纳可能时，提高亲社会和重新连接行为的倾向。", "evidence_ids": ["rejection_motives_richman_2009_p1"]}
+          ]
+        },
+        "defensive_or_avoidant_tendency": {
+          "behavior": [
+            {"text": "依据对拒绝事件的解释，提高防御或社会回避反应的倾向。", "evidence_ids": ["rejection_motives_richman_2009_p1"]}
           ]
         }
       },
+
       "validation_predictions": [
         "归属压力升高时，主动对话、评论、点赞、寻求回应行为增加。",
-        "负面社交反馈叠加归属压力时，防御性表达和从众/退缩分化增加。"
+        "负面社交反馈叠加归属压力时，重新连接、回避与防御反应出现条件性分化。"
       ]
     },
     {
@@ -519,15 +1163,58 @@
       "need_key": "esteem",
       "display_name": "尊重需求缺口",
       "maslow_need": "esteem",
-      "summary": "尊重缺口会提高自我威胁、地位关注、认可寻求、防御性归因和表现动机。",
+      "summary": "尊重缺口会提高自我价值威胁、认可寻求、地位敏感、能力评价敏感和防御反应。",
+      "literature_ids": [
+        "leary_tambor_terdal_downs_1995",
+        "richman_leary_2009",
+        "williams_2007",
+        "ridgeway_2014",
+        "heine_proulx_vohs_2006",
+        "ryan_deci_2000",
+        "ryff_1989",
+        "vansteenkiste_ryan_soenens_2020",
+        "hartgerink_van_beest_wicherts_williams_2015",
+        "heissel_et_al_2023",
+        "pietrek_et_al_2022"
+      ],
       "source_anchors": [
-        "自尊和社会评价受威胁时，个体更关注认可、地位和能力证明。",
-        "评价威胁可引发防御、补偿性表现或回避失败情境。"
+        "自尊会跟随具有个人评价含义的接纳和排斥变化。",
+        "Cyberball 元分析显示实验性排斥会稳定影响基本需要相关指标，但具体测量仍可能受调节。",
+        "地位信念会影响能力评价、权威适配评价和交往偏好。",
+        "能力需要受挫会降低动机并增加防御和不良适应风险，且应与能力需要满足不足分开记录。"
+      ],
+      "evidence_claims": [
+        {
+          "source_id": "leary_tambor_terdal_downs_1995",
+          "supports": ["self_worth_threat", "recognition_seeking"],
+          "claim": "因个人原因被排斥会降低自尊，随机排斥没有相同效应。"
+        },
+        {
+          "source_id": "ridgeway_2014",
+          "supports": ["status_sensitivity", "competence_evaluation_sensitivity"],
+          "claim": "社会地位作为尊重与评价差异，会偏置能力和权威适配评价。"
+        },
+        {
+          "source_id": "vansteenkiste_ryan_soenens_2020",
+          "supports": ["defensive_response_tendency"],
+          "claim": "能力等基本心理需要受挫会增加被动、不良适应和防御反应风险。"
+        },
+        {
+          "source_id": "hartgerink_van_beest_wicherts_williams_2015",
+          "supports": ["self_worth_threat"],
+          "claim": "120 项 Cyberball 研究的元分析显示排斥对基本需要相关指标具有很大的平均效应。"
+        }
+      ],
+      "boundaries": [
+        "普通失败和随机未获回应不能自动解释为他人轻视。",
+        "社会结构中的低地位不能直接等同于个体瞬时自尊低。",
+        "认可寻求只影响行为偏好，不能编造成就、评价或地位。",
+        "需要受挫与抑郁症状的横断面关联不能生成因果结论或临床诊断。"
       ],
       "mediators": [
         {
-          "key": "self_threat",
-          "label": "自我威胁",
+          "key": "self_worth_threat",
+          "label": "自我价值威胁",
           "base": 0.04,
           "pressure_weight": 0.72,
           "decline_weight": 0.06,
@@ -550,84 +1237,50 @@
           "previous_weight": 0.10
         },
         {
-          "key": "defensive_attribution",
-          "label": "防御性归因",
+          "key": "competence_evaluation_sensitivity",
+          "label": "能力评价敏感",
           "base": 0.02,
           "pressure_weight": 0.44,
           "decline_weight": 0.04,
           "previous_weight": 0.08
+        },
+        {
+          "key": "defensive_response_tendency",
+          "label": "防御反应倾向",
+          "base": 0.01,
+          "pressure_weight": 0.34,
+          "decline_weight": 0.04,
+          "previous_weight": 0.08
         }
       ],
-      "role_card_templates": {
-        "low": {
-          "summary": "轻度尊重不足，开始关注认可和表现。",
-          "emotion_tone": "希望被认可",
-          "cognition": [
-            "更关注点赞、评论、任务成功和他人评价。"
-          ],
-          "behavior": [
-            "更愿意完成可展示能力的任务。"
-          ],
-          "social_expression": [
-            "表达中更容易强调自己的努力或贡献。"
-          ],
-          "online_behavior": [
-            "更可能发布成果、观点或寻求反馈。"
-          ],
-          "decision_bias": [
-            "轻微提高能带来认可的行动权重。"
-          ],
-          "constraints": [
-            "认可寻求不得导致编造成就。"
+      "mediator_effects": {
+        "self_worth_threat": {
+          "emotion_tone": [
+            {"text": "当他人反应意味着社会排斥时，自我价值感受到威胁。", "evidence_ids": ["sociometer_leary_1995_p1"]}
           ]
         },
-        "moderate": {
-          "summary": "中度尊重压力，认可寻求和评价敏感增强。",
-          "emotion_tone": "敏感、较真、防御",
-          "cognition": [
-            "更关注自己是否被重视、被赞同或被轻视。",
-            "更容易把失败解释为他人不认可。"
-          ],
+        "recognition_seeking": {
           "behavior": [
-            "更倾向选择能证明能力、获得点赞或提升地位的行动。"
-          ],
-          "social_expression": [
-            "对批评更敏感，可能更强调自身理由。"
-          ],
-          "online_behavior": [
-            "更可能参与能展示观点能力或争取认可的讨论。"
-          ],
-          "decision_bias": [
-            "提高表现、证明和维护形象的权重。"
-          ],
-          "constraints": [
-            "防御性表达仍需保持事实一致。"
+            {"text": "提高通过减少拒绝或排斥可能性来寻求接纳与认可的倾向。", "evidence_ids": ["sociometer_leary_1995_p1"]}
           ]
         },
-        "high": {
-          "summary": "高尊重压力，自我威胁和地位敏感占主导。",
-          "emotion_tone": "受挫、防御、渴望证明",
+        "status_sensitivity": {
           "cognition": [
-            "强烈监测轻视、失败和地位损失线索。",
-            "更可能将负面评价视为对自我的威胁。"
-          ],
+            {"text": "加强对尊重、地位以及地位挑战线索的关注。", "evidence_ids": ["status_evaluation_ridgeway_2014_p1"]}
+          ]
+        },
+        "competence_evaluation_sensitivity": {
+          "cognition": [
+            {"text": "对能力与权威适配评价更敏感。", "evidence_ids": ["status_evaluation_ridgeway_2014_p1"]}
+          ]
+        },
+        "defensive_response_tendency": {
           "behavior": [
-            "可能强烈寻求认可、证明能力，或回避可能失败的任务。"
-          ],
-          "social_expression": [
-            "表达更防御、更强调自我价值和公平对待。"
-          ],
-          "online_behavior": [
-            "更容易参与争论、展示成果或回应批评。"
-          ],
-          "decision_bias": [
-            "显著提高形象维护和认可获取权重。"
-          ],
-          "constraints": [
-            "不能把尊重受挫直接转化为攻击行为，除非存在明确互动事件支持。"
+            {"text": "需要受阻时，防御反应倾向增强。", "evidence_ids": ["need_defensiveness_vansteenkiste_2020_p10"]}
           ]
         }
       },
+
       "validation_predictions": [
         "尊重压力升高时，展示成果、争取认可、回应评价的行为增加。",
         "负面评价叠加尊重压力时，防御性表达增加。"
@@ -638,115 +1291,128 @@
       "need_key": "self_actualization",
       "display_name": "自我实现需求缺口",
       "maslow_need": "self_actualization",
-      "summary": "自我实现缺口会提高停滞感、意义寻求、自主目标追求和探索/成长动机。",
+      "summary": "自我实现缺口会提高意义威胁、跨领域意义补偿、自主受挫、能力受挫和成长停滞。",
+      "literature_ids": [
+        "heine_proulx_vohs_2006",
+        "ryan_deci_2000",
+        "ryff_1989",
+        "vansteenkiste_ryan_soenens_2020",
+        "williams_2007",
+        "heissel_et_al_2023",
+        "pietrek_et_al_2022"
+      ],
       "source_anchors": [
-        "高层成长需求涉及自主目标、意义感、能力发展和价值一致行动。",
-        "长期缺少目标进展会提高停滞感，并改变探索、反思和计划行为。"
+        "意义威胁可由自尊威胁、不确定性、人际拒绝等多类事件触发，并可在其他领域补偿。",
+        "自主、能力和关系需要的满足促进内在动机、整合和成长。",
+        "自主、能力和关系需要受挫与 brooding 和抑郁症状存在横断面关联，但不确定因果方向。",
+        "心理幸福感包含自主、环境掌控、人生目标和个人成长等不可相互替代的维度。"
+      ],
+      "evidence_claims": [
+        {
+          "source_id": "heine_proulx_vohs_2006",
+          "supports": ["meaning_threat", "fluid_compensation"],
+          "claim": "意义受到威胁后，人们可能在不同于威胁来源的领域进行流动性补偿。"
+        },
+        {
+          "source_id": "ryan_deci_2000",
+          "supports": ["autonomy_frustration", "competence_frustration", "growth_stagnation"],
+          "claim": "自主和能力需要受挫会降低自我动机、整合和幸福感。"
+        },
+        {
+          "source_id": "ryff_1989",
+          "supports": ["growth_stagnation"],
+          "claim": "人生目标和个人成长是心理幸福感中不能被一般情绪或生活满意度替代的维度。"
+        },
+        {
+          "source_id": "heissel_et_al_2023",
+          "supports": ["autonomy_frustration", "competence_frustration"],
+          "claim": "横断面中介分析显示 brooding 部分中介基本心理需要受挫与抑郁症状之间的关系。"
+        },
+        {
+          "source_id": "pietrek_et_al_2022",
+          "supports": ["autonomy_frustration", "competence_frustration"],
+          "claim": "重性抑郁障碍组报告的三类基本心理需要满足更低、受挫更高，关系和能力的受挫组间差异更大。"
+        }
+      ],
+      "boundaries": [
+        "self_actualization 是对自主、成长、目标和意义的项目级聚合，不等同于任何单一原理论概念。",
+        "意义补偿不代表原需求已经恢复，也不规定具体行动。",
+        "自我实现压力不能直接解释为临床症状。",
+        "横断面中介和临床组间差异不能确定需要受挫的因果方向。"
       ],
       "mediators": [
         {
-          "key": "stagnation",
-          "label": "停滞感",
+          "key": "meaning_threat",
+          "label": "意义威胁",
           "base": 0.03,
           "pressure_weight": 0.68,
           "decline_weight": 0.05,
           "previous_weight": 0.14
         },
         {
-          "key": "meaning_seeking",
-          "label": "意义寻求",
+          "key": "fluid_compensation",
+          "label": "跨领域意义补偿",
           "base": 0.03,
           "pressure_weight": 0.60,
           "decline_weight": 0.04,
           "previous_weight": 0.12
         },
         {
-          "key": "growth_motivation",
-          "label": "成长动机",
+          "key": "autonomy_frustration",
+          "label": "自主受挫",
           "base": 0.04,
           "pressure_weight": 0.52,
           "decline_weight": 0.03,
           "previous_weight": 0.10
         },
         {
-          "key": "autonomy_seeking",
-          "label": "自主寻求",
+          "key": "competence_frustration",
+          "label": "能力受挫",
           "base": 0.03,
           "pressure_weight": 0.48,
           "decline_weight": 0.03,
           "previous_weight": 0.10
+        },
+        {
+          "key": "growth_stagnation",
+          "label": "成长停滞",
+          "base": 0.03,
+          "pressure_weight": 0.46,
+          "decline_weight": 0.03,
+          "previous_weight": 0.12
         }
       ],
-      "role_card_templates": {
-        "low": {
-          "summary": "轻度成长不足，开始希望做更有意义的事。",
-          "emotion_tone": "若有所失、想探索",
+      "mediator_effects": {
+        "meaning_threat": {
           "cognition": [
-            "更关注长期目标、学习机会和新地点。"
-          ],
-          "behavior": [
-            "在基本需求满足后更愿意探索和反思。"
-          ],
-          "social_expression": [
-            "表达中更可能谈到目标、计划和意义。"
-          ],
-          "online_behavior": [
-            "更关注学习、成长、政策愿景和未来规划内容。"
-          ],
-          "decision_bias": [
-            "轻微提高探索和长期计划权重。"
-          ],
-          "constraints": [
-            "自我实现不应压倒严重生理和安全压力。"
+            {"text": "当前意义框架受到威胁，更关注其中的不一致和断裂。", "evidence_ids": ["fluid_compensation_heine_2006_p3"]}
           ]
         },
-        "moderate": {
-          "summary": "中度成长压力，意义寻求和自主目标追求增强。",
-          "emotion_tone": "不满足、想改变、反思",
-          "cognition": [
-            "更容易感到重复行动缺乏意义。",
-            "更关注是否能按自己的价值和目标行动。"
-          ],
+        "fluid_compensation": {
           "behavior": [
-            "在基本需求可控时，更倾向探索新地点、形成计划或尝试新社交话题。"
-          ],
-          "social_expression": [
-            "表达更偏反思、规划和价值判断。"
-          ],
-          "online_behavior": [
-            "更可能发表对未来、成长、制度改进的观点。"
-          ],
-          "decision_bias": [
-            "提高长期目标、学习和探索权重。"
-          ],
-          "constraints": [
-            "长期目标必须与当前可执行工具兼容。"
+            {"text": "转向确认其他仍然完整的意义框架，不限于威胁发生的原领域。", "evidence_ids": ["fluid_compensation_heine_2006_p3"]}
           ]
         },
-        "high": {
-          "summary": "高自我实现压力，停滞感明显，强烈寻求意义与突破。",
-          "emotion_tone": "压抑、焦躁、渴望突破",
+        "autonomy_frustration": {
           "cognition": [
-            "强烈关注生活是否停滞、行动是否有意义。",
-            "更容易将环境限制解释为阻碍自我发展。"
+            {"text": "对行为是否由自己决定更敏感；自主体验不足时内在动机受到限制。", "evidence_ids": ["autonomy_competence_ryan_2000_p3"]}
+          ]
+        },
+        "competence_frustration": {
+          "cognition": [
+            {"text": "对能力感和效能感不足更敏感，内在动机更难维持。", "evidence_ids": ["autonomy_competence_ryan_2000_p3"]}
+          ]
+        },
+        "growth_stagnation": {
+          "emotion_tone": [
+            {"text": "个人成长停滞感增强。", "evidence_ids": ["personal_growth_ryff_1989_p4"]}
           ],
           "behavior": [
-            "若低层需求稳定，优先探索、制定长期计划、寻找能表达价值的社交行动。"
-          ],
-          "social_expression": [
-            "表达更价值化，可能带有对现状的不满和改革愿望。"
-          ],
-          "online_behavior": [
-            "更容易参与理想、制度、未来和个人成长相关讨论。"
-          ],
-          "decision_bias": [
-            "显著提高价值一致行动和长期目标权重。"
-          ],
-          "constraints": [
-            "不能把自我实现受挫直接解释为临床症状。"
+            {"text": "形成新态度或新行为的倾向减弱。", "evidence_ids": ["personal_growth_ryff_1989_p4"]}
           ]
         }
       },
+
       "validation_predictions": [
         "自我实现压力升高且低层需求稳定时，探索、长期计划和反思行为增加。",
         "高层成长压力会提高价值表达和未来导向发帖比例。"

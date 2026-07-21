@@ -120,6 +120,9 @@ class Reflect:
             logger.info("[%s] 微反思更新焦点: %s", agent.id, agent.current_focus)
         else:
             logger.warning("[%s] 微反思未能解析 Focus，保持原焦点", agent.id)
+        if hasattr(agent, "store_trajectory_checkpoint"):
+            # 卡住时保留未完成经历，避免只有成功任务才能进入长期记忆。
+            agent.store_trajectory_checkpoint(outcome="stuck")
 
     async def _amicro_reflect(self, agent: "Agent") -> None:
         system, user = self.prompt.micro_reflect_prompt(agent)
@@ -146,6 +149,8 @@ class Reflect:
             logger.info("[%s] 微反思更新焦点: %s", agent.id, agent.current_focus)
         else:
             logger.warning("[%s] 微反思未能解析 Focus，保持原焦点", agent.id)
+        if hasattr(agent, "store_trajectory_checkpoint"):
+            agent.store_trajectory_checkpoint(outcome="stuck")
 
     async def astep(self, agent: "Agent") -> None:
         await self._aupdate_person_profiles(agent)
@@ -205,7 +210,9 @@ class Reflect:
         if mem is None or world is None or not hasattr(mem, "update_person_profiles_from_reflection"):
             return
         try:
-            mem.update_person_profiles_from_reflection(agent.id, current_time=world.time, llm=self.llm)
+            # 同步入口也遵守人物档案的 LLM 开关。
+            profile_llm = self.llm if self.config.memory_person_profile_llm_enabled else None
+            mem.update_person_profiles_from_reflection(agent.id, current_time=world.time, llm=profile_llm)
         except Exception as exc:
             logger.debug("[%s] 更新人物档案失败: %s", agent.id, exc)
 
@@ -217,9 +224,11 @@ class Reflect:
         if mem is None or world is None:
             return
         try:
+            # 默认使用规则摘要，只有显式开启时才调用 LLM。
+            profile_llm = self.llm if self.config.memory_person_profile_llm_enabled else None
             if hasattr(mem, "aupdate_person_profiles_from_reflection"):
-                await mem.aupdate_person_profiles_from_reflection(agent.id, current_time=world.time, llm=self.llm)
+                await mem.aupdate_person_profiles_from_reflection(agent.id, current_time=world.time, llm=profile_llm)
             elif hasattr(mem, "update_person_profiles_from_reflection"):
-                mem.update_person_profiles_from_reflection(agent.id, current_time=world.time, llm=self.llm)
+                mem.update_person_profiles_from_reflection(agent.id, current_time=world.time, llm=profile_llm)
         except Exception as exc:
             logger.debug("[%s] 异步更新人物档案失败: %s", agent.id, exc)

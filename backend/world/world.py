@@ -7,8 +7,8 @@ from world.event import Event, SpeakingEvent
 from world.map import Map, build_default_map_design
 from tools.operator_tools import register_operator_tools, Operator
 from world.observer import observe
-from persona.logger import get_logger
-from persona.need_events import apply_passive_need_decay
+from persona.logger import get_logger, set_log_tick
+from persona.need_events import apply_passive_need_decay, consume_pending_need_events
 from persona.opinion.scale import OPINION_NEUTRAL
 
 logger = get_logger(__name__)
@@ -27,6 +27,8 @@ class World:
         psychological_assessor=None,
         opinion_assessor=None,
     ):
+        # 新世界从时间步 0 开始，避免 reset 后日志继续沿用旧实验时间步。
+        set_log_tick(0)
         self.time = 0
         self.map = Map(25, 25)
         self.map_design = build_default_map_design(self.map.width, self.map.height)
@@ -35,6 +37,8 @@ class World:
         self.movements = []
         # execute 和工具函数都会保护世界状态；可重入锁避免同线程二次加锁卡死。
         self._world_lock = threading.RLock()
+        self._episode_lock = threading.RLock()
+        self._next_episode_id = 1
         self.conversation_policy = None   # 外部注入后才启用对话阶段
         self.conversation_max_rounds = 3  # 每个 tick 内允许的最大对话轮数
         self.conversation_manager = ConversationManager(self)
@@ -56,6 +60,56 @@ class World:
         self.objects[obj.id] = obj
         x, y = obj.position
         self.map.place(x, y, obj.id)
+
+    def _allocate_episode_id(self) -> str:
+        """分配进程内全局递增的经历链标识。"""
+
+        with self._episode_lock:
+            episode_id = f"episode-{self._next_episode_id:08d}"
+            self._next_episode_id += 1
+            return episode_id
+
+    def _ensure_agent_episode(self, agent) -> str:
+        """保留调用方已设置的经历标识，否则为当前执行分配新标识。"""
+
+        episode_id = str(getattr(agent, "_current_episode_id", "") or "")
+        episode_tick = getattr(agent, "_current_episode_tick", None)
+        if episode_id and episode_tick is None:
+            # 首次接收调用方指定的经历标识时，将其绑定到当前时间步。
+            agent._current_episode_tick = self.time
+            return episode_id
+        if episode_id and episode_tick == self.time:
+            return episode_id
+        episode_id = self._allocate_episode_id()
+        agent._current_episode_id = episode_id
+        agent._current_episode_tick = self.time
+        return episode_id
+
+    def _agent_state_snapshot(self, agent) -> dict:
+        """生成动作前后均可序列化的智能体状态快照。"""
+
+        position = getattr(agent, "position", None)
+        if isinstance(position, (list, tuple)):
+            position = list(position)
+        return {
+            "tick": int(self.time),
+            "agent_id": str(getattr(agent, "id", "") or ""),
+            "position": position,
+            "satisfaction": dict(getattr(agent, "satisfaction", {}) or {}),
+            "urgency": dict(getattr(agent, "urgency", {}) or {}),
+            "need_gap": dict(getattr(agent, "need_gap", {}) or {}),
+            "pressure_memory": dict(getattr(agent, "pressure_memory", {}) or {}),
+            "load_saturation": dict(getattr(agent, "load_saturation", {}) or {}),
+            "effective_pressure": dict(getattr(agent, "effective_pressure", {}) or {}),
+            "task": str(getattr(agent, "task", "") or ""),
+            "task_urgency_key": str(getattr(agent, "task_urgency_key", "") or ""),
+            "emotion": str(getattr(agent, "emotion", "") or ""),
+            "opinion": getattr(agent, "opinion", None),
+            "sleeping": bool(getattr(agent, "sleeping", False)),
+            "inside_building_id": getattr(agent, "inside_building_id", None),
+            "followers": list(getattr(agent, "followers", []) or []),
+            "online_trust": dict(getattr(agent, "online_trust", {}) or {}),
+        }
 
     def interact_inside_building(self, agent, *, record_history: bool = False, source: str = "tick") -> str | None:
         """执行建筑内自动交互。
@@ -124,6 +178,7 @@ class World:
 
         step_start = time.perf_counter()
         self.time += 1
+        set_log_tick(self.time)
         self.movements = []
         self.map.print_map()
         agents = list(self.agents.values())
@@ -131,6 +186,8 @@ class World:
             self.platform.time = self.time
         for agent in agents:
             # 每个 tick 只记录本轮新产生的动作和社交动作，避免历史导出串用上一轮结果。
+            agent._current_episode_id = self._allocate_episode_id()
+            agent._current_episode_tick = self.time
             agent.last_action = {}
             agent.last_social_action = {}
             agent.did_move_this_tick = False
@@ -159,7 +216,7 @@ class World:
                     return
                 obs = observe(agent, agent.config.observation_radius)
                 action = await agent.astep(obs)
-                reward = self.execute(agent, action)
+                reward = await self.aexecute(agent, action)
                 agent.append_trajectory(obs, action, reward)
                 if not agent.sleeping and agent.id not in sleeping_at_tick_start:
                     await agent.aget_reflect()
@@ -180,7 +237,7 @@ class World:
 
         phase_start = time.perf_counter()
         if self.conversation_policy:
-            self._conversation_phase(agents)
+            await self._aconversation_phase(agents)
         conversation_elapsed = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
@@ -188,13 +245,13 @@ class World:
         assessment_elapsed = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
+        self._maintain_agent_memories()
+        memory_maintenance_elapsed = time.perf_counter() - phase_start
+
+        phase_start = time.perf_counter()
         if self.history_recorder:
             self.history_recorder.record(self.time, list(self.agents.values()), platform=self.platform)
         history_elapsed = time.perf_counter() - phase_start
-
-        phase_start = time.perf_counter()
-        self._maintain_agent_memories()
-        memory_maintenance_elapsed = time.perf_counter() - phase_start
 
         logger.info(
             "[Perf] tick=%d world_total=%.3fs news=%.3fs building=%.3fs agent_tick=%.3fs conversation=%.3fs assessment=%.3fs history=%.3fs memory_maintenance=%.3fs agents=%d",
@@ -212,6 +269,15 @@ class World:
 
     def _conversation_phase(self, agents):
         self.conversation_manager.run_phase(
+            agents,
+            self.conversation_policy,
+            self.conversation_max_rounds,
+        )
+
+    async def _aconversation_phase(self, agents):
+        """真实运行主链使用异步对话阶段。"""
+
+        await self.conversation_manager.arun_phase(
             agents,
             self.conversation_policy,
             self.conversation_max_rounds,
@@ -236,7 +302,7 @@ class World:
         """投放一条官方新闻，并把通知放入所有实体智能体的观察队列。"""
 
         topic = str(news.get("topic") or "")
-        self.platform.inject_news(
+        news_post = self.platform.inject_news(
             self.time,
             news["title"],
             news["content"],
@@ -244,10 +310,45 @@ class World:
             opinion_index=news.get("opinion_index", OPINION_NEUTRAL),
         )
         notification = f"[系统新闻][{topic or '未指定主题'}] {news['title']}：{news['content']}"
+        details = {
+            "title": news["title"],
+            "content": news_post.content,
+            "topic": topic,
+            "opinion_index": news_post.opinion_index,
+            "is_news": True,
+            "is_rumor": False,
+            "source_type": news_post.source_type,
+        }
         for agent in self.agents.values():
             if topic:
                 agent.current_focus = topic
-            agent._pending_social_notifications.append(notification)
+            episode_id = self._ensure_agent_episode(agent)
+            platform_event_id = str(getattr(news_post, "platform_event_id", "") or "")
+            agent._pending_social_notifications.append(
+                {
+                    "schema_version": 1,
+                    "type": "notification",
+                    "content": notification,
+                    "time": int(self.time),
+                    "episode_id": episode_id,
+                    "event_id": platform_event_id,
+                    "event_type": "official_news_created",
+                    "platform_event_id": platform_event_id,
+                    "feed_request_id": "",
+                    "actor_id": "system",
+                    "related_agent_id": "system",
+                    "post_id": news_post.id,
+                    "comment_id": None,
+                    "parent_comment_id": None,
+                    "root_comment_id": None,
+                    "target_agent_id": agent.id,
+                    "source_post_id": None,
+                    "root_post_id": news_post.root_post_id,
+                    "source_author_id": "system",
+                    "topic": topic,
+                    "details": dict(details),
+                }
+            )
 
     def _inject_influencer_posts(self, posts: list[dict]) -> None:
         """投放场景中的无实体账号帖子，不产生 observe 系统通知。"""
@@ -279,25 +380,35 @@ class World:
         return []
 
     async def _assess_agents(self, agents) -> None:
-        """conversation 后并发评测所有智能体；单个智能体内心理评测先于观念评测。"""
+        """先并发完成心理评测，再统一启动全部智能体的观念评测。"""
 
-        async def _assess_agent(agent):
+        async def _assess_psychology(agent):
             try:
                 apply_passive_need_decay(agent, self.time)
-                if self.psychological_assessor:
+                if (
+                    self.psychological_assessor
+                    and getattr(agent.config, "psychological_assessment_enabled", True)
+                ):
                     self.psychological_assessor.observe_agent_tick(agent, self.time)
-                    await self.psychological_assessor.amaybe_assess(agent, self.time)
-                if self.opinion_assessor:
-                    # 观念评测事件触发；无新证据时不进入 LLM，减少无效评测调用。
-                    should_assess = True
-                    if hasattr(self.opinion_assessor, "should_assess_agent"):
-                        should_assess = self.opinion_assessor.should_assess_agent(agent, self.time)
-                    if should_assess:
-                        await self.opinion_assessor.aassess_agent(agent, self.time)
+                    assessment = await self.psychological_assessor.amaybe_assess(agent, self.time)
+                    mem = getattr(agent, "mem", None)
+                    if (
+                        isinstance(assessment, dict)
+                        and mem is not None
+                        and hasattr(mem, "store_psychological_assessment")
+                    ):
+                        mem.store_psychological_assessment(
+                            agent.id,
+                            assessment,
+                            episode_id=str(getattr(agent, "_current_episode_id", "") or ""),
+                        )
             except Exception as exc:
-                logger.warning("[World] assessment failed for %s at tick=%d: %s", agent.id, self.time, exc, exc_info=True)
+                logger.warning("[World] psychology assessment failed for %s at tick=%d: %s", agent.id, self.time, exc, exc_info=True)
 
-        await asyncio.gather(*[_assess_agent(agent) for agent in agents])
+        await asyncio.gather(*[_assess_psychology(agent) for agent in agents])
+        if self.opinion_assessor:
+            # 运行中只执行 honest belief + FLAN 评测；投票在模拟结束后统一执行。
+            await self.opinion_assessor.aassess_all(agents, self.time)
 
     def _maintain_agent_memories(self) -> None:
         """每个 tick 末执行轻量记忆维护。
@@ -315,15 +426,83 @@ class World:
             except Exception as exc:
                 logger.debug("[World] memory maintenance failed for %s: %s", agent.id, exc)
 
-    def execute(self, agent, action_str):
+    def _new_need_events(self, agent, start_index: int, episode_id: str) -> list[dict]:
+        """提取本次工具执行期间新增的需求事件。"""
+
+        event_log = list(getattr(agent, "need_event_log", []) or [])
+        pending_events = consume_pending_need_events(agent)
+        source_events = pending_events or event_log[max(0, start_index):]
+        new_events: list[dict] = []
+        for event in source_events:
+            if not isinstance(event, dict):
+                continue
+            row = dict(event)
+            row.setdefault("episode_id", episode_id)
+            new_events.append(row)
+        return new_events
+
+    def _finalize_action_result(
+        self,
+        agent,
+        decision: dict,
+        action_summary: dict,
+        feedback,
+        reward: float | None,
+        *,
+        episode_id: str,
+        state_before: dict,
+        need_event_start: int,
+    ) -> None:
+        """统一补齐动作快照，并把真实执行结果写入记忆。"""
+
+        state_after = self._agent_state_snapshot(agent)
+        need_events = self._new_need_events(agent, need_event_start, episode_id)
+        action_summary.update(
+            {
+                "episode_id": episode_id,
+                "before_satisfaction": dict(state_before.get("satisfaction") or {}),
+                "after_satisfaction": dict(state_after.get("satisfaction") or {}),
+                "before_urgency": dict(state_before.get("urgency") or {}),
+                "after_urgency": dict(state_after.get("urgency") or {}),
+                "state_snapshot": state_after,
+            }
+        )
+        agent.last_action = action_summary
+        self._store_action_memory(
+            agent,
+            decision,
+            feedback,
+            reward,
+            episode_id=episode_id,
+            state_before=state_before,
+            state_after=state_after,
+            need_events=need_events,
+        )
+
+    async def aexecute(self, agent, action_str):
+        """异步执行包含 LLM 的工具，其余工具继续走同步路径。"""
+
+        try:
+            decision = json.loads(action_str) if action_str else {}
+        except json.JSONDecodeError:
+            return self.execute(agent, action_str)
+        data, _ = self._action_from_decision(decision)
+        if data.get("tool") != "social_step":
+            return self.execute(agent, action_str)
+        try:
+            feedback = await agent.asocial_step()
+        except Exception as exc:
+            logger.error("[World] 工具 social_step 执行失败 (agent=%s): %s", agent.id, exc, exc_info=True)
+            feedback = "tool execution failed"
+        return self.execute(agent, action_str, precomputed_feedback=feedback)
+
+    def execute(self, agent, action_str, *, precomputed_feedback=None):
         """解析 LLM 决策 JSON 中的 action 并调用对应工具。
 
         工具调用失败不会中断整个 tick；成功后会生成事件并通知可感知范围内的智能体。
         记忆写入放在这里，是因为只有 execute 才知道动作是否实际执行、反馈和 reward。
         """
 
-        old_satisfaction = agent.satisfaction.copy()
-        old_urgency = agent.urgency.copy()
         if not action_str:
             return
         try:
@@ -332,49 +511,86 @@ class World:
             logger.error("[World] JSON 解析失败，原始内容: %r", action_str)
             return
 
+        episode_id = self._ensure_agent_episode(agent)
+        state_before = self._agent_state_snapshot(agent)
+        old_satisfaction = dict(state_before["satisfaction"])
+        old_urgency = dict(state_before["urgency"])
+        consume_pending_need_events(agent)
+        need_event_start = len(getattr(agent, "need_event_log", []) or [])
         data, think = self._action_from_decision(decision)
         if think:
             agent.add_history("decision_think", think)
         if not data or "tool" not in data:
             logger.debug("[%s] 本轮选择不行动", agent.id)
-            agent.last_action = {
+            action_summary = {
                 "tool": "",
                 "args": {},
                 "think": think,
                 "feedback": "",
                 "reward": None,
             }
-            self._store_action_memory(agent, decision, "", None)
+            self._finalize_action_result(
+                agent,
+                decision,
+                action_summary,
+                "",
+                None,
+                episode_id=episode_id,
+                state_before=state_before,
+                need_event_start=need_event_start,
+            )
             return
 
         tool = self.tools.get(data["tool"])
         if not tool:
             logger.warning("[World] 未知工具: %s", data.get("tool"))
-            agent.last_action = {
+            action_summary = {
                 "tool": data.get("tool", ""),
                 "args": data.get("args", {}),
                 "think": think,
                 "feedback": "tool not found",
                 "reward": None,
             }
-            self._store_action_memory(agent, decision, "tool not found", None)
+            self._finalize_action_result(
+                agent,
+                decision,
+                action_summary,
+                "tool not found",
+                None,
+                episode_id=episode_id,
+                state_before=state_before,
+                need_event_start=need_event_start,
+            )
             return
 
         with self._world_lock:
             args = data.get("args", {})
             args["operator_ID"] = agent.id
             try:
-                feedback = tool.run(**args)
+                # 异步入口已完成 social_step 时，不再重复调用同步工具。
+                if data["tool"] == "social_step" and precomputed_feedback is not None:
+                    feedback = precomputed_feedback
+                else:
+                    feedback = tool.run(**args)
             except Exception as e:
                 logger.error("[World] 工具 %s 执行失败 (agent=%s): %s", data["tool"], agent.id, e, exc_info=True)
-                agent.last_action = {
+                action_summary = {
                     "tool": data["tool"],
                     "args": args,
                     "think": think,
                     "feedback": "tool execution failed",
                     "reward": None,
                 }
-                self._store_action_memory(agent, decision, "tool execution failed", None)
+                self._finalize_action_result(
+                    agent,
+                    decision,
+                    action_summary,
+                    "tool execution failed",
+                    None,
+                    episode_id=episode_id,
+                    state_before=state_before,
+                    need_event_start=need_event_start,
+                )
                 return
             agent.add_history("feedback: ", feedback)
             acted = self._acted_from_action(data["tool"], args)
@@ -424,28 +640,63 @@ class World:
                 for k in agent.satisfaction
             )
             agent.add_history("reward: ", reward)
-            agent.last_action = {
+            action_summary = {
                 "tool": data["tool"],
                 "args": args,
                 "think": think,
                 "feedback": feedback,
                 "reward": reward,
             }
-            self._store_action_memory(agent, decision, feedback, reward)
+            self._finalize_action_result(
+                agent,
+                decision,
+                action_summary,
+                feedback,
+                reward,
+                episode_id=episode_id,
+                state_before=state_before,
+                need_event_start=need_event_start,
+            )
             return reward
 
-    def _store_action_memory(self, agent, decision: dict, feedback, reward: float | None) -> None:
+    def _store_action_memory(
+        self,
+        agent,
+        decision: dict,
+        feedback,
+        reward: float | None,
+        *,
+        episode_id: str,
+        state_before: dict,
+        state_after: dict,
+        need_events: list[dict],
+    ) -> None:
         """把已执行或失败的动作结果写入记忆系统。"""
 
         mem = getattr(agent, "mem", None)
         if mem is None or not hasattr(mem, "store_action_result"):
             return
+        decision_payload = dict(decision)
+        decision_payload.update(
+            {
+                "episode_id": episode_id,
+                "before_satisfaction": dict(state_before.get("satisfaction") or {}),
+                "after_satisfaction": dict(state_after.get("satisfaction") or {}),
+                "before_urgency": dict(state_before.get("urgency") or {}),
+                "after_urgency": dict(state_after.get("urgency") or {}),
+                "state_snapshot": state_after,
+            }
+        )
         mem.store_action_result(
             agent.id,
-            decision=decision,
+            decision=decision_payload,
             feedback=feedback,
             reward=reward,
             world_time=self.time,
+            episode_id=episode_id,
+            state_before=state_before,
+            state_after=state_after,
+            need_events=need_events,
         )
 
     def _acted_from_action(self, tool_name: str, args: dict):

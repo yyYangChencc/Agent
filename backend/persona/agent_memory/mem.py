@@ -6,6 +6,11 @@ import time
 from pathlib import Path
 from typing import Any
 from persona.agent_memory.controller import MemoryController
+from persona.agent_memory.query_builder import (
+    DEFAULT_SEMANTIC_QUERY_MAX_BYTES,
+    bound_utf8_text,
+    build_semantic_observation_text,
+)
 from persona.agent_memory.structured_store import StructuredMemoryStore
 from persona.logger import get_logger
 
@@ -77,6 +82,22 @@ class _InMemoryCollection:
             "metadatas": [row["metadata"] for row in rows],
         }
 
+    def delete(self, *, ids=None, where=None, **kwargs) -> None:
+        """按 ID 或 metadata 条件删除内存后备向量。"""
+
+        if ids is not None:
+            for memory_id in ids:
+                self._rows.pop(str(memory_id), None)
+            return
+        if where:
+            stale_ids = [
+                memory_id
+                for memory_id, row in self._rows.items()
+                if self._matches_where(row.get("metadata") or {}, where)
+            ]
+            for memory_id in stale_ids:
+                self._rows.pop(memory_id, None)
+
     def _matches_where(self, metadata: dict, where: dict | None) -> bool:
         if not where:
             return True
@@ -127,18 +148,27 @@ class MultiAgentMemoryManager:
     检索时先做向量召回，再按任务、需求急迫度、重要性和时间等因素重排。
     """
 
-    def __init__(self, llm_client, persist_directory: str = "./chroma_agents", structured_db_path: str | None = None):
+    def __init__(
+        self,
+        llm_client,
+        persist_directory: str = "./chroma_agents",
+        structured_db_path: str | None = None,
+        *,
+        config: Any | None = None,
+    ):
         self.client = _build_chroma_client(
             path=persist_directory,
             settings=Settings(allow_reset=True),
         )
         self.llm_client = llm_client
+        self.config = config
         self.agent_collections: dict = {}
         self._collection_lock = threading.Lock()
         self._embedding_cache: dict[str, list[float]] = {}
         self._embedding_cache_lock = threading.Lock()
         self._retrieval_cache: dict[tuple, tuple[int, list[str]]] = {}
         self._retrieval_cache_lock = threading.Lock()
+        self._last_maintenance_results: dict[str, dict[str, Any]] = {}
         if structured_db_path is None:
             structured_db_path = str(Path(persist_directory) / "structured_memory.sqlite3")
         # SQLite 负责结构化状态和证据；MemoryController 负责把业务 payload 分流到 SQLite/Chroma。
@@ -181,42 +211,83 @@ class MultiAgentMemoryManager:
         后续 API 展示、访问统计和冲突调解。
         """
 
+        structured_metadata = dict(metadata)
+        full_metadata = self._normalize_metadata(agent_id, world_time, dict(metadata))
+        raw_metadata = structured_metadata
+        structured_metadata = {**raw_metadata, **full_metadata}
+        for key, value in raw_metadata.items():
+            if isinstance(value, (list, tuple, dict)):
+                structured_metadata[key] = value
+        memory_id = self._derived_memory_id(agent_id, memory_text, world_time, full_metadata)
+        # SQLite 是长期记忆的事实底座；embedding 失败不能导致整条经历丢失。
+        self._record_derived_memory(agent_id, memory_id, memory_text, world_time, structured_metadata)
         collection = self.get_agent_collection(agent_id)
-        full_metadata = self._normalize_metadata(agent_id, world_time, metadata)
-        memory_id = f"{agent_id}_{hashlib.md5(memory_text.encode()).hexdigest()[:10]}"
         embedding = self._get_embedding(memory_text)
         if not embedding:
-            logger.warning("[%s] 获取 embedding 失败，跳过记忆存储: %r", agent_id, memory_text[:60])
+            logger.warning("[%s] 获取 embedding 失败，仅保留 SQLite 长期记忆: %r", agent_id, memory_text[:60])
+            self._invalidate_retrieval_cache(agent_id)
             return memory_id
-        collection.upsert(
-            embeddings=[embedding],
-            documents=[memory_text],
-            metadatas=[full_metadata],
-            ids=[memory_id],
-        )
-        self._record_derived_memory(agent_id, memory_id, memory_text, world_time, full_metadata)
+        try:
+            collection.upsert(
+                embeddings=[embedding],
+                documents=[memory_text],
+                metadatas=[full_metadata],
+                ids=[memory_id],
+            )
+        except Exception as exc:
+            # 向量索引失败时保留已写入的 SQLite 长期记忆，避免中断智能体流程。
+            logger.warning("[%s] 向量记忆写入失败，仅保留 SQLite 长期记忆: %s", agent_id, exc, exc_info=True)
         self._invalidate_retrieval_cache(agent_id)
         return memory_id
 
     async def astore_agent_memory(self, agent_id: str, memory_text: str, world_time: int = 0, **metadata) -> str:
         """异步写入长期语义记忆，并保持与同步路径相同的 SQLite 双写行为。"""
 
+        structured_metadata = dict(metadata)
+        full_metadata = self._normalize_metadata(agent_id, world_time, dict(metadata))
+        raw_metadata = structured_metadata
+        structured_metadata = {**raw_metadata, **full_metadata}
+        for key, value in raw_metadata.items():
+            if isinstance(value, (list, tuple, dict)):
+                structured_metadata[key] = value
+        memory_id = self._derived_memory_id(agent_id, memory_text, world_time, full_metadata)
+        # 异步路径与同步路径使用同一份 SQLite 优先写入契约。
+        self._record_derived_memory(agent_id, memory_id, memory_text, world_time, structured_metadata)
         collection = self.get_agent_collection(agent_id)
-        full_metadata = self._normalize_metadata(agent_id, world_time, metadata)
-        memory_id = f"{agent_id}_{hashlib.md5(memory_text.encode()).hexdigest()[:10]}"
         embedding = await self._aget_embedding(memory_text)
         if not embedding:
-            logger.warning("[%s] 获取 embedding 失败，跳过记忆存储: %r", agent_id, memory_text[:60])
+            logger.warning("[%s] 获取 embedding 失败，仅保留 SQLite 长期记忆: %r", agent_id, memory_text[:60])
+            self._invalidate_retrieval_cache(agent_id)
             return memory_id
-        collection.upsert(
-            embeddings=[embedding],
-            documents=[memory_text],
-            metadatas=[full_metadata],
-            ids=[memory_id],
-        )
-        self._record_derived_memory(agent_id, memory_id, memory_text, world_time, full_metadata)
+        try:
+            collection.upsert(
+                embeddings=[embedding],
+                documents=[memory_text],
+                metadatas=[full_metadata],
+                ids=[memory_id],
+            )
+        except Exception as exc:
+            # 异步路径使用相同的 SQLite 降级契约。
+            logger.warning("[%s] 异步向量记忆写入失败，仅保留 SQLite 长期记忆: %s", agent_id, exc, exc_info=True)
         self._invalidate_retrieval_cache(agent_id)
         return memory_id
+
+    def _derived_memory_id(
+        self,
+        agent_id: str,
+        memory_text: str,
+        world_time: int,
+        metadata: dict[str, Any],
+    ) -> str:
+        """同一经历保持幂等，不同经历中的相同摘要不再互相覆盖。"""
+
+        episode_id = str(metadata.get("episode_id") or "")
+        if episode_id:
+            identity = f"{episode_id}|{metadata.get('source_type', '')}|{memory_text}"
+        else:
+            identity = memory_text
+        digest = hashlib.md5(identity.encode()).hexdigest()[:10]
+        return f"{agent_id}_{digest}"
 
     def store_observation(self, agent_id: str, observation: Any) -> None:
         """兼容旧调用的 observe 写入入口，实际分类逻辑在 MemoryController 中。"""
@@ -233,6 +304,11 @@ class MultiAgentMemoryManager:
         feedback: Any,
         reward: float | None,
         world_time: int,
+        episode_id: str = "",
+        state_before: dict[str, Any] | None = None,
+        state_after: dict[str, Any] | None = None,
+        outcome: dict[str, Any] | None = None,
+        need_events: list[dict[str, Any]] | None = None,
     ) -> None:
         """兼容旧调用的动作结果写入入口，记录已执行动作而不是未执行计划。"""
 
@@ -244,7 +320,34 @@ class MultiAgentMemoryManager:
                 feedback=feedback,
                 reward=reward,
                 world_time=world_time,
+                episode_id=episode_id,
+                state_before=state_before,
+                state_after=state_after,
+                outcome=outcome,
+                need_events=need_events,
             )
+            self._invalidate_retrieval_cache(agent_id)
+
+    def store_need_event(self, agent_id: str, event: Any, *, episode_id: str = "") -> None:
+        """把需求变化从运行日志同步为可检索的自身经历。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_need_event(agent_id, event, episode_id=episode_id)
+            self._invalidate_retrieval_cache(agent_id)
+
+    def store_psychological_assessment(
+        self,
+        agent_id: str,
+        assessment: Any,
+        *,
+        episode_id: str = "",
+    ) -> None:
+        """保存心理评测及其来源窗口，供后续经历巩固和实验审计。"""
+
+        controller = getattr(self, "controller", None)
+        if controller is not None:
+            controller.store_psychological_assessment(agent_id, assessment, episode_id=episode_id)
             self._invalidate_retrieval_cache(agent_id)
 
     def store_social_browse(self, agent_id: str, browse_payload: Any) -> None:
@@ -271,6 +374,7 @@ class MultiAgentMemoryManager:
         reply: Any = None,
         observation: str = "",
         world_time: int = 0,
+        episode_id: str = "",
     ) -> None:
         """写入对话消息和回复，保持 Agent 侧只提交结构化 payload。"""
 
@@ -282,6 +386,7 @@ class MultiAgentMemoryManager:
                 reply=reply,
                 observation=observation,
                 world_time=world_time,
+                episode_id=episode_id,
             )
             self._invalidate_retrieval_cache(agent_id)
 
@@ -327,9 +432,10 @@ class MultiAgentMemoryManager:
 
         controller = getattr(self, "controller", None)
         if controller is None:
+            semantic_observation = build_semantic_observation_text(observation, context)
             result = self.smart_retrieve(
                 agent_id,
-                observation if isinstance(observation, str) else str(observation),
+                semantic_observation,
                 task,
                 urgency,
                 satisfaction_threshold,
@@ -381,9 +487,10 @@ class MultiAgentMemoryManager:
 
         controller = getattr(self, "controller", None)
         if controller is None:
+            semantic_observation = build_semantic_observation_text(observation, context)
             result = await self.asmart_retrieve(
                 agent_id,
-                observation if isinstance(observation, str) else str(observation),
+                semantic_observation,
                 task,
                 urgency,
                 satisfaction_threshold,
@@ -436,9 +543,10 @@ class MultiAgentMemoryManager:
 
         controller = getattr(self, "controller", None)
         if controller is None:
+            semantic_observation = build_semantic_observation_text(observation, context)
             result = self.smart_retrieve(
                 agent_id,
-                observation if isinstance(observation, str) else str(observation),
+                semantic_observation,
                 task,
                 urgency,
                 satisfaction_threshold,
@@ -492,10 +600,10 @@ class MultiAgentMemoryManager:
 
         controller = getattr(self, "controller", None)
         if controller is None:
-            obs_text = observation if isinstance(observation, str) else str(observation)
+            semantic_observation = build_semantic_observation_text(observation, context)
             result = await self.asmart_retrieve(
                 agent_id,
-                obs_text,
+                semantic_observation,
                 task,
                 urgency,
                 satisfaction_threshold,
@@ -528,6 +636,7 @@ class MultiAgentMemoryManager:
         n_results: int = 3,
         context: str = "world",
         memory_types: list[str] | None = None,
+        current_time: int | None = None,
     ) -> list[str]:
         """构造确定性检索查询，再召回与当前任务相关的记忆。"""
         query = self._build_retrieval_query(observation, task, urgency, satisfaction_threshold)
@@ -540,6 +649,7 @@ class MultiAgentMemoryManager:
             task=task,
             urgency=urgency,
             where=where,
+            current_time=current_time,
         )
         logger.debug("[%s] 记忆检索结果: %s", agent_id, result)
         return result
@@ -553,6 +663,7 @@ class MultiAgentMemoryManager:
         context: str = "world",
         task: str = "",
         urgency: dict | None = None,
+        current_time: int | None = None,
         **kwargs,
     ) -> list[str]:
         """同步向量检索入口。
@@ -561,6 +672,7 @@ class MultiAgentMemoryManager:
         """
 
         started_at = time.perf_counter()
+        query = self._bounded_semantic_query(agent_id, query, context)
         prepared = self._prepare_vector_retrieval(agent_id, n_results, context, kwargs)
         if prepared is None:
             return []
@@ -575,7 +687,7 @@ class MultiAgentMemoryManager:
         if results is None:
             return []
         out = self._format_retrieval_output(
-            results, n_results, query, task, urgency, allowed_memory_types, context
+            results, n_results, query, task, urgency, allowed_memory_types, context, current_time
         )
         logger.debug(
             "[%s] 记忆检索完成 context=%s returned=%d elapsed=%.3fs",
@@ -596,6 +708,7 @@ class MultiAgentMemoryManager:
         n_results: int = 3,
         context: str = "world",
         memory_types: list[str] | None = None,
+        current_time: int | None = None,
     ) -> list[str]:
         query = self._build_retrieval_query(observation, task, urgency, satisfaction_threshold)
         where = self._memory_type_where(memory_types)
@@ -607,6 +720,7 @@ class MultiAgentMemoryManager:
             task=task,
             urgency=urgency,
             where=where,
+            current_time=current_time,
         )
 
     def _build_retrieval_query(self, observation, task, urgency, satisfaction_threshold) -> str:
@@ -622,6 +736,34 @@ class MultiAgentMemoryManager:
             parts.append(f"紧迫需求: {urgent_str}")
         return " | ".join(parts)
 
+    def _bounded_semantic_query(self, agent_id: str, query: str, context: str) -> str:
+        """在查询 embedding 前执行统一字节限制，不影响长期记忆写入。"""
+
+        text = str(query or "")
+        max_bytes = self._config_int(
+            "memory_semantic_query_max_bytes",
+            DEFAULT_SEMANTIC_QUERY_MAX_BYTES,
+            minimum=1,
+        )
+        bounded = bound_utf8_text(text, max_bytes)
+        original_bytes = len(text.encode("utf-8"))
+        logger.debug(
+            "[%s] semantic query prepared context=%s query_chars=%d query_bytes=%d",
+            agent_id,
+            context,
+            len(bounded),
+            len(bounded.encode("utf-8")),
+        )
+        if bounded != text:
+            logger.warning(
+                "[%s] semantic query truncated context=%s original_bytes=%d max_bytes=%d",
+                agent_id,
+                context,
+                original_bytes,
+                max_bytes,
+            )
+        return bounded
+
     async def aretrieve_agent_memories(
         self,
         agent_id: str,
@@ -631,11 +773,13 @@ class MultiAgentMemoryManager:
         context: str = "world",
         task: str = "",
         urgency: dict | None = None,
+        current_time: int | None = None,
         **kwargs,
     ) -> list[str]:
         """异步向量检索入口，与同步路径保持同样的召回和重排逻辑。"""
 
         started_at = time.perf_counter()
+        query = self._bounded_semantic_query(agent_id, query, context)
         prepared = self._prepare_vector_retrieval(agent_id, n_results, context, kwargs)
         if prepared is None:
             return []
@@ -650,7 +794,7 @@ class MultiAgentMemoryManager:
         if results is None:
             return []
         out = self._format_retrieval_output(
-            results, n_results, query, task, urgency, allowed_memory_types, context
+            results, n_results, query, task, urgency, allowed_memory_types, context, current_time
         )
         logger.debug(
             "[%s] 异步记忆检索完成 context=%s returned=%d elapsed=%.3fs",
@@ -701,6 +845,7 @@ class MultiAgentMemoryManager:
         urgency: dict | None,
         allowed_memory_types: set[str] | None,
         context: str,
+        current_time: int | None,
     ) -> list[str]:
         """统一执行本地重排和格式化。"""
 
@@ -712,6 +857,7 @@ class MultiAgentMemoryManager:
             urgency or {},
             allowed_memory_types,
             context=context,
+            current_time=current_time,
         )
 
     def list_agent_memories(self, agent_id: str) -> list[dict[str, Any]]:
@@ -769,18 +915,164 @@ class MultiAgentMemoryManager:
         agent_id: str,
         *,
         current_time: int,
-        raw_event_retention: int = 50,
+        raw_event_retention: int = 100,
     ) -> dict[str, Any]:
-        """执行每 tick 轻量维护；旧测试对象没有 controller 时返回空维护结果。"""
+        """按配置间隔执行原始事件和语义向量轻量维护。"""
+
+        if not self._config_bool("memory_forgetting_enabled", True):
+            result = self._empty_maintenance_result(agent_id, skipped=True)
+            self._last_maintenance_results[agent_id] = dict(result)
+            return result
+        interval = self._config_int("memory_maintenance_interval_ticks", 10, minimum=1)
+        if int(current_time) % interval != 0:
+            result = self._empty_maintenance_result(agent_id, skipped=True)
+            self._last_maintenance_results[agent_id] = dict(result)
+            return result
 
         controller = getattr(self, "controller", None)
         if controller is None:
-            return {"agent_id": agent_id, "pruned_low_value_events": 0, "unresolved_conflicts": 0}
-        return controller.maintain_agent_memory(
+            result = self._empty_maintenance_result(agent_id)
+            self._last_maintenance_results[agent_id] = dict(result)
+            return result
+        result = controller.maintain_agent_memory(
             agent_id,
             current_time=current_time,
-            raw_event_retention=raw_event_retention,
+            raw_event_retention=self._config_int(
+                "memory_event_retention_ticks", raw_event_retention, minimum=1
+            ),
+            max_prunable_importance=self._config_float(
+                "memory_event_max_prunable_importance", 0.5
+            ),
+            active_event_limit=self._config_int(
+                "memory_event_active_limit_per_agent", 2000, minimum=1
+            ),
+            protected_importance=self._config_float("memory_protected_importance", 0.7),
         )
+        result.update(self._maintain_vector_memories(agent_id, current_time=int(current_time)))
+        result["skipped"] = False
+        self._last_maintenance_results[agent_id] = dict(result)
+        return result
+
+    def _maintain_vector_memories(self, agent_id: str, *, current_time: int) -> dict[str, int]:
+        """清理 SQLite 已失效向量，并把活跃向量控制在配置上限内。"""
+
+        collection = self.get_agent_collection(agent_id)
+        counts = self.structured_store.get_active_memory_counts(agent_id)
+        if collection.count() == 0:
+            return {
+                **counts,
+                "active_memory_vectors": 0,
+                "pruned_vector_memories": 0,
+                "deleted_memory_vectors": 0,
+                "vector_delete_failures": 0,
+            }
+        try:
+            result = collection.get(where={"agent_id": agent_id}, include=["metadatas"])
+        except Exception as exc:
+            logger.warning("[%s] 读取向量维护数据失败: %s", agent_id, exc)
+            return {
+                **counts,
+                "active_memory_vectors": collection.count(),
+                "pruned_vector_memories": 0,
+                "deleted_memory_vectors": 0,
+                "vector_delete_failures": 1,
+            }
+
+        ids = [str(value) for value in result.get("ids", [])]
+        metadatas = result.get("metadatas", [])
+        valid_ids = self.structured_store.get_valid_derived_memory_ids(ids)
+        stale_ids = [memory_id for memory_id in ids if memory_id not in valid_ids]
+        active_rows = []
+        for index, memory_id in enumerate(ids):
+            if memory_id not in valid_ids:
+                continue
+            metadata = metadatas[index] if index < len(metadatas) and isinstance(metadatas[index], dict) else {}
+            active_rows.append((memory_id, metadata))
+
+        active_limit = self._config_int("memory_vector_active_limit_per_agent", 500, minimum=1)
+        protected_importance = self._config_float("memory_protected_importance", 0.7)
+        excess = max(0, len(active_rows) - active_limit)
+        removable = []
+        for memory_id, metadata in active_rows:
+            importance = float(metadata.get("importance", 0.5) or 0.5)
+            if importance >= protected_importance:
+                continue
+            saved_at = float(metadata.get("saved_at", 0) or 0)
+            retention_score = 0.6 * importance + 0.4 * self._recency_score(saved_at, current_time)
+            removable.append((retention_score, saved_at, memory_id))
+        removable.sort(key=lambda item: (item[0], item[1], item[2]))
+        pruned_ids = [memory_id for _, _, memory_id in removable[:excess]]
+        self.structured_store.invalidate_derived_memories(pruned_ids)
+
+        delete_ids = list(dict.fromkeys([*stale_ids, *pruned_ids]))
+        deleted_count = 0
+        delete_failures = 0
+        if delete_ids:
+            try:
+                collection.delete(ids=delete_ids)
+                deleted_count = len(delete_ids)
+                self._invalidate_retrieval_cache(agent_id)
+            except Exception as exc:
+                delete_failures = len(delete_ids)
+                logger.warning("[%s] 删除失效 Chroma 向量失败: %s", agent_id, exc)
+
+        counts = self.structured_store.get_active_memory_counts(agent_id)
+        return {
+            **counts,
+            "active_memory_vectors": collection.count(),
+            "pruned_vector_memories": len(pruned_ids),
+            "deleted_memory_vectors": deleted_count,
+            "vector_delete_failures": delete_failures,
+        }
+
+    def get_active_memory_counts(self, agent_id: str) -> dict[str, int]:
+        """返回运行记录需要的活跃事件、长期记忆和向量数量。"""
+
+        counts = self.structured_store.get_active_memory_counts(agent_id)
+        counts["active_memory_vectors"] = int(self.get_agent_collection(agent_id).count())
+        return counts
+
+    def get_last_memory_maintenance(self, agent_id: str) -> dict[str, Any]:
+        """返回当前 tick 最近一次维护统计，供历史记录器使用。"""
+
+        return dict(getattr(self, "_last_maintenance_results", {}).get(agent_id, {}))
+
+    def _empty_maintenance_result(self, agent_id: str, *, skipped: bool = False) -> dict[str, Any]:
+        counts = {"active_memory_events": 0, "active_derived_memories": 0, "active_memory_vectors": 0}
+        if getattr(self, "structured_store", None) is not None:
+            counts = self.get_active_memory_counts(agent_id)
+        return {
+            "agent_id": agent_id,
+            **counts,
+            "pruned_low_value_events": 0,
+            "pruned_events_to_limit": 0,
+            "pruned_vector_memories": 0,
+            "deleted_memory_vectors": 0,
+            "vector_delete_failures": 0,
+            "unresolved_conflicts": 0,
+            "skipped": skipped,
+        }
+
+    def _config_value(self, name: str, default: Any) -> Any:
+        # 运行时显式配置优先，保留旧客户端私有配置的兼容读取。
+        config = getattr(self, "config", None) or getattr(self.llm_client, "_config", None)
+        return getattr(config, name, default) if config is not None else default
+
+    def _config_bool(self, name: str, default: bool) -> bool:
+        return bool(self._config_value(name, default))
+
+    def _config_int(self, name: str, default: int, *, minimum: int | None = None) -> int:
+        try:
+            value = int(self._config_value(name, default))
+        except (TypeError, ValueError):
+            value = int(default)
+        return max(minimum, value) if minimum is not None else value
+
+    def _config_float(self, name: str, default: float) -> float:
+        try:
+            return float(self._config_value(name, default))
+        except (TypeError, ValueError):
+            return float(default)
 
     def update_person_profiles_from_reflection(self, agent_id: str, *, current_time: int, llm=None) -> dict[str, Any]:
         """reflect 阶段的人物档案更新入口。"""
@@ -914,21 +1206,29 @@ class MultiAgentMemoryManager:
         urgency: dict,
         allowed_memory_types: set[str] | None = None,
         context: str = "world",
+        current_time: int | None = None,
     ) -> list[str]:
         """过滤不适合当前上下文的记忆类型，并返回重排后的文本。"""
 
         docs = results.get("documents", [[]])[0]
         metas = results.get("metadatas", [[]])[0]
         distances = results.get("distances", [[]])[0]
+        ids = results.get("ids", [[]])[0]
+        valid_ids: set[str] | None = None
+        if ids and getattr(self, "structured_store", None) is not None:
+            valid_ids = self.structured_store.get_valid_derived_memory_ids(ids)
         rows = []
         for index, (doc, meta) in enumerate(zip(docs, metas)):
+            memory_id = str(ids[index]) if index < len(ids) else ""
+            if valid_ids is not None and memory_id not in valid_ids:
+                continue
             if allowed_memory_types and meta.get("memory_type", DEFAULT_MEMORY_TYPE) not in allowed_memory_types:
                 continue
             # 观念评测不能把上一轮评测结果当作本轮证据，避免分数自我强化。
             if context == "opinion_assessment" and meta.get("source_type") == "opinion_assessment":
                 continue
             distance = distances[index] if index < len(distances) else 1.0
-            rows.append((self._memory_score(doc, meta, distance, query, task, urgency), doc, meta))
+            rows.append((self._memory_score(doc, meta, distance, query, task, urgency, current_time), doc, meta))
         rows.sort(key=lambda item: item[0], reverse=True)
         return [self._format_memory(doc, meta) for _, doc, meta in rows[:n_results]]
 
@@ -940,6 +1240,7 @@ class MultiAgentMemoryManager:
         query: str,
         task: str,
         urgency: dict,
+        current_time: int | None = None,
     ) -> float:
         """记忆重排分数。
 
@@ -954,7 +1255,7 @@ class MultiAgentMemoryManager:
         need_key = str(meta.get("need_key", ""))
         need_match = float(urgency.get(need_key, 0.0)) if need_key else 0.0
         saved_at = float(meta.get("saved_at", 0) or 0)
-        recency = min(1.0, saved_at / 100.0) if saved_at > 0 else 0.0
+        recency = self._recency_score(saved_at, current_time)
         query_terms = {term for term in query.replace("|", " ").replace("，", " ").split() if term}
         repetition_penalty = 0.15 if query_terms and len(query_terms.intersection(set(doc.split()))) > 6 else 0.0
         return (
@@ -966,6 +1267,15 @@ class MultiAgentMemoryManager:
             + 0.05 * need_match
             - repetition_penalty
         )
+
+    def _recency_score(self, saved_at: float, current_time: int | None) -> float:
+        """按记忆年龄计算最近性；缺少当前时间时保持兼容分值。"""
+
+        if current_time is None:
+            return 1.0 if saved_at >= 0 else 0.0
+        window = self._config_int("memory_recency_window_ticks", 100, minimum=1)
+        age = max(0.0, float(current_time) - float(saved_at))
+        return 1.0 / (1.0 + age / float(window))
 
     def _format_memory(self, doc: str, meta: dict) -> str:
         memory_type = meta.get("memory_type", DEFAULT_MEMORY_TYPE)
@@ -992,7 +1302,7 @@ class MultiAgentMemoryManager:
         world_time: int,
         metadata: dict[str, Any],
     ) -> None:
-        """把 Chroma 成功写入的长期记忆同步登记到 SQLite。"""
+        """在向量写入前把长期记忆登记到 SQLite。"""
 
         controller = getattr(self, "controller", None)
         if controller is None:
@@ -1049,19 +1359,25 @@ class MultiAgentMemoryManager:
         return (method, agent_id, context, hashlib.md5(text.encode("utf-8")).hexdigest()), cache_time
 
     def _cache_query_text(self, observation: Any) -> str:
-        """只取检索相关文本，避免可见对象细节让 TTL 缓存完全失效。"""
+        """提取会影响召回或可见对象排除的当前输入。"""
 
         if isinstance(observation, str):
             return observation[:500]
         if isinstance(observation, dict):
             compact = {
                 "type": observation.get("type"),
+                "time": observation.get("time"),
                 "task_like": observation.get("task"),
+                "people": observation.get("people"),
+                "objects": observation.get("objects"),
                 "social": observation.get("social"),
                 "posts": observation.get("posts"),
+                "visible_post_ids": observation.get("visible_post_ids"),
+                "account_ids": observation.get("account_ids"),
+                "following_ids": observation.get("following_ids"),
                 "receiver_id": observation.get("receiver_id"),
             }
-            return json.dumps(compact, ensure_ascii=False, sort_keys=True, default=str)[:500]
+            return json.dumps(compact, ensure_ascii=False, sort_keys=True, default=str)
         return str(observation)[:500]
 
     def _get_retrieval_cache(self, key: tuple | None, cache_time: int) -> list[str] | None:
@@ -1094,11 +1410,7 @@ class MultiAgentMemoryManager:
                 self._retrieval_cache.pop(key, None)
 
     def _retrieval_cache_ttl_ticks(self) -> int:
-        config = getattr(self.llm_client, "_config", None)
-        try:
-            return max(0, int(getattr(config, "memory_retrieval_ttl_ticks", 0)))
-        except (TypeError, ValueError):
-            return 0
+        return self._config_int("memory_retrieval_ttl_ticks", 0, minimum=0)
 
     def _extract_world_time(self, observation: Any) -> int:
         if isinstance(observation, dict):

@@ -20,6 +20,7 @@ export interface AgentState {
   opinion: number             // 对系统新闻主题的意见倾向，-1~1
   opinion_scores: Record<string, number> // 系统新闻主题 score 镜像，用于展示和历史分析
   last_opinion_assessment: Record<string, unknown> | null
+  last_opinion_voting: Record<string, unknown> | null
   last_think: string          // 最近一次 <Think> 内容
   sleeping: boolean           // 是否处于睡眠状态
   sleep_ticks_remaining: number  // 剩余睡眠步数
@@ -90,6 +91,8 @@ export interface CommentState {
   content: string
   time: number | null
   agreement_to_post: number
+  parent_comment_id: string | null
+  root_comment_id: string | null
 }
 
 export interface PostState {
@@ -100,11 +103,16 @@ export interface PostState {
   time: number
   likes: number
   dislikes: number
+  reposts: number
+  comments_count: number
   comments: CommentState[]
   opinion_index: number
   is_news: boolean
   is_rumor: boolean
   source_type: string
+  repost_of_post_id: number | null
+  root_post_id: number | null
+  source_author_id: string | null
 }
 
 export interface MovementState {
@@ -146,6 +154,7 @@ export interface AgentHistoryPoint {
   relax_urgency: number
   satiety_pressure: number
   relax_pressure: number
+  opinion_voting_choice_counts: Record<string, number> | null
   emotion: string
 }
 
@@ -204,6 +213,7 @@ export const useSimStore = create<SimStore>((set, get) => ({
         relax_urgency: a.urgency.relax ?? 0,
         satiety_pressure: a.effective_pressure?.satiety ?? 0,
         relax_pressure: a.effective_pressure?.relax ?? 0,
+        opinion_voting_choice_counts: votingChoiceCounts(a.last_opinion_voting, worldState.time),
         emotion: a.emotion,
       }
       const arr = prev[a.id] ?? []
@@ -237,3 +247,41 @@ export const useSimStore = create<SimStore>((set, get) => ({
     }
   },
 }))
+
+function votingChoiceCounts(
+  voting: Record<string, unknown> | null,
+  tick: number,
+): Record<string, number> | null {
+  // 只采样当前时间步刚完成的投票，避免把旧票数重复画到后续时间步。
+  if (!voting || voting.tick !== tick || typeof voting.choice_counts !== 'object' || voting.choice_counts === null) {
+    return null
+  }
+  const requested = voting.requested_voters
+  const successful = voting.successful_votes
+  const failed = voting.failed_votes
+  const roles = voting.option_roles
+  // 实时图与归档统计采用相同门槛：所有请求均成功且选项角色完整。
+  if (
+    typeof requested !== 'number'
+    || !Number.isInteger(requested)
+    || requested <= 0
+    || typeof successful !== 'number'
+    || successful !== requested
+    || typeof failed !== 'number'
+    || failed !== 0
+    || typeof roles !== 'object'
+    || roles === null
+  ) {
+    return null
+  }
+  const counts: Record<string, number> = {}
+  for (const [option, value] of Object.entries(voting.choice_counts)) {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || !(option in roles)) {
+      return null
+    }
+    counts[option] = value
+  }
+  if (Object.keys(counts).length !== Object.keys(roles).length) return null
+  if (Object.values(counts).reduce((total, value) => total + value, 0) !== successful) return null
+  return counts
+}

@@ -10,6 +10,21 @@ if TYPE_CHECKING:
 
 RUNTIME_NEED_KEYS = ["satiety", "relax", "money", "belonging", "esteem", "self_actualization"]
 
+CSV_TOPIC_POST_FIELDS = (
+    "id",
+    "author_id",
+    "topic",
+    "time",
+    "opinion_index",
+    "is_news",
+    "is_rumor",
+    "source_type",
+    "repost_of_post_id",
+    "root_post_id",
+    "source_author_id",
+    "content",
+)
+
 FIELDS = (
     ["tick", "agent_id", "opinion"]
     + RUNTIME_NEED_KEYS
@@ -22,17 +37,36 @@ FIELDS = (
         "mediators", "role_card_delta", "active_role_cards",
         "action_tool", "post_id", "post_content", "comment_content", "social_action",
         "post_opinion_index", "agreement_to_post",
+        "repost_of_post_id", "root_post_id", "source_author_id",
+        "comment_id", "parent_comment_id", "root_comment_id",
         "conversation_messages", "need_events",
         "opinion_before", "opinion_after",
         "opinion_assessment_topic", "opinion_assessment_score", "opinion_scores",
         "opinion_assessment_reason", "opinion_assessment_evidence",
+        "opinion_assessment_method", "current_honest_belief", "opinion_flan_rating", "opinion_flan_model",
+        "opinion_voting_tick", "opinion_voting_options", "opinion_voting_choice_counts",
+        "opinion_voting_option_roles", "opinion_voting_choice_shares",
+        "opinion_voting_votes", "opinion_voting_requested_voters",
+        "opinion_voting_successful_votes", "opinion_voting_failed_votes",
+        "opinion_voting_support_share", "opinion_voting_oppose_share",
+        "opinion_voting_unknown_share", "opinion_voting_known_share",
+        "opinion_voting_decisiveness",
+        "opinion_voting_stance", "opinion_voting_stance_valid",
+        "opinion_voting_stance_agreement", "opinion_voting_stance_direction_margin",
+        "opinion_voting_stance_success_rate",
+        "opinion_voting_window_start_tick", "opinion_voting_window_end_tick",
+        "opinion_voting_speech_history",
         "seen_topic_posts", "visible_topic_posts",
+        "active_memory_events", "active_derived_memories", "active_memory_vectors",
+        "pruned_low_value_events", "pruned_events_to_limit", "pruned_vector_memories",
+        "deleted_memory_vectors", "vector_delete_failures",
         "emotion", "task",
     ]
 )
 
-# 历史记录默认存储在 backend/history/<timestamp>/ 下
+# 历史记录默认存储在 backend/history/<scenario_name>_<timestamp>/ 下
 _DEFAULT_BASE = os.path.join(os.path.dirname(__file__), "..", "history")
+_INVALID_RUN_NAME_CHARS = '<>:"/\\|?*'
 
 
 class HistoryRecorder:
@@ -42,10 +76,18 @@ class HistoryRecorder:
     前端实时历史只保留最近点，完整轨迹以这里为准。
     """
 
-    def __init__(self, base_dir: str = _DEFAULT_BASE):
+    def __init__(self, base_dir: str = _DEFAULT_BASE, *, scenario_name: str):
         # 只生成本次运行的目标路径；真正写入第一条记录时再创建目录。
-        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if (
+            not scenario_name
+            or scenario_name in {".", ".."}
+            or any(char in _INVALID_RUN_NAME_CHARS or ord(char) < 32 for char in scenario_name)
+        ):
+            raise ValueError(f"scenario_name 不能用于历史目录名：{scenario_name!r}")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"{scenario_name}_{timestamp}"
         self.base_dir = base_dir
+        self.scenario_name = scenario_name
         self.run_name = run_name
         self.output_dir = os.path.join(base_dir, run_name)
         self._output_dir_ready = False
@@ -73,7 +115,8 @@ class HistoryRecorder:
                 self._files[agent.id] = f
                 self._writers[agent.id] = writer
             row = self._build_row(tick, agent, platform=platform)
-            self._writers[agent.id].writerow(row)
+            # CSV 仅写帖子紧凑快照，完整评论继续写入 JSONL。
+            self._writers[agent.id].writerow(self._build_csv_row(row))
             self._files[agent.id].flush()
             self._write_jsonl(agent.id, self._build_jsonl_record(row))
 
@@ -81,11 +124,15 @@ class HistoryRecorder:
         """把运行时对象压平为 CSV/JSONL 共享行。"""
 
         last_assessment = agent.last_opinion_assessment or {}
+        last_voting = agent.last_opinion_voting or {}
+        current_voting = last_voting if last_voting.get("tick") == tick else {}
         psychological = agent.last_psychological_assessment or {}
         role_card = psychological.get("role_card_delta", {})
         mediators = self._collect_mediators(psychological)
         action = getattr(agent, "last_action", {}) or {}
         social_action = getattr(agent, "last_social_action", {}) or {}
+        social_relations = self._social_relation_fields(social_action, platform)
+        memory_counts, memory_maintenance = self._memory_stats(agent)
         opinion_before = last_assessment.get(
             "before_score",
             getattr(agent, "last_opinion_before_assessment", agent.opinion),
@@ -127,6 +174,12 @@ class HistoryRecorder:
                 "social_action": social_action.get("action", ""),
                 "post_opinion_index": social_action.get("opinion_index", ""),
                 "agreement_to_post": social_action.get("agreement_to_post", ""),
+                "repost_of_post_id": social_relations["repost_of_post_id"],
+                "root_post_id": social_relations["root_post_id"],
+                "source_author_id": social_relations["source_author_id"],
+                "comment_id": social_relations["comment_id"],
+                "parent_comment_id": social_relations["parent_comment_id"],
+                "root_comment_id": social_relations["root_comment_id"],
                 "opinion_before": opinion_before,
                 "opinion_after": last_assessment.get("score", agent.opinion),
                 "opinion_assessment_topic": last_assessment.get("topic", ""),
@@ -134,8 +187,42 @@ class HistoryRecorder:
                 "opinion_scores": json.dumps(agent.opinion_scores, ensure_ascii=False),
                 "opinion_assessment_reason": last_assessment.get("reason", ""),
                 "opinion_assessment_evidence": self._json(last_assessment.get("evidence", [])),
+                "opinion_assessment_method": current_voting.get("method", last_assessment.get("source", "")),
+                "current_honest_belief": last_assessment.get("current_honest_belief", ""),
+                "opinion_flan_rating": last_assessment.get("flan_rating", ""),
+                "opinion_flan_model": last_assessment.get("flan_model", ""),
+                "opinion_voting_tick": current_voting.get("tick", ""),
+                "opinion_voting_options": self._json(current_voting.get("options", [])),
+                "opinion_voting_choice_counts": self._json(current_voting.get("choice_counts", {})),
+                "opinion_voting_option_roles": self._json(current_voting.get("option_roles", {})),
+                "opinion_voting_choice_shares": self._json(current_voting.get("choice_shares", {})),
+                "opinion_voting_votes": self._json(current_voting.get("votes", [])),
+                "opinion_voting_requested_voters": current_voting.get("requested_voters", ""),
+                "opinion_voting_successful_votes": current_voting.get("successful_votes", ""),
+                "opinion_voting_failed_votes": current_voting.get("failed_votes", ""),
+                "opinion_voting_support_share": current_voting.get("support_share", ""),
+                "opinion_voting_oppose_share": current_voting.get("oppose_share", ""),
+                "opinion_voting_unknown_share": current_voting.get("unknown_share", ""),
+                "opinion_voting_known_share": current_voting.get("known_share", ""),
+                "opinion_voting_decisiveness": current_voting.get("decisiveness", ""),
+                "opinion_voting_stance": current_voting.get("stance", ""),
+                "opinion_voting_stance_valid": current_voting.get("stance_valid", ""),
+                "opinion_voting_stance_agreement": current_voting.get("stance_agreement", ""),
+                "opinion_voting_stance_direction_margin": current_voting.get("stance_direction_margin", ""),
+                "opinion_voting_stance_success_rate": current_voting.get("stance_success_rate", ""),
+                "opinion_voting_window_start_tick": current_voting.get("window_start_tick", ""),
+                "opinion_voting_window_end_tick": current_voting.get("window_end_tick", ""),
+                "opinion_voting_speech_history": self._json(current_voting.get("speech_history", [])),
                 "seen_topic_posts": self._json(self._seen_topic_posts(agent)),
                 "visible_topic_posts": self._json(self._visible_topic_posts(agent, platform)),
+                "active_memory_events": memory_counts["active_memory_events"],
+                "active_derived_memories": memory_counts["active_derived_memories"],
+                "active_memory_vectors": memory_counts["active_memory_vectors"],
+                "pruned_low_value_events": memory_maintenance.get("pruned_low_value_events", 0),
+                "pruned_events_to_limit": memory_maintenance.get("pruned_events_to_limit", 0),
+                "pruned_vector_memories": memory_maintenance.get("pruned_vector_memories", 0),
+                "deleted_memory_vectors": memory_maintenance.get("deleted_memory_vectors", 0),
+                "vector_delete_failures": memory_maintenance.get("vector_delete_failures", 0),
                 "emotion": agent.emotion,
                 "task": agent.task,
             }
@@ -150,6 +237,60 @@ class HistoryRecorder:
         row["conversation_messages"] = self._json(self._conversation_messages(agent, tick))
         row["need_events"] = self._json(self._need_events(agent, tick))
         return row
+
+    def _memory_stats(self, agent: Agent) -> tuple[dict[str, int], dict]:
+        """读取当前活跃记忆数量和本轮轻量维护结果。"""
+
+        empty = {"active_memory_events": 0, "active_derived_memories": 0, "active_memory_vectors": 0}
+        mem = getattr(agent, "mem", None)
+        if mem is None:
+            return empty, {}
+        try:
+            counts = mem.get_active_memory_counts(agent.id) if hasattr(mem, "get_active_memory_counts") else empty
+        except Exception:
+            counts = empty
+        try:
+            maintenance = mem.get_last_memory_maintenance(agent.id) if hasattr(mem, "get_last_memory_maintenance") else {}
+        except Exception:
+            maintenance = {}
+        return {key: int(counts.get(key, 0) or 0) for key in empty}, maintenance
+
+    def _social_relation_fields(self, social_action: dict, platform) -> dict:
+        """从本轮真实帖子和评论对象读取传播关系。"""
+
+        fields = {
+            "repost_of_post_id": "",
+            "root_post_id": "",
+            "source_author_id": "",
+            "comment_id": social_action.get("comment_id", ""),
+            "parent_comment_id": social_action.get("parent_comment_id", ""),
+            "root_comment_id": "",
+        }
+        if platform is None:
+            return fields
+        post_id = social_action.get("post_id")
+        posts_lock = getattr(platform, "_posts_lock", None)
+        if posts_lock is None:
+            post = next((item for item in platform.posts if item.id == post_id), None)
+        else:
+            with posts_lock:
+                post = next((item for item in platform.posts if item.id == post_id), None)
+        if post is None:
+            return fields
+
+        for field_name in ("repost_of_post_id", "root_post_id", "source_author_id"):
+            value = getattr(post, field_name)
+            fields[field_name] = value if value is not None else ""
+
+        comment_id = fields["comment_id"]
+        if not comment_id:
+            return fields
+        comment = post.get_comment(comment_id)
+        if comment is None:
+            return fields
+        fields["parent_comment_id"] = comment.parent_comment_id if comment.parent_comment_id is not None else ""
+        fields["root_comment_id"] = comment.root_comment_id if comment.root_comment_id is not None else ""
+        return fields
 
     def _write_jsonl(self, agent_id: str, record: dict) -> None:
         self.ensure_output_dir()
@@ -212,6 +353,12 @@ class HistoryRecorder:
             "active_role_cards",
             "opinion_scores",
             "opinion_assessment_evidence",
+            "opinion_voting_options",
+            "opinion_voting_choice_counts",
+            "opinion_voting_option_roles",
+            "opinion_voting_choice_shares",
+            "opinion_voting_votes",
+            "opinion_voting_speech_history",
             "seen_topic_posts",
             "visible_topic_posts",
             "conversation_messages",
@@ -219,6 +366,31 @@ class HistoryRecorder:
         ]:
             record[key] = self._loads_json_field(row.get(key))
         return record
+
+    def _build_csv_row(self, row: dict) -> dict:
+        """为 CSV 移除评论正文，同时保留可分析的帖子字段。"""
+
+        csv_row = dict(row)
+        for field_name in ("seen_topic_posts", "visible_topic_posts"):
+            posts = self._loads_json_field(row.get(field_name))
+            csv_row[field_name] = self._json(self._compact_topic_posts(posts))
+        return csv_row
+
+    @staticmethod
+    def _compact_topic_posts(posts) -> list[dict]:
+        """生成不含评论正文的帖子快照。"""
+
+        if not isinstance(posts, list):
+            return []
+        compact_posts = []
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            comments = post.get("comments")
+            compact_post = {field_name: post.get(field_name) for field_name in CSV_TOPIC_POST_FIELDS}
+            compact_post["comments_count"] = len(comments) if isinstance(comments, list) else 0
+            compact_posts.append(compact_post)
+        return compact_posts
 
     def _group_need_fields(self, row: dict, mapping: dict[str, str]) -> dict[str, float]:
         """把 CSV 扁平字段还原为按需求键分组的 JSONL 字段。"""
@@ -282,7 +454,15 @@ class HistoryRecorder:
                 "is_news": post.get("is_news"),
                 "is_rumor": post.get("is_rumor"),
                 "source_type": post.get("source_type"),
+                "repost_of_post_id": post.get("repost_of_post_id"),
+                "root_post_id": post.get("root_post_id"),
+                "source_author_id": post.get("source_author_id"),
                 "content": post.get("content"),
+                "comments": [
+                    self._comment_history_snapshot(comment)
+                    for comment in post.get("comments", [])
+                    if isinstance(comment, dict)
+                ],
             })
         return out
 
@@ -296,20 +476,43 @@ class HistoryRecorder:
             return []
         out = []
         for post in platform.get_visible_posts(agent.id):
-            if str(getattr(post, "topic", "") or "") != topic:
+            post_data = post.to_dict()
+            if str(post_data.get("topic") or "") != topic:
                 continue
             out.append({
-                "id": getattr(post, "id", None),
-                "author_id": getattr(post, "author_id", None),
-                "topic": getattr(post, "topic", None),
-                "time": getattr(post, "time", None),
-                "opinion_index": getattr(post, "opinion_index", None),
-                "is_news": getattr(post, "is_news", None),
-                "is_rumor": getattr(post, "is_rumor", None),
-                "source_type": getattr(post, "source_type", None),
-                "content": getattr(post, "content", None),
+                "id": post_data.get("id"),
+                "author_id": post_data.get("author_id"),
+                "topic": post_data.get("topic"),
+                "time": post_data.get("time"),
+                "opinion_index": post_data.get("opinion_index"),
+                "is_news": post_data.get("is_news"),
+                "is_rumor": post_data.get("is_rumor"),
+                "source_type": post_data.get("source_type"),
+                "repost_of_post_id": post_data.get("repost_of_post_id"),
+                "root_post_id": post_data.get("root_post_id"),
+                "source_author_id": post_data.get("source_author_id"),
+                "content": post_data.get("content"),
+                "comments": [
+                    self._comment_history_snapshot(comment)
+                    for comment in post_data.get("comments", [])
+                    if isinstance(comment, dict)
+                ],
             })
         return out
+
+    @staticmethod
+    def _comment_history_snapshot(comment: dict) -> dict:
+        """保留评论正文及回复链字段。"""
+
+        return {
+            "id": comment.get("id"),
+            "author_id": comment.get("author_id"),
+            "content": comment.get("content"),
+            "time": comment.get("time"),
+            "agreement_to_post": comment.get("agreement_to_post"),
+            "parent_comment_id": comment.get("parent_comment_id"),
+            "root_comment_id": comment.get("root_comment_id"),
+        }
 
     def _json(self, value) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)

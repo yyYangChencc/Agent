@@ -6,7 +6,7 @@ from scenarios.registry import get_scenario
 
 async def _main():
     scenario = get_scenario("default_town")
-    rt = scenario.build_runtime(conversation_max_rounds=2)
+    rt = scenario.build_runtime(conversation_max_rounds=1)
     agents = [rt.world.agents[agent_id] for agent_id in scenario.AGENT_IDS]
 
     # --- 运行仿真 ---

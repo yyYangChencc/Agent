@@ -120,15 +120,34 @@ class PsychologicalEvaluator(Protocol):
 
 
 class TheoryCardRepository:
-    """读取理论卡，并按精确的需求键建立索引。"""
+    """读取理论卡和文献知识，并按精确的需求键建立索引。"""
 
-    def __init__(self, cards: list[dict]):
+    def __init__(
+        self,
+        cards: list[dict],
+        literature: list[dict] | None = None,
+        mixed_literature: list[dict] | None = None,
+        behavior_evidence: list[dict] | None = None,
+    ):
         self.cards = cards
+        self.literature = literature or []
+        self.mixed_literature = mixed_literature or []
+        self.behavior_evidence = behavior_evidence or []
         self.by_need_key: dict[str, dict] = {}
+        self.literature_by_id: dict[str, dict] = {}
+        self.behavior_evidence_by_id: dict[str, dict] = {}
         for card in cards:
             need_key = card.get("need_key")
             if isinstance(need_key, str) and need_key:
                 self.by_need_key[need_key] = card
+        for source in self.literature:
+            source_id = source.get("id")
+            if isinstance(source_id, str) and source_id:
+                self.literature_by_id[source_id] = source
+        for evidence in self.behavior_evidence:
+            evidence_id = evidence.get("id")
+            if isinstance(evidence_id, str) and evidence_id:
+                self.behavior_evidence_by_id[evidence_id] = evidence
 
     @classmethod
     def load_default(cls) -> "TheoryCardRepository":
@@ -138,10 +157,27 @@ class TheoryCardRepository:
         with THEORY_CARD_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
         cards = data.get("cards", [])
+        literature = data.get("literature", [])
+        mixed_literature = data.get("mixed_literature", [])
+        behavior_evidence = data.get("behavior_evidence", [])
         if not isinstance(cards, list):
             logger.warning("[Psychology] theory card file has no cards list: %s", THEORY_CARD_PATH)
             cards = []
-        return cls(cards)
+        if not isinstance(literature, list):
+            logger.warning("[Psychology] theory card file has no literature list: %s", THEORY_CARD_PATH)
+            literature = []
+        if not isinstance(mixed_literature, list):
+            logger.warning("[Psychology] theory card file has no mixed_literature list: %s", THEORY_CARD_PATH)
+            mixed_literature = []
+        if not isinstance(behavior_evidence, list):
+            logger.warning("[Psychology] theory card file has no behavior_evidence list: %s", THEORY_CARD_PATH)
+            behavior_evidence = []
+        return cls(
+            cards,
+            literature=literature,
+            mixed_literature=mixed_literature,
+            behavior_evidence=behavior_evidence,
+        )
 
     def get(self, need_key: str) -> dict | None:
         return self.by_need_key.get(need_key)
@@ -151,12 +187,13 @@ class TheoryCardNeedEvaluator:
     """由单张理论卡驱动的确定性评测器。
 
     它根据压力、需求下降幅度和上一轮中介变量残余计算新的中介变量。
-    同时，它会从理论卡中的压力等级模板生成角色卡增量。
+    同时，它只从具有原文证据的中介效果生成角色卡增量。
     """
 
-    def __init__(self, card: dict):
+    def __init__(self, card: dict, behavior_evidence_by_id: dict[str, dict] | None = None):
         self.card = card
         self.need_key = str(card["need_key"])
+        self.behavior_evidence_by_id = behavior_evidence_by_id or {}
 
     def assess(
         self,
@@ -231,41 +268,125 @@ class TheoryCardNeedEvaluator:
         return _clamp01(max(0.0, -need_change) / float(threshold))
 
     def _build_role_card(self, level: str, pressure: float, mediators: dict[str, float]) -> dict:
-        templates = self.card.get("role_card_templates", {})
-        if not isinstance(templates, dict):
-            templates = {}
-        template = (
-            templates.get(level)
-            or templates.get("moderate")
-            or templates.get("low")
-            or templates.get("high")
-            or {}
-        )
-        if not isinstance(template, dict):
-            template = {}
         top_mediators = sorted(
-            mediators.items(),
+            (
+                (key, value)
+                for key, value in mediators.items()
+                if value > 0.0
+            ),
             key=lambda item: item[1],
             reverse=True,
         )[:3]
-        return {
+        mediator_labels = {
+            str(item.get("key")): str(item.get("label") or item.get("key"))
+            for item in self.card.get("mediators", [])
+            if isinstance(item, dict) and item.get("key")
+        }
+        role_card = {
             "source_need": self.need_key,
             "maslow_need": self.card.get("maslow_need"),
             "severity": level,
             "pressure": round(pressure, 3),
-            "summary": template.get("summary", self.card.get("display_name", "")),
-            "emotion_tone": template.get("emotion_tone", ""),
-            "cognition": _as_text_list(template.get("cognition")),
-            "behavior": _as_text_list(template.get("behavior")),
-            "social_expression": _as_text_list(template.get("social_expression")),
-            "online_behavior": _as_text_list(template.get("online_behavior")),
-            "decision_bias": _as_text_list(template.get("decision_bias")),
-            "constraints": _as_text_list(template.get("constraints")),
+            "summary": self._mediator_summary(top_mediators, mediator_labels),
+            "emotion_tone": "",
+            "cognition": [],
+            "behavior": [],
+            "social_expression": [],
+            "online_behavior": [],
+            "decision_bias": [],
+            "constraints": [],
             "mediator_focus": [
                 {"key": key, "value": value}
                 for key, value in top_mediators
             ],
+            "behavior_derivations": [],
         }
+        self._apply_mediator_effects(role_card, top_mediators)
+        return role_card
+
+    def _mediator_summary(
+        self,
+        top_mediators: list[tuple[str, float]],
+        mediator_labels: dict[str, str],
+    ) -> str:
+        """只用中介标签和数值生成描述，不额外推导行为。"""
+
+        if not top_mediators:
+            return f"{self.card.get('display_name', self.need_key)}当前没有可用的中介效果。"
+        parts = [
+            f"{mediator_labels.get(key, key)}={value:.3f}"
+            for key, value in top_mediators
+        ]
+        return f"{self.card.get('display_name', self.need_key)}的主要中介：" + "、".join(parts)
+
+    def _apply_mediator_effects(
+        self,
+        role_card: dict,
+        top_mediators: list[tuple[str, float]],
+    ) -> None:
+        """把有原文证据的中介效果展开到角色卡插槽。"""
+
+        effects_by_mediator = self.card.get("mediator_effects", {})
+        if not isinstance(effects_by_mediator, dict):
+            return
+        emotion_tones: list[str] = []
+        allowed_slots = {
+            "emotion_tone",
+            "cognition",
+            "behavior",
+            "social_expression",
+            "online_behavior",
+            "decision_bias",
+        }
+        for mediator_key, mediator_value in top_mediators:
+            slot_map = effects_by_mediator.get(mediator_key)
+            if not isinstance(slot_map, dict):
+                continue
+            for slot, effects in slot_map.items():
+                if slot not in allowed_slots or not isinstance(effects, list):
+                    continue
+                for effect in effects:
+                    if not isinstance(effect, dict):
+                        continue
+                    text = effect.get("text")
+                    evidence_ids = effect.get("evidence_ids")
+                    if not isinstance(text, str) or not text:
+                        continue
+                    if not isinstance(evidence_ids, list) or not evidence_ids:
+                        continue
+                    # 证据编号必须全部存在；否则该效果不得进入角色卡。
+                    if any(evidence_id not in self.behavior_evidence_by_id for evidence_id in evidence_ids):
+                        logger.warning(
+                            "[Psychology] skip untraceable mediator effect need=%s mediator=%s slot=%s",
+                            self.need_key,
+                            mediator_key,
+                            slot,
+                        )
+                        continue
+                    if slot == "emotion_tone":
+                        _merge_unique(emotion_tones, text)
+                    else:
+                        _merge_unique(role_card[slot], text)
+                    evidence = [
+                        {
+                            "id": evidence_id,
+                            "source_id": self.behavior_evidence_by_id[evidence_id].get("source_id"),
+                            "pdf_page": self.behavior_evidence_by_id[evidence_id].get("pdf_page"),
+                            "quote": self.behavior_evidence_by_id[evidence_id].get("quote"),
+                            "interpretation": self.behavior_evidence_by_id[evidence_id].get("interpretation"),
+                        }
+                        for evidence_id in evidence_ids
+                    ]
+                    role_card["behavior_derivations"].append({
+                        "need_key": self.need_key,
+                        "mediator_key": mediator_key,
+                        "mediator_value": mediator_value,
+                        "slot": slot,
+                        "text": text,
+                        "evidence_ids": list(evidence_ids),
+                        "evidence": evidence,
+                    })
+        role_card["emotion_tone"] = "；".join(emotion_tones)
 
     def recover(
         self,
@@ -295,7 +416,7 @@ class TheoryCardNeedEvaluator:
             return None
 
         pressure_last = window.effective_pressure_last.get(self.need_key, 0.0)
-        role_card = self._build_recovery_role_card(pressure_last, mediators)
+        role_card = self._build_role_card("recovery", pressure_last, mediators)
         return {
             "need_key": self.need_key,
             "status": "recovering",
@@ -323,44 +444,6 @@ class TheoryCardNeedEvaluator:
             "validation_predictions": self.card.get("validation_predictions", []),
         }
 
-    def _build_recovery_role_card(self, pressure: float, mediators: dict[str, float]) -> dict:
-        top_mediators = sorted(
-            mediators.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        )[:3]
-        return {
-            "source_need": self.need_key,
-            "maslow_need": self.card.get("maslow_need"),
-            "severity": "recovery",
-            "pressure": round(_clamp01(pressure), 3),
-            "summary": f"{self.card.get('display_name', self.need_key)}压力已回落，心理影响正在衰减。",
-            "emotion_tone": "逐步恢复，但仍有轻微残余影响",
-            "cognition": [
-                "相关威胁或缺口线索的注意偏置正在减弱。"
-            ],
-            "behavior": [
-                "行为应逐步回到当前任务和真实需求状态，不再过度受旧压力牵引。"
-            ],
-            "social_expression": [
-                "表达语气逐步恢复平稳。"
-            ],
-            "online_behavior": [
-                "相关主题的表达冲动下降。"
-            ],
-            "decision_bias": [
-                "保留轻微惯性，但降低该需求对决策的权重。"
-            ],
-            "constraints": [
-                "当当前压力已经恢复时，不得继续表现为高压力状态。"
-            ],
-            "mediator_focus": [
-                {"key": key, "value": value}
-                for key, value in top_mediators
-            ],
-        }
-
-
 class LLMTheoryCardNeedEvaluator:
     """由单张理论卡约束的 LLM 评测器。
 
@@ -376,11 +459,15 @@ class LLMTheoryCardNeedEvaluator:
         *,
         fallback_evaluator: TheoryCardNeedEvaluator | None = None,
         fallback_to_rule: bool = True,
+        behavior_evidence_by_id: dict[str, dict] | None = None,
     ):
         self.card = card
         self.llm = llm
         self.need_key = str(card["need_key"])
-        self.fallback_evaluator = fallback_evaluator or TheoryCardNeedEvaluator(card)
+        self.fallback_evaluator = fallback_evaluator or TheoryCardNeedEvaluator(
+            card,
+            behavior_evidence_by_id=behavior_evidence_by_id,
+        )
         self.fallback_to_rule = fallback_to_rule
 
     def assess(
@@ -514,10 +601,10 @@ class LLMTheoryCardNeedEvaluator:
         recent_history = list(getattr(agent, "history", []) or [])[-8:]
         system = (
             "你是智能体心理评测器。请根据理论卡、评测窗口经历、需求变化、有效压力和上一轮评测结果，"
-            "评估该智能体当前由该需求缺口引发的心理中介变量与动态角色卡。"
-            "心理评测只能描述认知偏置、情绪倾向、表达风格、社交倾向和行动偏好，"
-            "不能替代需求数值、工具规则、地图观测或真实经历。"
+            "只评估该智能体当前由该需求缺口引发的心理中介变量。"
+            "动态角色卡由程序根据中介变量和原文证据确定性生成，你不得生成或改写角色卡行为。"
             "不得编造经历、对象 ID、资源数量、医学诊断或未给出的事实。"
+            "只允许输出理论卡 mediators 中声明的键。"
             "中介变量取值必须在 0 到 1 之间。"
             "只输出 JSON，不要输出额外文字。"
         )
@@ -547,20 +634,10 @@ class LLMTheoryCardNeedEvaluator:
                         "level": pressure_snapshot["level"],
                     },
                 },
-                "theory_card": self.card,
+                "theory_card": self._llm_theory_card(),
                 "previous_result": previous_result,
                 "output_schema": {
                     "mediators": {"mediator_key": "float in [0,1]"},
-                    "role_card_delta": {
-                        "summary": "short Chinese summary",
-                        "emotion_tone": "short Chinese phrase",
-                        "cognition": ["short Chinese instruction"],
-                        "behavior": ["short Chinese instruction"],
-                        "social_expression": ["short Chinese instruction"],
-                        "online_behavior": ["short Chinese instruction"],
-                        "decision_bias": ["short Chinese instruction"],
-                        "constraints": ["short Chinese constraint"],
-                    },
                     "reason": "short Chinese explanation",
                     "evidence": ["short evidence strings"],
                     "confidence": "float in [0,1]",
@@ -569,6 +646,19 @@ class LLMTheoryCardNeedEvaluator:
             ensure_ascii=False,
         )
         return system, user
+
+    def _llm_theory_card(self) -> dict:
+        """只向 LLM 发送评估中介所需的理论字段。"""
+
+        return {
+            "id": self.card.get("id"),
+            "need_key": self.card.get("need_key"),
+            "summary": self.card.get("summary"),
+            "source_anchors": self.card.get("source_anchors", []),
+            "evidence_claims": self.card.get("evidence_claims", []),
+            "boundaries": self.card.get("boundaries", []),
+            "mediators": self.card.get("mediators", []),
+        }
 
     def _build_result_from_payload(
         self,
@@ -584,8 +674,7 @@ class LLMTheoryCardNeedEvaluator:
         mediators = self._validated_mediators(payload.get("mediators"))
         if not mediators:
             raise ValueError("LLM psychological assessment output has no valid mediators")
-        role_card = self._validated_role_card(
-            payload.get("role_card_delta"),
+        role_card = self.fallback_evaluator._build_role_card(
             pressure_snapshot["level"],
             pressure_snapshot["pressure"],
             mediators,
@@ -644,46 +733,6 @@ class LLMTheoryCardNeedEvaluator:
             mediators[key] = round(_clamp01(_as_float(raw_value, 0.0)), 3)
         return mediators
 
-    def _validated_role_card(
-        self,
-        value,
-        level: str,
-        pressure: float,
-        mediators: dict[str, float],
-    ) -> dict:
-        # 将可选角色卡字段标准化为稳定列表。必要约束会始终追加，
-        # 因为角色卡只是偏置层，不是世界规则或工具调用的替代品。
-        if not isinstance(value, dict):
-            value = {}
-        top_mediators = sorted(
-            mediators.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        )[:3]
-        constraints = _as_text_list(value.get("constraints"))
-        _merge_unique(
-            constraints,
-            "心理角色卡只影响认知偏置、表达风格、社交倾向和行动偏好，不直接替代需求目标或工具规则。",
-        )
-        return {
-            "source_need": self.need_key,
-            "maslow_need": self.card.get("maslow_need"),
-            "severity": level,
-            "pressure": round(pressure, 3),
-            "summary": str(value.get("summary") or self.card.get("display_name", "")),
-            "emotion_tone": str(value.get("emotion_tone") or ""),
-            "cognition": _as_text_list(value.get("cognition")),
-            "behavior": _as_text_list(value.get("behavior")),
-            "social_expression": _as_text_list(value.get("social_expression")),
-            "online_behavior": _as_text_list(value.get("online_behavior")),
-            "decision_bias": _as_text_list(value.get("decision_bias")),
-            "constraints": constraints,
-            "mediator_focus": [
-                {"key": key, "value": value}
-                for key, value in top_mediators
-            ],
-        }
-
     def _parse_llm_json(self, raw: str) -> dict:
         return parse_json_object(raw, context="LLM psychological assessment output")
 
@@ -724,6 +773,9 @@ class PlaceholderNeedEvaluator:
 class PsychologicalArbiter:
     """将多个被激活需求的评测结果合并为一个角色卡增量。"""
 
+    def __init__(self, mixed_literature: list[dict] | None = None):
+        self.mixed_literature = mixed_literature or []
+
     def integrate(
         self,
         *,
@@ -747,6 +799,8 @@ class PsychologicalArbiter:
             "decision_bias": [],
             "constraints": [],
             "mediator_focus": [],
+            "behavior_derivations": [],
+            "conflict_notes": [],
         }
         summaries = []
         emotion_tones = []
@@ -786,7 +840,14 @@ class PsychologicalArbiter:
                         "key": item.get("key"),
                         "value": item.get("value"),
                     })
+            for item in card.get("behavior_derivations", []) or []:
+                if isinstance(item, dict) and item not in role_card_delta["behavior_derivations"]:
+                    role_card_delta["behavior_derivations"].append(dict(item))
 
+        mixed_literature_used = self._apply_mixed_literature(
+            activated_needs=activated_needs,
+            role_card_delta=role_card_delta,
+        )
         role_card_delta["dominant_need"] = dominant_need
         role_card_delta["summary"] = "；".join(summaries)
         role_card_delta["emotion_tone"] = "；".join(emotion_tones)
@@ -807,8 +868,45 @@ class PsychologicalArbiter:
             "previous_integrated_result": previous_integrated_result,
             "mediators": merged_mediators,
             "role_card_delta": role_card_delta,
+            "mixed_literature_used": mixed_literature_used,
             "note": "多个理论卡评测结果已整合为统一动态角色卡。",
         }
+
+    def _apply_mixed_literature(
+        self,
+        *,
+        activated_needs: list[str],
+        role_card_delta: dict,
+    ) -> list[dict]:
+        """仅在一条混合知识命中至少两个激活需求时交给裁判使用。"""
+
+        active_set = set(activated_needs)
+        used = []
+        for item in self.mixed_literature:
+            if not isinstance(item, dict):
+                continue
+            need_keys = item.get("need_keys")
+            if not isinstance(need_keys, list):
+                continue
+            matched_need_keys = [
+                key for key in need_keys
+                if isinstance(key, str) and key in active_set
+            ]
+            if len(matched_need_keys) < 2:
+                continue
+            guidance = item.get("arbiter_guidance")
+            if not isinstance(guidance, dict):
+                guidance = {}
+            # 混合文献只处理冲突和边界，不再新增脱离中介的行为模板。
+            _merge_unique(role_card_delta["constraints"], guidance.get("constraints"))
+            _merge_unique(role_card_delta["conflict_notes"], guidance.get("conflict_notes"))
+            used.append({
+                "id": item.get("id"),
+                "literature_ids": list(item.get("literature_ids") or []),
+                "matched_need_keys": matched_need_keys,
+                "summary": item.get("summary", ""),
+            })
+        return used
 
 
 class PsychologicalAssessmentCoordinator:
@@ -827,12 +925,12 @@ class PsychologicalAssessmentCoordinator:
     ):
         self.config = config
         self.llm = llm
+        repository = TheoryCardRepository.load_default()
         if evaluators is None:
-            repository = TheoryCardRepository.load_default()
             self.evaluators = self._build_default_evaluators(repository)
         else:
             self.evaluators = evaluators
-        self.arbiter = arbiter or PsychologicalArbiter()
+        self.arbiter = arbiter or PsychologicalArbiter(repository.mixed_literature)
 
     def _build_default_evaluators(self, repository: TheoryCardRepository) -> dict[str, PsychologicalEvaluator]:
         # 在 LLM 模式下，每张理论卡都会获得一个带确定性回退的 LLM 评测器。
@@ -844,11 +942,15 @@ class PsychologicalAssessmentCoordinator:
                     card,
                     self.llm,
                     fallback_to_rule=self.config.psychological_llm_fallback_to_rule,
+                    behavior_evidence_by_id=repository.behavior_evidence_by_id,
                 )
                 for need_key, card in repository.by_need_key.items()
             }
         return {
-            need_key: TheoryCardNeedEvaluator(card)
+            need_key: TheoryCardNeedEvaluator(
+                card,
+                behavior_evidence_by_id=repository.behavior_evidence_by_id,
+            )
             for need_key, card in repository.by_need_key.items()
         }
 

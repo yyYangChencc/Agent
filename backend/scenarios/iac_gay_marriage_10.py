@@ -5,6 +5,7 @@ from typing import Any
 
 from .builder import build_runtime_from_spec
 from .iac_gay_marriage import OPPOSE_INFLUENCERS, SPEC as FULL_SPEC, SUPPORT_INFLUENCERS
+from .map_designs import polarization_map_design
 
 
 SELECTED_AGENT_IDS = [
@@ -54,6 +55,8 @@ def _selected_agents() -> list[dict[str, Any]]:
     for index, agent_id in enumerate(SELECTED_AGENT_IDS):
         item = deepcopy(by_id[agent_id])
         item["position"] = list(COMPACT_POSITIONS[index])
+        item.pop("community_id", None)
+        item.pop("initial_role", None)
         item["subset_role"] = _subset_role(float(item.get("initial_opinion", 0.0)))
         agents.append(item)
     return agents
@@ -70,31 +73,37 @@ def _subset_role(opinion: float) -> str:
 
 
 def _selected_objects() -> list[dict[str, Any]]:
-    """保留 10 张床和完整基础设施，避免小场景携带多余床位。"""
+    """为 10 人子场景保留独立的 25x25 紧凑设施布局。"""
 
-    objects: list[dict[str, Any]] = []
-    for item in FULL_SPEC["objects"]:
-        kind = item.get("kind")
-        object_id = str(item.get("id") or "")
-        if kind == "bed":
-            suffix = object_id.removeprefix("bed_")
-            if suffix.isdigit() and int(suffix) <= 10:
-                objects.append(deepcopy(item))
-            continue
-        objects.append(deepcopy(item))
-    return objects
+    beds = [
+        {"kind": "bed", "id": f"bed_{index + 1}", "position": [1 + index // 5, 1 + (index % 5) * 2]}
+        for index in range(10)
+    ]
+    facilities = [
+        {"kind": "company", "id": "company_1", "position": [20, 3], "params": {"salary": 8, "relax_cost": 8}},
+        {"kind": "company", "id": "company_2", "position": [22, 6], "params": {"salary": 12, "relax_cost": 12}},
+        {"kind": "food_shop", "id": "shop_1", "position": [2, 18], "params": {"food_num": 160, "provide": 30, "price": 6}},
+        {"kind": "food_shop", "id": "shop_2", "position": [4, 21], "params": {"food_num": 160, "provide": 20, "price": 4}},
+        {"kind": "playground", "id": "playground_1", "position": [20, 20], "params": {"provide": 18, "price": 5}},
+    ]
+    return beds + facilities
 
 
 def _map_design(objects: list[dict[str, Any]]) -> dict[str, Any]:
-    """移除未使用床位的地图对象标注，保持前端展示与场景对象一致。"""
+    """移除未使用对象和空食物区标注，保持地图与场景对象一致。"""
 
-    design = deepcopy(FULL_SPEC["map_design"])
+    design = polarization_map_design()
     object_ids = {str(item.get("id") or "") for item in objects}
-    regions = design.get("object_regions")
-    if isinstance(regions, dict):
-        for object_id in list(regions.keys()):
-            if object_id.startswith("bed_") and object_id not in object_ids:
-                regions.pop(object_id, None)
+    object_regions = design.get("object_regions")
+    if isinstance(object_regions, dict):
+        for object_id in list(object_regions.keys()):
+            if object_id not in object_ids:
+                object_regions.pop(object_id, None)
+    regions = design.get("regions")
+    if isinstance(regions, list):
+        design["regions"] = [
+            item for item in regions if item.get("id") != "central_food_area"
+        ]
     return design
 
 
@@ -164,13 +173,14 @@ def _offline_trust() -> list[dict[str, Any]]:
 
 
 def _selected_memories() -> list[dict[str, Any]]:
-    """只保留 10 个实体智能体的初始化记忆。"""
+    """只保留 10 个实体智能体的论坛画像记忆。"""
 
     selected = _selected_set()
     return [
         deepcopy(item)
         for item in FULL_SPEC["memories"]
         if str(item.get("agent_id") or "") in selected
+        and item.get("task") == "agent_initialization"
     ]
 
 
@@ -182,6 +192,11 @@ def _build_spec() -> dict[str, Any]:
     spec = deepcopy(FULL_SPEC)
     spec["name"] = "iac_gay_marriage_10"
     spec["parent_scenario"] = "iac_gay_marriage"
+    spec["opinion_assessment_mode"] = "llm_as_judge"
+    spec["opinion_assessment_interval"] = 5
+    # 本场景固定使用已在当前实验机验证通过的本地 FLAN-T5-Large FP16 权重。
+    spec["opinion_flan_model_name"] = r"D:\models\flan-t5-large"
+    spec["opinion_voting_window_size"] = 10
     spec["selection_rule"] = (
         "按 IAC 初始化种子固定抽取 3 个支持、3 个反对、4 个中立智能体；"
         "支持/反对组优先目标讨论前已评分发言数量更高者，中立组优先初始观念最接近 0 且资料量更高者。"
@@ -194,6 +209,9 @@ def _build_spec() -> dict[str, Any]:
     spec["follow_edges"] = follow_edges
     spec["online_trust"] = _online_trust(follow_edges)
     spec["memories"] = _selected_memories()
+    spec.pop("community_memories", None)
+    spec.pop("community_assignment_rule", None)
+    spec["facility_memory_scope"] = "global"
     spec["map_memory"] = (
         "IAC gay marriage 10 人子场景从完整 105 人场景派生；"
         "实体智能体缩小为 10 人，投放账号和 52 条线上投放帖子保持不变。"

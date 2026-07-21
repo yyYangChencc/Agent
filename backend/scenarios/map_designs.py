@@ -89,3 +89,130 @@ def polarization_map_design() -> MapDesignData:
         col = 1 + ((index - 1) % 5) * 2
         object_regions[f"bed_{index}"] = {"region_id": "residential_area", "entrance": [row, col + 1]}
     return _base_design(object_regions)
+
+
+IAC_COMMUNITIES = [
+    {
+        "id": "community_1",
+        "name": "西北社区",
+        "kind": "community",
+        "bounds": [0, 0, 47, 47],
+        "label_pos": [1, 1],
+        "color": "#22c55e",
+        "description": "西北象限社区，拥有独立的居住、工作、食品和娱乐设施。",
+    },
+    {
+        "id": "community_2",
+        "name": "东北社区",
+        "kind": "community",
+        "bounds": [0, 52, 47, 99],
+        "label_pos": [1, 53],
+        "color": "#3b82f6",
+        "description": "东北象限社区，拥有独立的居住、工作、食品和娱乐设施。",
+    },
+    {
+        "id": "community_3",
+        "name": "西南社区",
+        "kind": "community",
+        "bounds": [52, 0, 99, 47],
+        "label_pos": [53, 1],
+        "color": "#f59e0b",
+        "description": "西南象限社区，拥有独立的居住、工作、食品和娱乐设施。",
+    },
+    {
+        "id": "community_4",
+        "name": "东南社区",
+        "kind": "community",
+        "bounds": [52, 52, 99, 99],
+        "label_pos": [53, 53],
+        "color": "#d946ef",
+        "description": "东南象限社区，拥有独立的居住、工作、食品和娱乐设施。",
+    },
+]
+
+
+def iac_community_map_design(object_regions: dict[str, dict[str, Any]]) -> MapDesignData:
+    """生成 100x100 四社区地图，中央十字道路连接全部社区。"""
+
+    terrain = [
+        {
+            "id": "iac_ground",
+            "name": "城市底色",
+            "kind": "grass",
+            "bounds": [0, 0, 99, 99],
+            "color": "#203a2f",
+            "alpha": 1.0,
+        }
+    ]
+    community_terrain = [
+        ("community_1_ground", "西北社区地块", [0, 0, 47, 47], "#315a3b"),
+        ("community_2_ground", "东北社区地块", [0, 52, 47, 99], "#294b6b"),
+        ("community_3_ground", "西南社区地块", [52, 0, 99, 47], "#66512d"),
+        ("community_4_ground", "东南社区地块", [52, 52, 99, 99], "#63365f"),
+    ]
+    for terrain_id, name, bounds, color in community_terrain:
+        terrain.append(
+            {
+                "id": terrain_id,
+                "name": name,
+                "kind": "community_ground",
+                "bounds": bounds,
+                "color": color,
+                "alpha": 0.5,
+            }
+        )
+
+    roads = [
+        {
+            "id": f"central_horizontal_{row}",
+            "name": f"中央横路 {row}",
+            "kind": "road",
+            "cells": _horizontal(row, 0, 99),
+            "color": "#8a7356",
+            "width": 1,
+        }
+        for row in range(48, 52)
+    ]
+    roads.extend(
+        {
+            "id": f"central_vertical_{col}",
+            "name": f"中央竖路 {col}",
+            "kind": "road",
+            "cells": _vertical(col, 0, 99),
+            "color": "#8a7356",
+            "width": 1,
+        }
+        for col in range(48, 52)
+    )
+    for index, (row_offset, col_offset) in enumerate(((0, 0), (0, 52), (52, 0), (52, 52)), start=1):
+        roads.append(
+            {
+                "id": f"community_{index}_horizontal_road",
+                "name": f"社区 {index} 横路",
+                "kind": "road",
+                "cells": _horizontal(row_offset + 24, col_offset, col_offset + 47),
+                "color": "#8a7356",
+                "width": 1,
+            }
+        )
+        roads.append(
+            {
+                "id": f"community_{index}_vertical_road",
+                "name": f"社区 {index} 竖路",
+                "kind": "road",
+                "cells": _vertical(col_offset + 24, row_offset, row_offset + 47),
+                "color": "#8a7356",
+                "width": 1,
+            }
+        )
+
+    return {
+        "version": 1,
+        "map_size": [100, 100],
+        "position_format": "[row, col]",
+        "bounds_format": "[row_start, col_start, row_end, col_end]",
+        "terrain": terrain,
+        "regions": deepcopy(IAC_COMMUNITIES),
+        "roads": roads,
+        "object_regions": deepcopy(object_regions),
+    }

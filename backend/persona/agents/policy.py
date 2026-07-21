@@ -58,6 +58,18 @@ class ActionParser:
             return "", "JSON 字段 action.args 必须是对象"
         return json.dumps({"think": data["think"].strip(), "action": action}, ensure_ascii=False), ""
 
+    def parse_action_only_with_error(self, text: str) -> tuple[str, str]:
+        """第二次决策拒绝再次输出记忆查询字段。"""
+
+        try:
+            data = parse_json_object(str(text or ""), context="action-only decision")
+        except ValueError as exc:
+            return "", f"输出不是合法 JSON：{exc}"
+        unexpected = set(data) - {"think", "action"}
+        if unexpected:
+            return "", f"第二次决策只允许 think/action，禁止字段：{','.join(sorted(unexpected))}"
+        return self.parse_action_with_error(text)
+
 
 class MemoryQueryPlanParser:
     """校验记忆查询计划，禁止 planner 输出任意 SQL 或未知查询类型。"""
@@ -73,6 +85,27 @@ class MemoryQueryPlanParser:
     }
     MAX_QUERIES = 5
     MAX_LIMIT = 5
+    MAX_SEMANTIC_QUERIES = 1
+    MAX_SEMANTIC_QUERY_CHARS = 500
+    MAX_LIST_ITEMS = 10
+    MAX_FIELD_CHARS = 120
+    LIST_FIELDS = {
+        "target_agent_ids",
+        "entity_ids",
+        "post_ids",
+        "author_ids",
+        "kinds",
+        "source_types",
+        "memory_types",
+    }
+    SCALAR_FIELDS = {
+        "target_agent_id",
+        "entity_id",
+        "post_id",
+        "author_id",
+        "entity_type",
+        "task",
+    }
 
     def parse_plan(self, text: str) -> str:
         plan, error = self.parse_plan_with_error(text)
@@ -110,6 +143,7 @@ class MemoryQueryPlanParser:
             return "", "queries 必须是数组"
 
         normalized_queries = []
+        semantic_query_count = 0
         for index, query in enumerate(queries[: self.MAX_QUERIES]):
             if not isinstance(query, dict):
                 return "", f"queries[{index}] 必须是对象"
@@ -118,7 +152,52 @@ class MemoryQueryPlanParser:
                 return "", f"queries[{index}].type 不支持：{query_type}"
             normalized = dict(query)
             normalized["type"] = query_type
-            normalized["intent"] = str(normalized.get("intent") or "")
+            # 限制结构化查询参数，避免超长数组扩张 SQLite IN 条件。
+            for field in self.LIST_FIELDS:
+                if field not in normalized:
+                    continue
+                raw_values = normalized.get(field)
+                values = raw_values if isinstance(raw_values, list) else [raw_values]
+                bounded_values = []
+                seen_values = set()
+                for value in values[: self.MAX_LIST_ITEMS]:
+                    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                        continue
+                    text_value = str(value).strip()
+                    if (
+                        not text_value
+                        or len(text_value) > self.MAX_FIELD_CHARS
+                        or text_value in seen_values
+                    ):
+                        continue
+                    seen_values.add(text_value)
+                    bounded_values.append(text_value if isinstance(value, str) else value)
+                normalized[field] = bounded_values
+            for field in self.SCALAR_FIELDS:
+                if field not in normalized:
+                    continue
+                value = normalized.get(field)
+                if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                    normalized.pop(field, None)
+                    continue
+                text_value = str(value).strip()
+                if not text_value or len(text_value) > self.MAX_FIELD_CHARS:
+                    normalized.pop(field, None)
+                elif isinstance(value, str):
+                    normalized[field] = text_value
+            if query_type == "semantic":
+                # 无效、超长或重复的语义查询只丢弃当前条目，不影响结构化查询。
+                semantic_query = query.get("query")
+                if not isinstance(semantic_query, str):
+                    continue
+                semantic_query = semantic_query.strip()
+                if not semantic_query or len(semantic_query) > self.MAX_SEMANTIC_QUERY_CHARS:
+                    continue
+                if semantic_query_count >= self.MAX_SEMANTIC_QUERIES:
+                    continue
+                normalized["query"] = semantic_query
+                semantic_query_count += 1
+            normalized["intent"] = str(normalized.get("intent") or "").strip()[: self.MAX_FIELD_CHARS]
             normalized["limit"] = self._normalize_limit(normalized.get("limit"))
             normalized_queries.append(normalized)
 
@@ -162,6 +241,95 @@ class LLMPolicy(Policy):
         self.llm = llm_client
         self.prompt_builder = prompt_builder
         self.parser = parser
+        self.memory_parser = MemoryQueryPlanParser()
+
+    def decide_or_plan(self, agent: "Agent", observation: str, *, context: str) -> tuple[str, str]:
+        """第一次决策返回 action 或非空记忆查询计划。"""
+
+        system, user = self.prompt_builder.build_initial_decision(agent, observation, context)
+        raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        result_type, payload, error = self._parse_initial_decision(raw, context)
+        for attempt in range(MAX_RETRIES):
+            if not error:
+                break
+            retry_user = self._retry_prompt(user, raw, error, target="initial_decision")
+            raw = self.llm.generate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            result_type, payload, error = self._parse_initial_decision(raw, context)
+        if error:
+            logger.warning("[%s] 第一次决策重试%d次后仍无效，本轮不行动", agent.id, MAX_RETRIES)
+            return "action", NO_ACTION_DECISION
+        return result_type, payload
+
+    async def adecide_or_plan(self, agent: "Agent", observation: str, *, context: str) -> tuple[str, str]:
+        """异步执行第一次行动或记忆查询决策。"""
+
+        system, user = self.prompt_builder.build_initial_decision(agent, observation, context)
+        raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        result_type, payload, error = self._parse_initial_decision(raw, context)
+        for attempt in range(MAX_RETRIES):
+            if not error:
+                break
+            retry_user = self._retry_prompt(user, raw, error, target="initial_decision")
+            raw = await self.llm.agenerate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            result_type, payload, error = self._parse_initial_decision(raw, context)
+        if error:
+            logger.warning("[%s] 异步第一次决策重试%d次后仍无效，本轮不行动", agent.id, MAX_RETRIES)
+            return "action", NO_ACTION_DECISION
+        return result_type, payload
+
+    def decide_after_memory(self, agent: "Agent", observation: str, mem_info) -> str:
+        """使用独立提示词执行查询后的行动决策。"""
+
+        system, user = self.prompt_builder.build_after_memory_decision(agent, observation, mem_info)
+        raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        action, error = self.parser.parse_action_only_with_error(raw)
+        for attempt in range(MAX_RETRIES):
+            if not error:
+                break
+            retry_user = self._retry_prompt(user, raw, error, target="action_after_memory")
+            raw = self.llm.generate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            action, error = self.parser.parse_action_only_with_error(raw)
+        return NO_ACTION_DECISION if error else action
+
+    async def adecide_after_memory(self, agent: "Agent", observation: str, mem_info) -> str:
+        """异步执行查询后的行动决策。"""
+
+        system, user = self.prompt_builder.build_after_memory_decision(agent, observation, mem_info)
+        raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+        action, error = self.parser.parse_action_only_with_error(raw)
+        for attempt in range(MAX_RETRIES):
+            if not error:
+                break
+            retry_user = self._retry_prompt(user, raw, error, target="action_after_memory")
+            raw = await self.llm.agenerate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            action, error = self.parser.parse_action_only_with_error(raw)
+        return NO_ACTION_DECISION if error else action
+
+    def _parse_initial_decision(self, raw: str, context: str) -> tuple[str, str, str]:
+        """严格区分行动 JSON 与记忆查询 JSON。"""
+
+        if not str(raw or "").strip():
+            return "", "", "第一次决策输出为空"
+        try:
+            data = parse_json_object(raw, context="initial action-or-memory decision")
+        except ValueError as exc:
+            return "", "", f"输出不是合法 JSON：{exc}"
+        has_action = "action" in data
+        has_plan = "queries" in data or "context" in data
+        if has_action == has_plan:
+            return "", "", "必须且只能输出 action 或 queries/context 其中一种结构"
+        if has_action:
+            action, error = self.parser.parse_action_with_error(raw)
+            return "action", action, error
+        plan, error = self.memory_parser.parse_plan_with_error(raw)
+        if error:
+            return "memory", "", error
+        plan_data = json.loads(plan)
+        if plan_data.get("context") != context:
+            return "memory", "", f"context 必须为 {context}"
+        if not plan_data.get("queries"):
+            return "memory", "", "queries 必须是非空数组"
+        return "memory", plan, ""
 
     def decide(self, agent: "Agent", observation: str, mem_info) -> str:
         system, user = self.prompt_builder.build(agent, observation, mem_info)
@@ -210,10 +378,20 @@ class LLMPolicy(Policy):
         return action
 
     def _retry_prompt(self, user: str, raw: str, error: str, *, target: str) -> str:
-        if target == "memory_plan":
+        if target == "initial_decision":
+            instruction = (
+                "请重新输出合法 JSON，并且只能二选一：直接行动时输出 think/action；"
+                "查询记忆时输出 think/context/非空 queries。禁止混合两种结构。"
+            )
+        elif target == "memory_plan":
             instruction = (
                 "请重新输出合法 JSON 对象字符串，顶层必须包含 think、context、queries；"
                 "queries 只能使用允许的 type，不能输出 SQL 或行动工具。"
+            )
+        elif target == "action_after_memory":
+            instruction = (
+                "这是记忆查询后的第二次决策。只能输出 think/action，"
+                "禁止输出 context、queries 或再次请求记忆。"
             )
         else:
             instruction = (
@@ -238,8 +416,21 @@ class LLMMemoryPlannerPolicy:
         self.prompt_builder = prompt_builder
         self.parser = parser
 
-    def plan(self, agent: "Agent", observation: str, context: str = "world") -> str:
-        system, user = self.prompt_builder.build(agent, observation, context)
+    def plan(
+        self,
+        agent: "Agent",
+        observation: str,
+        context: str = "world",
+        recalled_memories: list[str] | None = None,
+    ) -> str:
+        """根据当前输入和基础召回，只规划仍缺失的信息。"""
+
+        system, user = self.prompt_builder.build(
+            agent,
+            observation,
+            context,
+            recalled_memories=recalled_memories or [],
+        )
         raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         if not raw.strip():
             logger.warning("[%s] memory planner returned an empty response", agent.id)
@@ -261,8 +452,21 @@ class LLMMemoryPlannerPolicy:
             return self._fallback_plan(context)
         return plan
 
-    async def aplan(self, agent: "Agent", observation: str, context: str = "world") -> str:
-        system, user = self.prompt_builder.build(agent, observation, context)
+    async def aplan(
+        self,
+        agent: "Agent",
+        observation: str,
+        context: str = "world",
+        recalled_memories: list[str] | None = None,
+    ) -> str:
+        """异步规划基础召回之后的一次补充查询。"""
+
+        system, user = self.prompt_builder.build(
+            agent,
+            observation,
+            context,
+            recalled_memories=recalled_memories or [],
+        )
         raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         if not raw.strip():
             logger.warning("[%s] memory planner returned an empty response", agent.id)

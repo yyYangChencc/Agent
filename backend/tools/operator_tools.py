@@ -64,10 +64,10 @@ class Operator:
         self.world = world
         self.tool_specs = {
             "move": {
-                "description": "自动向目标坐标 (x, y) 使用网格最短路寻路移动，单次移动不再按观测半径封顶；每移动一格都会消耗 relax，relax 为 0 时无法移动，移动会在目标位置、最近可达位置或 relax 耗尽处停止",
+                "description": "自动向目标坐标 (x, y) 使用网格最短路寻路移动，单次移动不再按观测半径封顶；relax 大于 0 时每格消耗 relax，relax 为 0 时按低速上限移动且不再扣减 relax",
                 "args": {"x": int, "y": int},
                 "returns": str,
-                "constraint": "若目标坐标(x,y)存在障碍物，将停在距(x,y)最近的可达位置；若周围路径全被阻挡或 relax 为 0 则原地不动"
+                "constraint": "若目标坐标(x,y)存在障碍物，将停在距(x,y)最近的可达位置；relax 为 0 时每次最多移动 5 格"
             },
             "eat": {
                 "description": "吃指定ID的食物",
@@ -98,7 +98,7 @@ class Operator:
                 "description": "在指定ID的床上休息，并进入睡眠状态；睡眠期间每个时间步恢复一部分放松度，睡眠结束前不会行动",
                 "args": {"ID": str},
                 "returns": str,
-                "constraint": "目标必须是床(bed)，且在欧氏距离√2范围内（即相邻格子）"
+                "constraint": "目标必须是床(bed)，且在欧氏距离√2范围内（即相邻格子）；目标带 owner_agent_id 时只能由该智能体使用"
             },
             "enter_building": {
                 "description": "进入指定ID的建筑内部；进入后会立即自动触发该建筑的 interact 效果，之后每个时间步若仍在建筑内也会自动触发 interact",
@@ -326,8 +326,10 @@ class Operator:
                 (x, y),
                 stop_within_distance_sq=stop_distance_sq,
             )
-            if relax_cost > 0 and current_relax <= 0 and len(planned_path) > 1:
-                path = [[old_x, old_y]]
+            if current_relax <= 0 and len(planned_path) > 1:
+                # relax 耗尽后仍可低速前进，避免远离床铺时永久卡住。
+                zero_relax_max_steps = max(1, int(agent.config.relax_zero_move_max_steps))
+                path = planned_path[:zero_relax_max_steps + 1]
             elif relax_cost > 0:
                 # relax 只在每个格子移动完成后扣除；剩余 relax 大于 0 时允许再走一格。
                 max_steps_by_relax = max(1, int(math.ceil(current_relax / relax_cost)))
@@ -372,23 +374,22 @@ class Operator:
         if steps == 0:
             if interact_msg:
                 return f"{operator_ID}原地不动{interact_msg}"
-            if relax_cost > 0 and current_relax <= 0:
-                return "relax 为 0，无法继续移动"
             return f"无法移动，[{old_x},{old_y}]已是当前可达范围内距目标最近的位置"
 
-        apply_need_delta(
-            agent,
-            "relax",
-            -agent.config.relax_moving_usage * steps,
-            source="physiological",
-            reason="移动消耗 relax",
-            evidence={
-                "from": [old_x, old_y],
-                "to": [cur_x, cur_y],
-                "target": [x, y],
-                "steps": steps,
-            },
-        )
+        if current_relax > 0:
+            apply_need_delta(
+                agent,
+                "relax",
+                -agent.config.relax_moving_usage * steps,
+                source="physiological",
+                reason="移动消耗 relax",
+                evidence={
+                    "from": [old_x, old_y],
+                    "to": [cur_x, cur_y],
+                    "target": [x, y],
+                    "steps": steps,
+                },
+            )
         self._remember_tool(agent, "move")
 
         logger.info(
@@ -464,6 +465,8 @@ class Operator:
                 return error
             if getattr(target, "kind", None) != "bed":
                 return "目标不是床，不可以睡觉"
+            if hasattr(target, "can_be_used_by") and not target.can_be_used_by(agent.id):
+                return f"床 {target.id} 是 {target.owner_agent_id} 的专属床铺，{agent.id} 无法使用"
             if not self._within_interact_distance(agent, target):
                 return "距离过远无法休息"
             result = target.interact(agent)
@@ -582,8 +585,8 @@ class Operator:
 class SocialOperator:
     """线上社交平台工具集合。
 
-    这里强制所有互动只能作用于当前 social_step 返回给智能体的帖子，避免 LLM
-    编造 post_id 或操作不可见帖子。
+    帖子、评论和账号目标均受本轮浏览载荷约束，避免 LLM 编造标识符或操作
+    未展示的对象。
     """
 
     def __init__(self, platform):
@@ -608,7 +611,32 @@ class SocialOperator:
                 "description": "点踩帖子，post_id为被点踩的帖子ID",
                 "args": {"post_id": int},
                 "returns": str,
-            }
+            },
+            "reply_comment": {
+                "description": "回复当前可见帖子中的评论，post_id和comment_id必须来自本轮浏览结果，agreement_to_post仍表示对原帖的认同程度",
+                "args": {"post_id": int, "comment_id": str, "content": str, "agreement_to_post": float},
+                "returns": str,
+            },
+            "follow_author": {
+                "description": "关注账号，author_id必须逐字取自本轮浏览结果的account_ids",
+                "args": {"author_id": str},
+                "returns": str,
+            },
+            "unfollow_author": {
+                "description": "取消关注账号，author_id必须逐字取自本轮浏览结果的following_ids",
+                "args": {"author_id": str},
+                "returns": str,
+            },
+            "repost_post": {
+                "description": "转发当前可见帖子，opinion_index为转发者对该主题的立场快照，范围[-1,1]",
+                "args": {"post_id": int, "opinion_index": float},
+                "returns": str,
+            },
+            "quote_post": {
+                "description": "引用当前可见帖子并添加自己的内容，opinion_index为引用者对该主题的立场快照，范围[-1,1]",
+                "args": {"post_id": int, "content": str, "opinion_index": float},
+                "returns": str,
+            },
         }
 
     def _visible_posts_for(self, operator_ID: str):
@@ -645,6 +673,69 @@ class SocialOperator:
             return None, normalized_post_id, f"帖子{normalized_post_id}不在当前可互动帖子ID列表中；可互动ID：{visible_text}"
         return post, normalized_post_id, None
 
+    def _resolve_visible_comment(self, operator_ID: str, post_id, comment_id):
+        """只允许回复当前可见帖子中精确列出的评论 ID。"""
+
+        post, normalized_post_id, error = self._resolve_visible_post(operator_ID, post_id)
+        if error:
+            return None, None, normalized_post_id, error
+        if not isinstance(comment_id, str) or not comment_id:
+            return None, post, normalized_post_id, "comment_id 必须是当前可见帖子中的非空字符串"
+        agent = self.platform.get_agent(operator_ID)
+        visible_comment_ids = (
+            getattr(agent, "_last_seen_comment_ids_by_post", {}).get(normalized_post_id, set())
+            if agent is not None
+            else set()
+        )
+        if comment_id not in visible_comment_ids:
+            return None, post, normalized_post_id, f"评论{comment_id}不在帖子{normalized_post_id}的本轮展示评论列表中"
+        comment = post.get_comment(comment_id) if hasattr(post, "get_comment") else None
+        if comment is None:
+            return None, post, normalized_post_id, f"评论{comment_id}已不在帖子{normalized_post_id}中"
+        return comment, post, normalized_post_id, None
+
+    def _resolve_account(self, operator_ID: str, author_id, *, require_followed: bool = False):
+        """按本轮账号目录或当前关注列表校验精确账号 ID。"""
+
+        agent = self.platform.get_agent(operator_ID)
+        if agent is None:
+            return None, None, "operator_ID 未注册为平台智能体"
+        if not isinstance(author_id, str) or not author_id:
+            return agent, None, "author_id 必须是非空字符串"
+        allowed = list(agent.followers) if require_followed else list(getattr(agent, "_last_browse_account_ids", []) or [])
+        if author_id not in allowed:
+            return agent, author_id, f"author_id={author_id} 不在当前允许列表中"
+        if author_id not in self.platform.agents and author_id not in self.platform.influencers:
+            return agent, author_id, f"author_id={author_id} 未注册"
+        return agent, author_id, None
+
+    def _record_platform_event(
+        self,
+        event_type: str,
+        *,
+        operator_ID: str,
+        post_id=None,
+        target_agent_id: str = "",
+        details: dict | None = None,
+    ) -> dict:
+        """把成功社交动作写入统一平台事件账本。"""
+
+        agent = self.platform.get_agent(operator_ID)
+        event = self.platform.record_event(
+            event_type,
+            actor_id=operator_ID,
+            post_id=post_id,
+            target_agent_id=target_agent_id,
+            feed_request_id=str(getattr(agent, "_last_feed_request_id", "") or "") if agent is not None else "",
+            details=details,
+        )
+        if agent is not None:
+            social_action = getattr(agent, "last_social_action", {}) or {}
+            if social_action.get("action") == event_type:
+                social_action["platform_event_id"] = event["event_id"]
+                social_action["feed_request_id"] = event["feed_request_id"]
+        return event
+
     def send_message(self, operator_ID, content, ID):
         logger.info("[%s] 私信 → %s: %s", operator_ID, ID, content)
         return f"{operator_ID}对{ID}说:{content}"
@@ -677,11 +768,22 @@ class SocialOperator:
         agent,
         *,
         action: str,
-        post_id,
+        post_id="",
         post_content: str = "",
         comment_content: str = "",
         opinion_index=0.0,
         agreement_to_post="",
+        post_topic: str = "",
+        state_changed: bool = True,
+        previous_reaction="",
+        current_reaction="",
+        source_post_id=None,
+        root_post_id=None,
+        source_author_id: str = "",
+        target_agent_id: str = "",
+        comment_id: str = "",
+        parent_comment_id: str = "",
+        root_comment_id: str = "",
     ) -> None:
         """统一写入最近一次线上动作快照，保持历史字段一致。"""
 
@@ -692,20 +794,90 @@ class SocialOperator:
             "comment_content": comment_content,
             "opinion_index": opinion_index,
             "agreement_to_post": agreement_to_post,
+            "post_topic": post_topic,
+            "state_changed": bool(state_changed),
+            "previous_reaction": previous_reaction,
+            "current_reaction": current_reaction,
+            "source_post_id": source_post_id,
+            "root_post_id": root_post_id,
+            "source_author_id": source_author_id,
+            "target_agent_id": target_agent_id,
+            "comment_id": comment_id,
+            "parent_comment_id": parent_comment_id,
+            "root_comment_id": root_comment_id,
         }
 
-    def _notify_author(self, post: Post, message: str) -> None:
+    @staticmethod
+    def _event_evidence(platform_event: dict) -> dict:
+        """提取需求事件使用的平台关联字段。"""
+
+        return {
+            "platform_event_id": platform_event.get("event_id", ""),
+            "feed_request_id": platform_event.get("feed_request_id", ""),
+        }
+
+    def _notification_payload(
+        self,
+        target_agent,
+        message: str,
+        platform_event: dict,
+        *,
+        post: Post | None = None,
+    ) -> dict:
+        """把平台事件投影为可持久化的结构化通知。"""
+
+        details = dict(platform_event.get("details") or {})
+        actor = self.platform.get_agent(platform_event.get("actor_id"))
+        episode_id = str(getattr(actor, "_current_episode_id", "") or "") if actor is not None else ""
+        if not episode_id:
+            episode_id = str(getattr(target_agent, "_current_episode_id", "") or "")
+        source_author_id = details.get("source_author_id")
+        if source_author_id in (None, "") and post is not None:
+            source_author_id = post.author_id
+        root_post_id = details.get("root_post_id")
+        if root_post_id is None and post is not None:
+            root_post_id = post.root_post_id
+        actor_id = str(platform_event.get("actor_id") or "")
+        return {
+            "schema_version": 1,
+            "type": "notification",
+            "content": message,
+            "time": int(platform_event.get("tick") or self.platform.time),
+            "episode_id": episode_id,
+            "event_id": str(platform_event.get("event_id") or ""),
+            "event_type": str(platform_event.get("event_type") or ""),
+            "platform_event_id": str(platform_event.get("event_id") or ""),
+            "feed_request_id": str(platform_event.get("feed_request_id") or ""),
+            "actor_id": actor_id,
+            "related_agent_id": actor_id or str(source_author_id or ""),
+            "post_id": platform_event.get("post_id"),
+            "comment_id": details.get("comment_id"),
+            "parent_comment_id": details.get("parent_comment_id"),
+            "root_comment_id": details.get("root_comment_id"),
+            "target_agent_id": target_agent.id,
+            "source_post_id": details.get("source_post_id"),
+            "root_post_id": root_post_id,
+            "source_author_id": source_author_id,
+            "topic": getattr(post, "topic", "") if post is not None else "",
+            "details": details,
+        }
+
+    def _notify_author(self, post: Post, message: str, platform_event: dict) -> None:
         """向真实帖子作者写入社交通知；无实体投放者会被跳过。"""
 
         author_agent = self.platform.get_agent(post.author_id)
         if author_agent is not None:
-            author_agent._pending_social_notifications.append(message)
+            author_agent._pending_social_notifications.append(
+                self._notification_payload(author_agent, message, platform_event, post=post)
+            )
 
-    def _adjust_online_trust(self, agent, author_id: str, delta: float) -> None:
+    def _adjust_online_trust(self, agent, author_id: str, delta: float) -> tuple[float, float]:
         """线上弱反馈只调整信任，不直接修改观念。"""
 
         current = agent.online_trust.get(author_id, agent.config.default_online_trust)
-        agent.online_trust[author_id] = max(0.0, min(1.0, current + delta))
+        updated = max(0.0, min(1.0, current + delta))
+        agent.online_trust[author_id] = updated
+        return current, updated
 
     def _after_reaction_to_post(
         self,
@@ -718,15 +890,48 @@ class SocialOperator:
         notification: str,
         belonging_delta: float,
         esteem_delta: float,
+        platform_event: dict,
     ) -> None:
         """统一处理点赞/点踩后的信任、通知、需求和新关系事件。"""
 
         if agent is None or post.author_id == operator_ID:
             return
-        self._adjust_online_trust(agent, post.author_id, trust_delta)
-        self._notify_author(post, notification)
-        self._apply_author_feedback(operator_ID, post, action, belonging_delta, esteem_delta)
-        self._apply_new_social_contact(agent, post, action)
+        trust_before, trust_after = self._adjust_online_trust(agent, post.author_id, trust_delta)
+        social_action = getattr(agent, "last_social_action", {}) or {}
+        if social_action.get("action") == action:
+            social_action["online_trust_before"] = trust_before
+            social_action["online_trust_after"] = trust_after
+        self._notify_author(post, notification, platform_event)
+        self._apply_author_feedback(
+            operator_ID,
+            post,
+            action,
+            belonging_delta,
+            esteem_delta,
+            platform_event=platform_event,
+        )
+        self._apply_new_social_contact(agent, post, action, platform_event)
+
+    @staticmethod
+    def _reaction_effect_deltas(agent, previous, current) -> tuple[float, float, float]:
+        """按反应状态迁移计算信任、归属和尊重的净变化。"""
+
+        trust_values = {None: 0.0, "like": 0.05, "dislike": -0.05}
+        belonging_values = {
+            None: 0.0,
+            "like": agent.config.social_like_belonging_delta,
+            "dislike": agent.config.social_dislike_belonging_delta,
+        }
+        esteem_values = {
+            None: 0.0,
+            "like": agent.config.social_like_esteem_delta,
+            "dislike": agent.config.social_dislike_esteem_delta,
+        }
+        return (
+            trust_values[current] - trust_values[previous],
+            belonging_values[current] - belonging_values[previous],
+            esteem_values[current] - esteem_values[previous],
+        )
 
     def send_post(self, operator_ID, content, topic="日常", opinion_index=None):
         topic = str(topic or "").strip() or "日常"
@@ -735,10 +940,11 @@ class SocialOperator:
             return error
         # 普通智能体发帖立场由动作 LLM 显式给出，工具层只校验和记录。
         with self.platform._posts_lock:
-            post_id = len(self.platform.posts) + 1
+            post_id = self.platform.allocate_post_id()
             new_post = Post(post_id, operator_ID, content, topic=topic)
             new_post.opinion_index = score
-            self.platform.posts.append(new_post)
+            new_post.time = self.platform.time
+            self.platform.add_post(new_post)
         agent = self.platform.get_agent(operator_ID)
         if agent is not None:
             agent.add_post_history(new_post)
@@ -749,21 +955,42 @@ class SocialOperator:
                 post_id=new_post.id,
                 post_content=content,
                 opinion_index=new_post.opinion_index,
+                post_topic=topic,
             )
-            self._apply_topic_expression_need(agent, topic, new_post)
+        platform_event = self._record_platform_event(
+            "send_post",
+            operator_ID=operator_ID,
+            post_id=new_post.id,
+            details={
+                "content": new_post.content,
+                "topic": topic,
+                "opinion_index": score,
+                "is_news": False,
+                "is_rumor": bool(new_post.is_rumor),
+                "source_type": new_post.source_type,
+            },
+        )
+        if agent is not None:
+            self._apply_topic_expression_need(agent, topic, new_post, platform_event)
         logger.info("[%s] 发表帖子 topic=%s: %s", operator_ID, topic, content)
         return f"{operator_ID}成功发表了帖子，主题：{topic}，内容：{content}"
 
     def comment_post(self, operator_ID, post_id, content, agreement_to_post=None):
         post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
         if error:
-            return error
+            return f"error: {error}"
         agreement, error = self._parse_required_unit_score(operator_ID, "agreement_to_post", agreement_to_post)
         if error:
             return error
         comment_id = f"{post_id}_c{post.comments+1}"
-        new_comment = Comment(comment_id, operator_ID, content, time=None, agreement_to_post=agreement)
-        post.add_comment(new_comment)
+        new_comment = Comment(
+            comment_id,
+            operator_ID,
+            content,
+            time=self.platform.time,
+            agreement_to_post=agreement,
+        )
+        new_comment = post.add_comment(new_comment)
         agent = self.platform.get_agent(operator_ID)
         if agent is not None:
             self._remember_social_tool(agent, "comment_post")
@@ -774,21 +1001,51 @@ class SocialOperator:
                 comment_content=content,
                 opinion_index=getattr(post, "opinion_index", 0.0),
                 agreement_to_post=agreement,
+                post_topic=getattr(post, "topic", ""),
+                root_post_id=getattr(post, "root_post_id", None),
+                source_author_id=str(post.author_id or ""),
+                target_agent_id=str(post.author_id or ""),
+                comment_id=new_comment.id,
+                root_comment_id=new_comment.root_comment_id,
             )
-            self._apply_new_social_contact(agent, post, "comment_post")
+        platform_event = self._record_platform_event(
+            "comment_post",
+            operator_ID=operator_ID,
+            post_id=post_id,
+            target_agent_id=str(post.author_id or ""),
+            details={
+                "comment_id": new_comment.id,
+                "content": new_comment.content,
+                "agreement_to_post": agreement,
+                "parent_comment_id": new_comment.parent_comment_id,
+                "root_comment_id": new_comment.root_comment_id,
+            },
+        )
+        if agent is not None:
+            self._apply_new_social_contact(agent, post, "comment_post", platform_event)
         # 通知帖主有人评论了其帖子
         if post.author_id != operator_ID:
             snippet = content[:40] + "..." if len(content) > 40 else content
-            self._notify_author(post, f"[社交通知] {operator_ID} 评论了你的帖子：{snippet}")
-            self._apply_comment_feedback_to_author(operator_ID, post, agreement)
+            self._notify_author(
+                post,
+                f"[社交通知] {operator_ID} 评论了你的帖子：{snippet}",
+                platform_event,
+            )
+            self._apply_comment_feedback_to_author(
+                operator_ID,
+                post,
+                agreement,
+                action="comment_post",
+                platform_event=platform_event,
+            )
         logger.info("[%s] 评论帖子 %s: %s", operator_ID, post_id, content)
         return f"{operator_ID}成功评论了帖子 {post_id}: {content}"
 
     def like_post(self, operator_ID, post_id):
         post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
         if error:
-            return error
-        post.add_like(operator_ID)
+            return f"error: {error}"
+        reaction = post.add_like(operator_ID)
         agent = self.platform.get_agent(operator_ID)
         if agent is not None:
             self._remember_social_tool(agent, "like_post")
@@ -796,26 +1053,54 @@ class SocialOperator:
                 agent,
                 action="like_post",
                 post_id=post_id,
+                post_content=getattr(post, "content", ""),
+                post_topic=getattr(post, "topic", ""),
                 opinion_index=getattr(post, "opinion_index", 0.0),
+                state_changed=reaction["changed"],
+                previous_reaction=reaction["previous"],
+                current_reaction=reaction["current"],
+                root_post_id=getattr(post, "root_post_id", None),
+                source_author_id=str(post.author_id or ""),
+                target_agent_id=str(post.author_id or ""),
             )
-        self._after_reaction_to_post(
+        platform_event = self._record_platform_event(
+            "like_post",
             operator_ID=operator_ID,
-            agent=agent,
-            post=post,
-            action="like_post",
-            trust_delta=0.05,
-            notification=f"[社交通知] {operator_ID} 点赞了你的帖子",
-            belonging_delta=agent.config.social_like_belonging_delta if agent is not None else 0.0,
-            esteem_delta=agent.config.social_like_esteem_delta if agent is not None else 0.0,
+            post_id=post_id,
+            target_agent_id=str(post.author_id or ""),
+            details={
+                "changed": reaction["changed"],
+                "previous": reaction["previous"],
+                "current": reaction["current"],
+                "likes": post.likes,
+                "dislikes": post.dislikes,
+            },
         )
+        if agent is not None and reaction["changed"]:
+            trust_delta, belonging_delta, esteem_delta = self._reaction_effect_deltas(
+                agent,
+                reaction["previous"],
+                reaction["current"],
+            )
+            self._after_reaction_to_post(
+                operator_ID=operator_ID,
+                agent=agent,
+                post=post,
+                action="like_post",
+                trust_delta=trust_delta,
+                notification=f"[社交通知] {operator_ID} 点赞了你的帖子",
+                belonging_delta=belonging_delta,
+                esteem_delta=esteem_delta,
+                platform_event=platform_event,
+            )
         logger.info("[%s] 点赞帖子 %s", operator_ID, post_id)
         return f"{operator_ID}成功点赞了帖子 {post_id}"
 
     def dislike_post(self, operator_ID, post_id):
         post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
         if error:
-            return error
-        post.add_dislike(operator_ID)
+            return f"error: {error}"
+        reaction = post.add_dislike(operator_ID)
         agent = self.platform.get_agent(operator_ID)
         if agent is not None:
             self._remember_social_tool(agent, "dislike_post")
@@ -823,23 +1108,275 @@ class SocialOperator:
                 agent,
                 action="dislike_post",
                 post_id=post_id,
+                post_content=getattr(post, "content", ""),
+                post_topic=getattr(post, "topic", ""),
                 opinion_index=getattr(post, "opinion_index", 0.0),
+                state_changed=reaction["changed"],
+                previous_reaction=reaction["previous"],
+                current_reaction=reaction["current"],
+                root_post_id=getattr(post, "root_post_id", None),
+                source_author_id=str(post.author_id or ""),
+                target_agent_id=str(post.author_id or ""),
             )
-        self._after_reaction_to_post(
+        platform_event = self._record_platform_event(
+            "dislike_post",
             operator_ID=operator_ID,
-            agent=agent,
-            post=post,
-            action="dislike_post",
-            trust_delta=-0.05,
-            notification=f"[社交通知] {operator_ID} 点踩了你的帖子",
-            belonging_delta=agent.config.social_dislike_belonging_delta if agent is not None else 0.0,
-            esteem_delta=agent.config.social_dislike_esteem_delta if agent is not None else 0.0,
+            post_id=post_id,
+            target_agent_id=str(post.author_id or ""),
+            details={
+                "changed": reaction["changed"],
+                "previous": reaction["previous"],
+                "current": reaction["current"],
+                "likes": post.likes,
+                "dislikes": post.dislikes,
+            },
         )
+        if agent is not None and reaction["changed"]:
+            trust_delta, belonging_delta, esteem_delta = self._reaction_effect_deltas(
+                agent,
+                reaction["previous"],
+                reaction["current"],
+            )
+            self._after_reaction_to_post(
+                operator_ID=operator_ID,
+                agent=agent,
+                post=post,
+                action="dislike_post",
+                trust_delta=trust_delta,
+                notification=f"[社交通知] {operator_ID} 点踩了你的帖子",
+                belonging_delta=belonging_delta,
+                esteem_delta=esteem_delta,
+                platform_event=platform_event,
+            )
         logger.info("[%s] 点踩帖子 %s", operator_ID, post_id)
         return f"{operator_ID}成功点踩了帖子 {post_id}"
 
-    def _apply_topic_expression_need(self, agent, topic: str, post: Post) -> None:
-        """首次围绕系统新闻主题原创发帖时，提高自我实现。"""
+    def reply_comment(self, operator_ID, post_id, comment_id, content, agreement_to_post=None):
+        parent, post, post_id, error = self._resolve_visible_comment(operator_ID, post_id, comment_id)
+        if error:
+            return f"error: {error}"
+        agreement, error = self._parse_required_unit_score(operator_ID, "agreement_to_post", agreement_to_post)
+        if error:
+            return error
+        new_comment = Comment(
+            f"{post_id}_c{post.comments + 1}",
+            operator_ID,
+            content,
+            time=self.platform.time,
+            agreement_to_post=agreement,
+            parent_comment_id=parent.id,
+            root_comment_id=parent.root_comment_id or parent.id,
+        )
+        new_comment = post.add_comment(new_comment)
+        agent = self.platform.get_agent(operator_ID)
+        if agent is not None:
+            self._remember_social_tool(agent, "reply_comment")
+            self._set_last_social_action(
+                agent,
+                action="reply_comment",
+                post_id=post_id,
+                comment_content=content,
+                opinion_index=getattr(post, "opinion_index", 0.0),
+                agreement_to_post=agreement,
+                post_topic=getattr(post, "topic", ""),
+                root_post_id=getattr(post, "root_post_id", None),
+                source_author_id=str(post.author_id or ""),
+                target_agent_id=str(parent.author_id or ""),
+                comment_id=new_comment.id,
+                parent_comment_id=parent.id,
+                root_comment_id=new_comment.root_comment_id,
+            )
+        platform_event = self._record_platform_event(
+            "reply_comment",
+            operator_ID=operator_ID,
+            post_id=post_id,
+            target_agent_id=str(parent.author_id or ""),
+            details={
+                "comment_id": new_comment.id,
+                "content": new_comment.content,
+                "parent_comment_id": parent.id,
+                "root_comment_id": new_comment.root_comment_id,
+                "agreement_to_post": agreement,
+            },
+        )
+        if agent is not None:
+            self._apply_new_social_contact(agent, post, "reply_comment", platform_event)
+        parent_author = self.platform.get_agent(parent.author_id)
+        if parent_author is not None and parent.author_id != operator_ID:
+            parent_author._pending_social_notifications.append(
+                self._notification_payload(
+                    parent_author,
+                    f"[社交通知] {operator_ID} 回复了你在帖子 {post_id} 下的评论 {parent.id}：{content[:40]}",
+                    platform_event,
+                    post=post,
+                )
+            )
+        if post.author_id != operator_ID:
+            self._apply_comment_feedback_to_author(
+                operator_ID,
+                post,
+                agreement,
+                action="reply_comment",
+                platform_event=platform_event,
+            )
+        logger.info("[%s] 回复评论 %s: %s", operator_ID, parent.id, content)
+        return f"{operator_ID}成功回复了评论 {parent.id}: {content}"
+
+    def follow_author(self, operator_ID, author_id):
+        agent, author_id, error = self._resolve_account(operator_ID, author_id)
+        if error:
+            return f"error: {error}"
+        changed = author_id not in agent.followers
+        if changed:
+            agent.add_follower(author_id)
+        self._remember_social_tool(agent, "follow_author")
+        self._set_last_social_action(
+            agent,
+            action="follow_author",
+            target_agent_id=author_id,
+            state_changed=changed,
+        )
+        self._record_platform_event(
+            "follow_author",
+            operator_ID=operator_ID,
+            target_agent_id=author_id,
+            details={"changed": changed},
+        )
+        return f"{operator_ID}已关注账号 {author_id}" if changed else f"{operator_ID}已经关注账号 {author_id}"
+
+    def unfollow_author(self, operator_ID, author_id):
+        agent, author_id, error = self._resolve_account(operator_ID, author_id, require_followed=True)
+        if error:
+            return f"error: {error}"
+        agent.followers.remove(author_id)
+        self._remember_social_tool(agent, "unfollow_author")
+        self._set_last_social_action(
+            agent,
+            action="unfollow_author",
+            target_agent_id=author_id,
+            state_changed=True,
+        )
+        self._record_platform_event(
+            "unfollow_author",
+            operator_ID=operator_ID,
+            target_agent_id=author_id,
+            details={"changed": True},
+        )
+        return f"{operator_ID}已取消关注账号 {author_id}"
+
+    def repost_post(self, operator_ID, post_id, opinion_index=None):
+        post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
+        if error:
+            return f"error: {error}"
+        score, error = self._parse_required_unit_score(operator_ID, "opinion_index", opinion_index)
+        if error:
+            return error
+        return self._create_repost(
+            operator_ID=operator_ID,
+            source_post=post,
+            source_post_id=post_id,
+            content=post.content,
+            opinion_index=score,
+            action="repost_post",
+            source_type="repost",
+        )
+
+    def quote_post(self, operator_ID, post_id, content, opinion_index=None):
+        post, post_id, error = self._resolve_visible_post(operator_ID, post_id)
+        if error:
+            return f"error: {error}"
+        score, error = self._parse_required_unit_score(operator_ID, "opinion_index", opinion_index)
+        if error:
+            return error
+        return self._create_repost(
+            operator_ID=operator_ID,
+            source_post=post,
+            source_post_id=post_id,
+            content=content,
+            opinion_index=score,
+            action="quote_post",
+            source_type="quote_post",
+        )
+
+    def _create_repost(
+        self,
+        *,
+        operator_ID: str,
+        source_post: Post,
+        source_post_id: int,
+        content: str,
+        opinion_index: float,
+        action: str,
+        source_type: str,
+    ):
+        """创建一次去重的转发或引用转发。"""
+
+        repost_state = source_post.add_repost(operator_ID)
+        if not repost_state["changed"]:
+            return f"error: {operator_ID}已经转发或引用过帖子 {source_post_id}"
+        post_id = self.platform.allocate_post_id()
+        root_post_id = source_post.root_post_id or source_post.id
+        new_post = Post(
+            post_id,
+            operator_ID,
+            content,
+            is_rumor=source_post.is_rumor,
+            topic=source_post.topic,
+            source_type=source_type,
+            repost_of_post_id=source_post.id,
+            root_post_id=root_post_id,
+            source_author_id=source_post.author_id,
+        )
+        new_post.opinion_index = opinion_index
+        new_post.time = self.platform.time
+        self.platform.add_post(new_post)
+        agent = self.platform.get_agent(operator_ID)
+        if agent is not None:
+            agent.add_post_history(new_post)
+            self._remember_social_tool(agent, action)
+            self._set_last_social_action(
+                agent,
+                action=action,
+                post_id=new_post.id,
+                post_content=content,
+                opinion_index=opinion_index,
+                post_topic=new_post.topic,
+                source_post_id=source_post_id,
+                root_post_id=root_post_id,
+                source_author_id=str(source_post.author_id or ""),
+                target_agent_id=str(source_post.author_id or ""),
+            )
+        platform_event = self._record_platform_event(
+            action,
+            operator_ID=operator_ID,
+            post_id=new_post.id,
+            target_agent_id=str(source_post.author_id or ""),
+            details={
+                "source_post_id": source_post_id,
+                "root_post_id": root_post_id,
+                "source_author_id": source_post.author_id,
+                "content": new_post.content,
+                "topic": new_post.topic,
+                "source_type": source_type,
+                "opinion_index": opinion_index,
+                "is_news": bool(new_post.is_news),
+                "is_rumor": bool(new_post.is_rumor),
+            },
+        )
+        if agent is not None and action == "quote_post":
+            self._apply_topic_expression_need(agent, new_post.topic, new_post, platform_event)
+        if source_post.author_id != operator_ID:
+            action_text = "引用了" if action == "quote_post" else "转发了"
+            self._notify_author(
+                source_post,
+                f"[社交通知] {operator_ID} {action_text}你的帖子 {source_post_id}",
+                platform_event,
+            )
+        logger.info("[%s] %s 帖子 %s -> %s", operator_ID, action, source_post_id, new_post.id)
+        return f"{operator_ID}成功{('引用' if action == 'quote_post' else '转发')}帖子 {source_post_id}"
+
+    def _apply_topic_expression_need(self, agent, topic: str, post: Post, platform_event: dict) -> None:
+        """首次围绕系统新闻主题自主表达时，提高自我实现。"""
 
         default_topic = str(getattr(agent.config, "default_opinion_topic", "") or "")
         if not default_topic or str(topic or "") != default_topic:
@@ -847,22 +1384,34 @@ class SocialOperator:
         if default_topic in agent.expressed_opinion_topics:
             return
         agent.expressed_opinion_topics.add(default_topic)
+        evidence = {"post_id": post.id, "topic": topic, "opinion_index": post.opinion_index}
+        evidence.update(self._event_evidence(platform_event))
         event = apply_need_delta(
             agent,
             "self_actualization",
             agent.config.self_actualization_first_topic_post_delta,
             source="exploration",
-            reason="首次围绕系统新闻主题原创表达观点",
-            evidence={"post_id": post.id, "topic": topic, "opinion_index": post.opinion_index},
+            reason="首次围绕系统新闻主题自主表达观点",
+            evidence=evidence,
         )
         if event is not None:
+            bonus_evidence = {"post_id": post.id, "topic": topic}
+            bonus_evidence.update(self._event_evidence(platform_event))
             self._apply_self_actualization_task_bonus(
                 agent,
                 "完成自我实现任务时产生新的观点表达",
-                {"post_id": post.id, "topic": topic},
+                bonus_evidence,
             )
 
-    def _apply_comment_feedback_to_author(self, operator_ID: str, post: Post, agreement: float) -> None:
+    def _apply_comment_feedback_to_author(
+        self,
+        operator_ID: str,
+        post: Post,
+        agreement: float,
+        *,
+        action: str,
+        platform_event: dict,
+    ) -> None:
         """根据评论认同值影响原帖作者的归属和尊重。"""
 
         author_agent = self.platform.get_agent(post.author_id)
@@ -873,19 +1422,21 @@ class SocialOperator:
             self._apply_author_feedback(
                 operator_ID,
                 post,
-                "comment_post",
+                action,
                 author_agent.config.social_comment_positive_belonging_delta,
                 author_agent.config.social_comment_positive_esteem_delta,
                 agreement_to_post=agreement,
+                platform_event=platform_event,
             )
         elif agreement < -threshold:
             self._apply_author_feedback(
                 operator_ID,
                 post,
-                "comment_post",
+                action,
                 author_agent.config.social_comment_negative_belonging_delta,
                 author_agent.config.social_comment_negative_esteem_delta,
                 agreement_to_post=agreement,
+                platform_event=platform_event,
             )
 
     def _apply_author_feedback(
@@ -897,6 +1448,7 @@ class SocialOperator:
         esteem_delta: float,
         *,
         agreement_to_post: float | None = None,
+        platform_event: dict,
     ) -> None:
         """把线上互动转成帖子作者的归属和尊重事件。"""
 
@@ -911,6 +1463,7 @@ class SocialOperator:
             "topic": getattr(post, "topic", ""),
             "opinion_index": getattr(post, "opinion_index", 0.0),
         }
+        evidence.update(self._event_evidence(platform_event))
         if agreement_to_post is not None:
             evidence["agreement_to_post"] = agreement_to_post
         apply_need_delta(
@@ -930,7 +1483,7 @@ class SocialOperator:
             evidence=evidence,
         )
 
-    def _apply_new_social_contact(self, agent, post: Post, action: str) -> None:
+    def _apply_new_social_contact(self, agent, post: Post, action: str, platform_event: dict) -> None:
         """自我实现任务中与新的真实智能体发生线上互动时给出反馈。"""
 
         author_id = str(getattr(post, "author_id", "") or "")
@@ -941,10 +1494,12 @@ class SocialOperator:
         if author_id in agent.known_social_contacts:
             return
         agent.known_social_contacts.add(author_id)
+        evidence = {"post_id": post.id, "author_id": author_id, "action": action}
+        evidence.update(self._event_evidence(platform_event))
         self._apply_self_actualization_task_bonus(
             agent,
             "完成自我实现任务时产生新的线上互动对象",
-            {"post_id": post.id, "author_id": author_id, "action": action},
+            evidence,
         )
 
     def _apply_self_actualization_task_bonus(self, agent, reason: str, evidence: dict) -> None:

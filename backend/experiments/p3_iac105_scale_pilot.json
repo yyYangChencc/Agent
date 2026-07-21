@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "ticks": 100,
+    "scenario": "iac_gay_marriage",
+    "opinion_mode": "llm_as_judge",
+    "psychology_mode": "llm",
+    "llm": "real"
+  },
+  "versions": [
+    "full",
+    "no_psychology",
+    "no_role_card"
+  ],
+  "seeds": [
+    42
+  ],
+  "repetitions": 1,
+  "execution": {
+    "timeout_seconds": null,
+    "stop_on_failure": true
+  },
+  "summary": {
+    "window_size": 10,
+    "bootstrap_samples": 10000,
+    "bootstrap_seed": 42,
+    "metrics": [
+      {
+        "name": "polarization_index",
+        "source": "polarization_metrics.csv",
+        "column": "polarization_index"
+      },
+      {
+        "name": "pairwise_mean_abs_distance",
+        "source": "polarization_metrics.csv",
+        "column": "pairwise_mean_abs_distance"
+      },
+      {
+        "name": "mean_abs_opinion",
+        "source": "polarization_metrics.csv",
+        "column": "mean_abs_opinion"
+      }
+    ],
+    "comparisons": [
+      {
+        "left": "full",
+        "right": "no_psychology"
+      },
+      {
+        "left": "full",
+        "right": "no_role_card"
+      },
+      {
+        "left": "no_role_card",
+        "right": "no_psychology"
+      }
+    ]
+  }
+}

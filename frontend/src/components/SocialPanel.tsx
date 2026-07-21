@@ -40,13 +40,19 @@ function PostCard({ post }: { post: PostState }) {
       ? '官方新闻'
       : post.source_type === 'influencer'
         ? '投放者'
-        : '智能体'
+        : post.source_type === 'repost'
+          ? '转发'
+          : post.source_type === 'quote_post'
+            ? '引用'
+            : '智能体'
   const sourceClass =
     post.source_type === 'official_news'
       ? 'bg-[#4f8fc0] text-[#f8f5d8]'
       : post.source_type === 'influencer'
         ? 'bg-[#9b5b43] text-[#f8f5d8]'
-        : 'bg-[#d7b36a] text-[#243225]'
+        : post.source_type === 'repost' || post.source_type === 'quote_post'
+          ? 'bg-[#65725f] text-[#f8f5d8]'
+          : 'bg-[#d7b36a] text-[#243225]'
 
   return (
     <div className="border-2 border-[#25251c] bg-[#f8f5d8] rounded p-2.5 space-y-1.5 shadow-[2px_2px_0_#25251c]">
@@ -67,11 +73,21 @@ function PostCard({ post }: { post: PostState }) {
         </div>
       </div>
       {post.topic && <div className="text-[11px] text-[#6c584c]">主题：{post.topic}</div>}
+      {post.repost_of_post_id !== null && (
+        <div className="text-[11px] text-[#4b3f2f] border-l-2 border-[#65725f] pl-2">
+          {post.source_type === 'quote_post' ? '引用' : '转发'}帖子 #{post.repost_of_post_id}
+          {post.source_author_id && ` · 来源 ${post.source_author_id}`}
+          {post.root_post_id !== null && post.root_post_id !== post.repost_of_post_id && (
+            <span> · 根帖 #{post.root_post_id}</span>
+          )}
+        </div>
+      )}
       <div className="text-xs text-[#243225] leading-relaxed break-words">{post.content}</div>
       <OpinionBar value={post.opinion_index} />
       <div className="flex items-center gap-3 text-xs text-[#4b3f2f]">
         <span>👍 {post.likes}</span>
         <span>👎 {post.dislikes}</span>
+        <span>转发 {post.reposts}</span>
         {post.comments.length > 0 && (
           <button
             className="underline text-[#2f6fbd] hover:text-[#1f4f8d]"
@@ -86,6 +102,11 @@ function PostCard({ post }: { post: PostState }) {
         <div className="mt-2 space-y-1.5 pl-2 border-l-2 border-[#d7b36a]">
           {post.comments.map((c) => (
             <div key={c.id} className="text-xs bg-[#efe2b9] border border-[#d7b36a] rounded px-2 py-1">
+              {c.parent_comment_id && (
+                <div className="mb-1 text-[10px] text-[#6c584c]">
+                  回复评论 {c.parent_comment_id}
+                </div>
+              )}
               <span className={`font-semibold ${agentColor(c.author_id)}`}>{c.author_id}</span>
               {c.time !== null && (
                 <span className="text-[#6c584c] ml-1 font-mono">t={c.time}</span>

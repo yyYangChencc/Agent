@@ -38,7 +38,7 @@ class SimulationRuntime:
     conv_policy: LLMPolicy
     memory_planner: LLMMemoryPlannerPolicy
     reflect: Reflect
-    conversation_max_rounds: int = field(default=2)
+    conversation_max_rounds: int = field(default=1)
 
     @classmethod
     def build(
@@ -47,7 +47,7 @@ class SimulationRuntime:
         *,
         api_key: str | None = None,
         base_url: str | None = None,
-        conversation_max_rounds: int = 2,
+        conversation_max_rounds: int = 1,
         llm_client: LLMClient | None = None,
     ) -> SimulationRuntime:
         """从环境变量和配置构建一套完整运行时。"""
@@ -67,7 +67,7 @@ class SimulationRuntime:
             llm = AsyncOpenAIClient(api_key=api_key, base_url=base_url, embedding_key=embedding_key, embedding_base_url=embedding_base_url, config=config)
         else:
             llm = llm_client
-        mem = MultiAgentMemoryManager(llm)
+        mem = MultiAgentMemoryManager(llm, config=config)
         opinion_assessor = OpinionAssessmentCoordinator(config, llm)
         psychological_assessor = PsychologicalAssessmentCoordinator(config, llm)
         platform = SocialPlatform(llm=llm, config=config)

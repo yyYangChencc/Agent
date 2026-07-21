@@ -1,0 +1,1240 @@
+{
+  "schema_version": 1,
+  "audit_scope": "IAC v2 FourForums 原始平台保真度",
+  "source": {
+    "path": "D:\\agent\\Agent\\data\\iac_v2\\fourforums_no_parse_2016_05_18.sql.gz",
+    "size_bytes": 171653459,
+    "sha256": "e26e6d27a5fc88ee5837b3838f099f8268d42fe50fbbd9cd88b66dfe7744dd9c",
+    "table_count": 21,
+    "dataset_metadata": [
+      {
+        "row_id": "1",
+        "metadata_field": "title",
+        "metadata_value": "Internet Argument Corpus: 4forums"
+      },
+      {
+        "row_id": "2",
+        "metadata_field": "full official name",
+        "metadata_value": "Internet Argument Corpus: 4forums"
+      },
+      {
+        "row_id": "3",
+        "metadata_field": "simple name",
+        "metadata_value": "fourforums"
+      },
+      {
+        "row_id": "4",
+        "metadata_field": "author",
+        "metadata_value": "Rob Abbott, Brian Ecker, Pranav Anand, Marilyn A. Walker, Jean E. Fox Tree, Joseph King"
+      },
+      {
+        "row_id": "5",
+        "metadata_field": "contact",
+        "metadata_value": "Rob Abbott <abbott@soe.ucsc.edu>"
+      },
+      {
+        "row_id": "6",
+        "metadata_field": "cite",
+        "metadata_value": "[\"Abbott, R., Ecker, B., Anand, P., Walker, M. A.(2016). Internet Argument Corpus 2.0: An SQL schema for Dialogic Social Media and the Corpora to go with it. In LREC\", \"Walker, M. A., Tree, J. E. F., Anand, P., Abbott, R., & King, J. (2012). A Corpus for Research on Deliberation and Debate. In LREC\"]"
+      },
+      {
+        "row_id": "7",
+        "metadata_field": "url",
+        "metadata_value": "https://nlds.soe.ucsc.edu/iac2"
+      },
+      {
+        "row_id": "8",
+        "metadata_field": "version",
+        "metadata_value": "2.0"
+      },
+      {
+        "row_id": "9",
+        "metadata_field": "original publication date",
+        "metadata_value": "2012-05-23"
+      },
+      {
+        "row_id": "10",
+        "metadata_field": "current version date",
+        "metadata_value": "2016-05-25"
+      },
+      {
+        "row_id": "11",
+        "metadata_field": "language tag",
+        "metadata_value": "eng"
+      },
+      {
+        "row_id": "12",
+        "metadata_field": "license",
+        "metadata_value": null
+      },
+      {
+        "row_id": "13",
+        "metadata_field": "synopsis",
+        "metadata_value": "The 4forums dataset consists of discussions from a debate oriented website."
+      },
+      {
+        "row_id": "14",
+        "metadata_field": "description",
+        "metadata_value": null
+      },
+      {
+        "row_id": "15",
+        "metadata_field": "notes",
+        "metadata_value": "Not all debates are two sided and not all two sided debates feature sides (either or both) that correspond to opposing topic stances."
+      },
+      {
+        "row_id": "16",
+        "metadata_field": "changelog",
+        "metadata_value": null
+      },
+      {
+        "row_id": "17",
+        "metadata_field": "schema format",
+        "metadata_value": "iac-2.0"
+      },
+      {
+        "row_id": "18",
+        "metadata_field": "dependencies",
+        "metadata_value": null
+      },
+      {
+        "row_id": "19",
+        "metadata_field": "source url",
+        "metadata_value": "http://www.4forums.com/political/"
+      },
+      {
+        "row_id": "20",
+        "metadata_field": "tools used",
+        "metadata_value": "CoreNLP-3.6.0"
+      }
+    ]
+  },
+  "source_schema": {
+    "author": {
+      "columns": [
+        {
+          "name": "author_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "username",
+          "definition": "text COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`author_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "dataset_metadata": {
+      "columns": [
+        {
+          "name": "row_id",
+          "definition": "mediumint(8) unsigned NOT NULL AUTO_INCREMENT"
+        },
+        {
+          "name": "metadata_field",
+          "definition": "text COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "metadata_value",
+          "definition": "mediumtext COLLATE utf8mb4_bin"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`row_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB AUTO_INCREMENT=21 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "discussion": {
+      "columns": [
+        {
+          "name": "discussion_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "url",
+          "definition": "text COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "title",
+          "definition": "text COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "initiating_author_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`discussion_id`)",
+        "KEY `initiating_author_id` (`initiating_author_id`)",
+        "CONSTRAINT `discussion_ibfk_1` FOREIGN KEY (`initiating_author_id`) REFERENCES `author` (`author_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "discussion_topic": {
+      "columns": [
+        {
+          "name": "discussion_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`discussion_id`)",
+        "KEY `topic_id` (`topic_id`)",
+        "CONSTRAINT `discussion_topic_ibfk_1` FOREIGN KEY (`discussion_id`) REFERENCES `discussion` (`discussion_id`)",
+        "CONSTRAINT `discussion_topic_ibfk_2` FOREIGN KEY (`topic_id`) REFERENCES `topic` (`topic_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "markup": {
+      "columns": [
+        {
+          "name": "text_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "markup_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "markup_start",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "markup_end",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "type",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "attributes",
+          "definition": "text COLLATE utf8mb4_bin"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`text_id`,`markup_id`)",
+        "CONSTRAINT `markup_ibfk_1` FOREIGN KEY (`text_id`) REFERENCES `text` (`text_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_dialogue_relation_question": {
+      "columns": [
+        {
+          "name": "question_id",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "title",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "task_id",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "is_scalar",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "has_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "question",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "low_value_label",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "high_value_label",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`question_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_p123_average_response": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "num_annots",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "disagree_agree",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "disagree_agree_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "attacking_respectful",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "attacking_respectful_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "emotion_fact",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "emotion_fact_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "nasty_nice",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "nasty_nice_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "sarcasm_yes",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "sarcasm_no",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "sarcasm_unsure",
+          "definition": "float NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`)",
+        "CONSTRAINT `mturk_2010_p123_average_response_ibfk_1` FOREIGN KEY (`page_id`, `tab_number`) REFERENCES `mturk_2010_p123_entry` (`page_id`, `tab_number`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_p123_entry": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "p123_triple_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "context_triple_index",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "response_triple_index",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`)",
+        "KEY `p123_triple_id` (`p123_triple_id`,`context_triple_index`)",
+        "KEY `p123_triple_id_2` (`p123_triple_id`,`response_triple_index`)",
+        "CONSTRAINT `mturk_2010_p123_entry_ibfk_1` FOREIGN KEY (`p123_triple_id`, `context_triple_index`) REFERENCES `mturk_2010_p123_post` (`p123_triple_id`, `triple_index`)",
+        "CONSTRAINT `mturk_2010_p123_entry_ibfk_2` FOREIGN KEY (`p123_triple_id`, `response_triple_index`) REFERENCES `mturk_2010_p123_post` (`p123_triple_id`, `triple_index`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_p123_post": {
+      "columns": [
+        {
+          "name": "p123_triple_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "triple_index",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "discussion_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "post_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "presented_text",
+          "definition": "text COLLATE utf8mb4_bin"
+        },
+        {
+          "name": "presented_text_term_removed",
+          "definition": "text COLLATE utf8mb4_bin"
+        },
+        {
+          "name": "term",
+          "definition": "tinytext COLLATE utf8mb4_bin"
+        },
+        {
+          "name": "topic",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`p123_triple_id`,`triple_index`)",
+        "KEY `discussion_id` (`discussion_id`,`post_id`)",
+        "CONSTRAINT `mturk_2010_p123_post_ibfk_1` FOREIGN KEY (`discussion_id`, `post_id`) REFERENCES `post` (`discussion_id`, `post_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_p123_worker_response": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "workerid",
+          "definition": "char(64) COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "response_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "disagree_agree",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "disagree_agree_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "attacking_respectful",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "attacking_respectful_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "emotion_fact",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "emotion_fact_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "nasty_nice",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "nasty_nice_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "sarcasm",
+          "definition": "enum('Yes','No','Unsure') COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`,`workerid`,`response_number`)",
+        "CONSTRAINT `mturk_2010_p123_worker_response_ibfk_1` FOREIGN KEY (`page_id`, `tab_number`) REFERENCES `mturk_2010_p123_entry` (`page_id`, `tab_number`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_qr_entry": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "discussion_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "post_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "quote_index",
+          "definition": "smallint(5) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "response_text_end",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "presented_quote",
+          "definition": "text COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "presented_response",
+          "definition": "text COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "term",
+          "definition": "tinytext COLLATE utf8mb4_bin"
+        },
+        {
+          "name": "topic",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`)",
+        "KEY `discussion_id` (`discussion_id`,`post_id`,`quote_index`)",
+        "CONSTRAINT `mturk_2010_qr_entry_ibfk_1` FOREIGN KEY (`discussion_id`, `post_id`) REFERENCES `post` (`discussion_id`, `post_id`)",
+        "CONSTRAINT `mturk_2010_qr_entry_ibfk_2` FOREIGN KEY (`discussion_id`, `post_id`, `quote_index`) REFERENCES `quote` (`discussion_id`, `post_id`, `quote_index`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_qr_task1_average_response": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "num_annots",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "disagree_agree",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "disagree_agree_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "attacking_respectful",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "attacking_respectful_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "emotion_fact",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "emotion_fact_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "nasty_nice",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "nasty_nice_unsure",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "sarcasm_yes",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "sarcasm_no",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "sarcasm_unsure",
+          "definition": "float NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`)",
+        "CONSTRAINT `mturk_2010_qr_task1_average_response_ibfk_1` FOREIGN KEY (`page_id`, `tab_number`) REFERENCES `mturk_2010_qr_entry` (`page_id`, `tab_number`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_qr_task1_worker_response": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "workerid",
+          "definition": "char(64) COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "response_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "disagree_agree",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "disagree_agree_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "attacking_respectful",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "attacking_respectful_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "emotion_fact",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "emotion_fact_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "nasty_nice",
+          "definition": "tinyint(4) NOT NULL"
+        },
+        {
+          "name": "nasty_nice_unsure",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "sarcasm",
+          "definition": "enum('Yes','No','Unsure') COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`,`workerid`,`response_number`)",
+        "CONSTRAINT `mturk_2010_qr_task1_worker_response_ibfk_1` FOREIGN KEY (`page_id`, `tab_number`) REFERENCES `mturk_2010_qr_entry` (`page_id`, `tab_number`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_qr_task2_average_response": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "num_disagree",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "num_annots",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "agree",
+          "definition": "float NOT NULL"
+        },
+        {
+          "name": "defeater_undercutter",
+          "definition": "float DEFAULT NULL"
+        },
+        {
+          "name": "defeater_undercutter_unsure",
+          "definition": "float DEFAULT NULL"
+        },
+        {
+          "name": "negotiate_attack",
+          "definition": "float DEFAULT NULL"
+        },
+        {
+          "name": "negotiate_attack_unsure",
+          "definition": "float DEFAULT NULL"
+        },
+        {
+          "name": "personal_audience",
+          "definition": "float DEFAULT NULL"
+        },
+        {
+          "name": "personal_audience_unsure",
+          "definition": "float DEFAULT NULL"
+        },
+        {
+          "name": "questioning_asserting",
+          "definition": "float DEFAULT NULL"
+        },
+        {
+          "name": "questioning_asserting_unsure",
+          "definition": "float DEFAULT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`)",
+        "CONSTRAINT `mturk_2010_qr_task2_average_response_ibfk_1` FOREIGN KEY (`page_id`, `tab_number`) REFERENCES `mturk_2010_qr_entry` (`page_id`, `tab_number`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_2010_qr_task2_worker_response": {
+      "columns": [
+        {
+          "name": "page_id",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "tab_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "workerid",
+          "definition": "char(64) COLLATE utf8mb4_bin NOT NULL"
+        },
+        {
+          "name": "response_number",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "agree",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "defeater_undercutter",
+          "definition": "tinyint(4) DEFAULT NULL"
+        },
+        {
+          "name": "defeater_undercutter_unsure",
+          "definition": "tinyint(1) DEFAULT NULL"
+        },
+        {
+          "name": "negotiate_attack",
+          "definition": "tinyint(4) DEFAULT NULL"
+        },
+        {
+          "name": "negotiate_attack_unsure",
+          "definition": "tinyint(1) DEFAULT NULL"
+        },
+        {
+          "name": "personal_audience",
+          "definition": "tinyint(4) DEFAULT NULL"
+        },
+        {
+          "name": "personal_audience_unsure",
+          "definition": "tinyint(1) DEFAULT NULL"
+        },
+        {
+          "name": "questioning_asserting",
+          "definition": "tinyint(4) DEFAULT NULL"
+        },
+        {
+          "name": "questioning_asserting_unsure",
+          "definition": "tinyint(1) DEFAULT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`page_id`,`tab_number`,`workerid`,`response_number`)",
+        "CONSTRAINT `mturk_2010_qr_task2_worker_response_ibfk_1` FOREIGN KEY (`page_id`, `tab_number`) REFERENCES `mturk_2010_qr_entry` (`page_id`, `tab_number`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "mturk_author_stance": {
+      "columns": [
+        {
+          "name": "discussion_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "author_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_stance_id_1",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_stance_votes_1",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_stance_id_2",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_stance_votes_2",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_stance_votes_other",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`discussion_id`,`author_id`)",
+        "KEY `author_id` (`author_id`)",
+        "KEY `topic_id` (`topic_id`,`topic_stance_id_1`)",
+        "KEY `topic_id_2` (`topic_id`,`topic_stance_id_2`)",
+        "CONSTRAINT `mturk_author_stance_ibfk_1` FOREIGN KEY (`author_id`) REFERENCES `author` (`author_id`)",
+        "CONSTRAINT `mturk_author_stance_ibfk_2` FOREIGN KEY (`topic_id`, `topic_stance_id_1`) REFERENCES `topic_stance` (`topic_id`, `topic_stance_id`)",
+        "CONSTRAINT `mturk_author_stance_ibfk_3` FOREIGN KEY (`topic_id`, `topic_stance_id_2`) REFERENCES `topic_stance` (`topic_id`, `topic_stance_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "post": {
+      "columns": [
+        {
+          "name": "discussion_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "post_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "author_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "creation_date",
+          "definition": "datetime NOT NULL"
+        },
+        {
+          "name": "parent_post_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "parent_missing",
+          "definition": "tinyint(1) NOT NULL"
+        },
+        {
+          "name": "text_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`discussion_id`,`post_id`)",
+        "KEY `text_id` (`text_id`)",
+        "KEY `author_id` (`author_id`)",
+        "CONSTRAINT `post_ibfk_1` FOREIGN KEY (`text_id`) REFERENCES `text` (`text_id`)",
+        "CONSTRAINT `post_ibfk_2` FOREIGN KEY (`discussion_id`) REFERENCES `discussion` (`discussion_id`)",
+        "CONSTRAINT `post_ibfk_3` FOREIGN KEY (`author_id`) REFERENCES `author` (`author_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "quote": {
+      "columns": [
+        {
+          "name": "discussion_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "post_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "quote_index",
+          "definition": "smallint(5) unsigned NOT NULL"
+        },
+        {
+          "name": "parent_quote_index",
+          "definition": "smallint(5) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "text_offset",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "text_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "source_discussion_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "source_post_id",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "source_start",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "source_end",
+          "definition": "mediumint(8) unsigned DEFAULT NULL"
+        },
+        {
+          "name": "truncated",
+          "definition": "tinyint(1) DEFAULT NULL"
+        },
+        {
+          "name": "altered",
+          "definition": "tinyint(1) DEFAULT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`discussion_id`,`post_id`,`quote_index`)",
+        "KEY `text_id` (`text_id`)",
+        "CONSTRAINT `quote_ibfk_1` FOREIGN KEY (`discussion_id`, `post_id`) REFERENCES `post` (`discussion_id`, `post_id`)",
+        "CONSTRAINT `quote_ibfk_2` FOREIGN KEY (`text_id`) REFERENCES `text` (`text_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "text": {
+      "columns": [
+        {
+          "name": "text_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "text",
+          "definition": "longtext COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`text_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "topic": {
+      "columns": [
+        {
+          "name": "topic_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "topic",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`topic_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    },
+    "topic_stance": {
+      "columns": [
+        {
+          "name": "topic_id",
+          "definition": "mediumint(8) unsigned NOT NULL"
+        },
+        {
+          "name": "topic_stance_id",
+          "definition": "tinyint(3) unsigned NOT NULL"
+        },
+        {
+          "name": "stance",
+          "definition": "tinytext COLLATE utf8mb4_bin NOT NULL"
+        }
+      ],
+      "constraints": [
+        "PRIMARY KEY (`topic_id`,`topic_stance_id`)",
+        "CONSTRAINT `topic_stance_ibfk_1` FOREIGN KEY (`topic_id`) REFERENCES `topic` (`topic_id`)"
+      ],
+      "engine": ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin ROW_FORMAT=COMPRESSED KEY_BLOCK_SIZE=4;"
+    }
+  },
+  "source_capabilities": [
+    {
+      "id": "authors",
+      "name": "发帖者身份",
+      "evidence": {
+        "author": [
+          "author_id",
+          "username"
+        ]
+      },
+      "status": "restored",
+      "basis": "原始 SQL 直接提供精确表列"
+    },
+    {
+      "id": "discussions",
+      "name": "讨论页面与发起者",
+      "evidence": {
+        "discussion": [
+          "discussion_id",
+          "url",
+          "title",
+          "initiating_author_id"
+        ]
+      },
+      "status": "restored",
+      "basis": "原始 SQL 直接提供精确表列"
+    },
+    {
+      "id": "post_timeline",
+      "name": "发帖时间线",
+      "evidence": {
+        "post": [
+          "discussion_id",
+          "post_id",
+          "author_id",
+          "creation_date",
+          "text_id"
+        ]
+      },
+      "status": "restored",
+      "basis": "原始 SQL 直接提供精确表列"
+    },
+    {
+      "id": "reply_tree",
+      "name": "父帖回复关系",
+      "evidence": {
+        "post": [
+          "discussion_id",
+          "post_id",
+          "parent_post_id",
+          "parent_missing"
+        ]
+      },
+      "status": "restored",
+      "basis": "原始 SQL 直接提供精确表列"
+    },
+    {
+      "id": "quotes",
+      "name": "引用及引用来源",
+      "evidence": {
+        "quote": [
+          "discussion_id",
+          "post_id",
+          "quote_index",
+          "parent_quote_index",
+          "text_id",
+          "source_discussion_id",
+          "source_post_id",
+          "source_start",
+          "source_end",
+          "truncated",
+          "altered"
+        ]
+      },
+      "status": "restored",
+      "basis": "原始 SQL 直接提供精确表列"
+    },
+    {
+      "id": "topics",
+      "name": "讨论话题与话题立场定义",
+      "evidence": {
+        "discussion_topic": [
+          "discussion_id",
+          "topic_id"
+        ],
+        "topic": [
+          "topic_id",
+          "topic"
+        ],
+        "topic_stance": [
+          "topic_id",
+          "topic_stance_id",
+          "stance"
+        ]
+      },
+      "status": "restored",
+      "basis": "原始 SQL 直接提供精确表列"
+    },
+    {
+      "id": "annotated_author_stance",
+      "name": "人工标注的作者立场",
+      "evidence": {
+        "mturk_author_stance": [
+          "discussion_id",
+          "author_id",
+          "topic_id",
+          "topic_stance_id_1",
+          "topic_stance_votes_1",
+          "topic_stance_id_2",
+          "topic_stance_votes_2",
+          "topic_stance_votes_other"
+        ]
+      },
+      "status": "restored",
+      "basis": "原始 SQL 直接提供精确表列"
+    },
+    {
+      "id": "follow_graph",
+      "name": "原平台关注关系",
+      "status": "missing",
+      "evidence": {},
+      "basis": "完整 SQL 建表结构未提供该平台数据；未用其他字段替代推断",
+      "audited_table_names": [
+        "author",
+        "dataset_metadata",
+        "discussion",
+        "discussion_topic",
+        "markup",
+        "mturk_2010_dialogue_relation_question",
+        "mturk_2010_p123_average_response",
+        "mturk_2010_p123_entry",
+        "mturk_2010_p123_post",
+        "mturk_2010_p123_worker_response",
+        "mturk_2010_qr_entry",
+        "mturk_2010_qr_task1_average_response",
+        "mturk_2010_qr_task1_worker_response",
+        "mturk_2010_qr_task2_average_response",
+        "mturk_2010_qr_task2_worker_response",
+        "mturk_author_stance",
+        "post",
+        "quote",
+        "text",
+        "topic",
+        "topic_stance"
+      ]
+    },
+    {
+      "id": "recommendation",
+      "name": "原平台推荐算法、特征、分数与排序结果",
+      "status": "missing",
+      "evidence": {},
+      "basis": "完整 SQL 建表结构未提供该平台数据；未用其他字段替代推断",
+      "audited_table_names": [
+        "author",
+        "dataset_metadata",
+        "discussion",
+        "discussion_topic",
+        "markup",
+        "mturk_2010_dialogue_relation_question",
+        "mturk_2010_p123_average_response",
+        "mturk_2010_p123_entry",
+        "mturk_2010_p123_post",
+        "mturk_2010_p123_worker_response",
+        "mturk_2010_qr_entry",
+        "mturk_2010_qr_task1_average_response",
+        "mturk_2010_qr_task1_worker_response",
+        "mturk_2010_qr_task2_average_response",
+        "mturk_2010_qr_task2_worker_response",
+        "mturk_author_stance",
+        "post",
+        "quote",
+        "text",
+        "topic",
+        "topic_stance"
+      ]
+    },
+    {
+      "id": "exposure",
+      "name": "原平台曝光、浏览和点击日志",
+      "status": "missing",
+      "evidence": {},
+      "basis": "完整 SQL 建表结构未提供该平台数据；未用其他字段替代推断",
+      "audited_table_names": [
+        "author",
+        "dataset_metadata",
+        "discussion",
+        "discussion_topic",
+        "markup",
+        "mturk_2010_dialogue_relation_question",
+        "mturk_2010_p123_average_response",
+        "mturk_2010_p123_entry",
+        "mturk_2010_p123_post",
+        "mturk_2010_p123_worker_response",
+        "mturk_2010_qr_entry",
+        "mturk_2010_qr_task1_average_response",
+        "mturk_2010_qr_task1_worker_response",
+        "mturk_2010_qr_task2_average_response",
+        "mturk_2010_qr_task2_worker_response",
+        "mturk_author_stance",
+        "post",
+        "quote",
+        "text",
+        "topic",
+        "topic_stance"
+      ]
+    },
+    {
+      "id": "engagement",
+      "name": "原平台点赞、点踩和转发事件",
+      "status": "missing",
+      "evidence": {},
+      "basis": "完整 SQL 建表结构未提供该平台数据；未用其他字段替代推断",
+      "audited_table_names": [
+        "author",
+        "dataset_metadata",
+        "discussion",
+        "discussion_topic",
+        "markup",
+        "mturk_2010_dialogue_relation_question",
+        "mturk_2010_p123_average_response",
+        "mturk_2010_p123_entry",
+        "mturk_2010_p123_post",
+        "mturk_2010_p123_worker_response",
+        "mturk_2010_qr_entry",
+        "mturk_2010_qr_task1_average_response",
+        "mturk_2010_qr_task1_worker_response",
+        "mturk_2010_qr_task2_average_response",
+        "mturk_2010_qr_task2_worker_response",
+        "mturk_author_stance",
+        "post",
+        "quote",
+        "text",
+        "topic",
+        "topic_stance"
+      ]
+    }
+  ],
+  "project_fidelity": [
+    {
+      "id": "follow_graph",
+      "status": "derived",
+      "basis": "场景函数 _follow_edges 生成；FourForums SQL 未提供原平台关注关系",
+      "code_line": 307
+    },
+    {
+      "id": "online_trust",
+      "status": "derived",
+      "basis": "场景函数 _online_trust 生成；不是原平台字段",
+      "code_line": 349
+    },
+    {
+      "id": "offline_trust",
+      "status": "derived",
+      "basis": "场景函数 _offline_trust 生成；不是原平台字段",
+      "code_line": 366
+    },
+    {
+      "id": "recommendation",
+      "status": "missing",
+      "basis": "当前精确入口为 _apply_recommendation_placeholder，配置默认值为 False",
+      "code_line": 81
+    },
+    {
+      "id": "exposure_instrumentation",
+      "status": "derived",
+      "basis": "项目观测日志不等于原平台曝光数据",
+      "code_line": 23
+    }
+  ],
+  "status_contract": {
+    "restored": "原始 SQL 直接提供精确表列",
+    "derived": "项目代码生成或测量，不能称为原平台还原",
+    "missing": "原始 SQL 或当前项目未提供，不以其他字段替代"
+  }
+}

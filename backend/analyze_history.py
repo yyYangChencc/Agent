@@ -13,6 +13,24 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any, Iterable
 
+from persona.history_csv import configure_csv_field_size_limit
+from persona.opinion.scale import (
+    VOTING_ROLE_OPPOSE,
+    VOTING_ROLE_SUPPORT,
+    VOTING_ROLE_UNKNOWN,
+    VOTING_STANCE_INVALID,
+    classify_voting_stance,
+)
+
+
+def _configure_csv_field_size_limit() -> int:
+    """兼容旧调用入口，并复用统一的 CSV 字段上限配置。"""
+
+    return configure_csv_field_size_limit()
+
+
+_configure_csv_field_size_limit()
+
 
 HISTORY_DIR = Path(__file__).resolve().parent / "history"
 REQUIRED_HISTORY_COLUMNS = ("tick", "opinion")
@@ -24,13 +42,20 @@ INVALID_FILENAME_CHARS = '<>:"/\\|?*'
 GENERATED_ANALYSIS_FILES = {
     "polarization_metrics.csv",
     "polarization_agent_shift.csv",
+    "opinion_voting_polarization_metrics.csv",
+    "opinion_voting_agent_metrics.csv",
+    "opinion_voting_skipped_records.csv",
+    "opinion_distribution.csv",
 }
 
 
 @dataclass(frozen=True)
 class AnalysisOptions:
     data_length: int | None = None
-    window_size: int = 10
+    opinion_baseline_window_size: int = 10
+    opinion_final_window_size: int = 10
+    voting_baseline_window_size: int = 1
+    voting_final_window_size: int = 1
     support_threshold: float = 0.35
     oppose_threshold: float = -0.35
     neutral_threshold: float = 0.10
@@ -42,6 +67,9 @@ class AnalysisOptions:
     bootstrap_samples: int = 2000
     seed: int = 42
     allow_incomplete_ticks: bool = False
+    min_voting_known_share: float = 0.70
+    min_voting_decisiveness: float = 0.60
+    min_voting_polarization_delta: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -91,6 +119,73 @@ class AgentShift:
 
 
 @dataclass(frozen=True)
+class VotingAgentMetric:
+    tick: int
+    agent_id: str
+    requested_votes: int
+    successful_votes: int
+    failed_votes: int
+    skipped_reason: str
+    support_share: float
+    oppose_share: float
+    unknown_share: float
+    known_share: float
+    decisiveness: float
+    stance: str
+    stance_valid: int
+    stance_agreement: float
+    stance_direction_margin: float
+    stance_success_rate: float
+    previous_valid_tick: int
+    previous_valid_stance: str
+    stance_changed: int
+
+
+@dataclass(frozen=True)
+class VotingSkippedRecord:
+    tick: int | None
+    agent_id: str
+    reason: str
+    requested_votes: int | None
+    successful_votes: int | None
+    failed_votes: int | None
+
+
+@dataclass(frozen=True)
+class VotingTickMetric:
+    tick: int
+    n_agents: int
+    valid_agents: int
+    requested_votes: int
+    successful_votes: int
+    failed_votes: int
+    success_rate: float
+    support_share: float
+    oppose_share: float
+    unknown_share: float
+    known_share: float
+    decisiveness: float
+    camp_balance: float
+    polarization_index: float
+    stance_valid_agents: int
+    stance_invalid_agents: int
+    stance_support_count: int
+    stance_oppose_count: int
+    stance_unknown_count: int
+    stance_support_share: float
+    stance_oppose_share: float
+    stance_unknown_share: float
+    stance_invalid_share: float
+    stance_comparable_agents: int
+    stance_changed_agents: int
+    stance_unchanged_agents: int
+    stance_changed_share: float
+    stance_changed_to_support: int
+    stance_changed_to_oppose: int
+    stance_changed_to_unknown: int
+
+
+@dataclass(frozen=True)
 class PlotSeries:
     label: str
     x_values: list[Any]
@@ -108,7 +203,33 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("history_dir", nargs="?", default=str(HISTORY_DIR), help="history 运行目录，或 history 根目录。")
     parser.add_argument("--output-dir", help="输出目录；默认写入被分析的运行目录。")
     parser.add_argument("--data-length", type=int, help="只分析或绘制开头 N 条数据。")
-    parser.add_argument("--window-size", type=int, default=10, help="极化前后对比窗口长度，默认 10 个 tick。")
+    parser.add_argument(
+        "--window-size",
+        type=int,
+        help="兼容参数：同时设置连续 opinion 的基线和末端窗口长度。",
+    )
+    parser.add_argument(
+        "--opinion-baseline-window-size",
+        type=int,
+        help="连续 opinion 基线窗口的 tick 数，默认 10。",
+    )
+    parser.add_argument(
+        "--opinion-final-window-size",
+        type=int,
+        help="连续 opinion 末端窗口的 tick 数，默认 10。",
+    )
+    parser.add_argument(
+        "--voting-baseline-window-size",
+        type=int,
+        default=1,
+        help="llm_voting 基线窗口的评测轮数，默认 1。",
+    )
+    parser.add_argument(
+        "--voting-final-window-size",
+        type=int,
+        default=1,
+        help="llm_voting 末端窗口的评测轮数，默认 1。",
+    )
     parser.add_argument("--support-threshold", type=float, default=0.35, help="明显支持阈值，默认 0.35。")
     parser.add_argument("--oppose-threshold", type=float, default=-0.35, help="明显反对阈值，默认 -0.35。")
     parser.add_argument("--neutral-threshold", type=float, default=0.10, help="中立区间绝对值阈值，默认 0.10。")
@@ -120,6 +241,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bootstrap-samples", type=int, default=2000, help="配对均值差 bootstrap 次数，默认 2000。")
     parser.add_argument("--seed", type=int, default=42, help="bootstrap 随机种子，默认 42。")
     parser.add_argument("--allow-incomplete-ticks", action="store_true", help="允许部分智能体缺失的 tick 参与极化统计。")
+    parser.add_argument("--min-voting-known-share", type=float, default=0.70, help="投票模式有效立场覆盖率下限，默认 0.70。")
+    parser.add_argument("--min-voting-decisiveness", type=float, default=0.60, help="投票模式个体明确度下限，默认 0.60。")
+    parser.add_argument("--min-voting-polarization-delta", type=float, default=0.05, help="投票极化指数最小增长，默认 0.05。")
     parser.add_argument("--plot-columns", nargs="+", help="按精确列名绘制所有 CSV/Excel 文件中的对应列。")
     parser.add_argument("--x-column", help="列绘图横轴列名，必须与表头完全一致；省略时使用数据行序号。")
     parser.add_argument("--sheet", help="列绘图只读取指定 Excel 工作表；CSV 不支持该参数。")
@@ -154,8 +278,26 @@ def normalize_argv(argv: list[str]) -> list[str]:
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.data_length is not None and args.data_length < 1:
         parser.error("--data-length 必须大于等于 1。")
-    if args.window_size < 1:
+    opinion_baseline_size = (
+        args.opinion_baseline_window_size
+        if args.opinion_baseline_window_size is not None
+        else args.window_size if args.window_size is not None else 10
+    )
+    opinion_final_size = (
+        args.opinion_final_window_size
+        if args.opinion_final_window_size is not None
+        else args.window_size if args.window_size is not None else 10
+    )
+    if args.window_size is not None and args.window_size < 1:
         parser.error("--window-size 必须大于等于 1。")
+    if opinion_baseline_size < 1:
+        parser.error("--opinion-baseline-window-size 必须大于等于 1。")
+    if opinion_final_size < 1:
+        parser.error("--opinion-final-window-size 必须大于等于 1。")
+    if args.voting_baseline_window_size < 1:
+        parser.error("--voting-baseline-window-size 必须大于等于 1。")
+    if args.voting_final_window_size < 1:
+        parser.error("--voting-final-window-size 必须大于等于 1。")
     if args.header_row < 1:
         parser.error("--header-row 必须大于等于 1。")
     if args.legend_limit < 0:
@@ -166,6 +308,12 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--alpha 必须在 (0, 1) 内。")
     if args.bootstrap_samples < 0:
         parser.error("--bootstrap-samples 必须大于等于 0。")
+    if not 0 <= args.min_voting_known_share <= 1:
+        parser.error("--min-voting-known-share 必须在 [0, 1] 内。")
+    if not 0 <= args.min_voting_decisiveness <= 1:
+        parser.error("--min-voting-decisiveness 必须在 [0, 1] 内。")
+    if not 0 <= args.min_voting_polarization_delta <= 1:
+        parser.error("--min-voting-polarization-delta 必须在 [0, 1] 内。")
     if args.support_threshold <= args.oppose_threshold:
         parser.error("--support-threshold 必须大于 --oppose-threshold。")
 
@@ -203,7 +351,18 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=output_dir,
         options=AnalysisOptions(
             data_length=args.data_length,
-            window_size=args.window_size,
+            opinion_baseline_window_size=(
+                args.opinion_baseline_window_size
+                if args.opinion_baseline_window_size is not None
+                else args.window_size if args.window_size is not None else 10
+            ),
+            opinion_final_window_size=(
+                args.opinion_final_window_size
+                if args.opinion_final_window_size is not None
+                else args.window_size if args.window_size is not None else 10
+            ),
+            voting_baseline_window_size=args.voting_baseline_window_size,
+            voting_final_window_size=args.voting_final_window_size,
             support_threshold=args.support_threshold,
             oppose_threshold=args.oppose_threshold,
             neutral_threshold=args.neutral_threshold,
@@ -215,6 +374,9 @@ def main(argv: list[str] | None = None) -> int:
             bootstrap_samples=args.bootstrap_samples,
             seed=args.seed,
             allow_incomplete_ticks=args.allow_incomplete_ticks,
+            min_voting_known_share=args.min_voting_known_share,
+            min_voting_decisiveness=args.min_voting_decisiveness,
+            min_voting_polarization_delta=args.min_voting_polarization_delta,
         ),
     )
     for path in result.generated_paths:
@@ -236,29 +398,99 @@ def analyze_history_run(
     out_dir = Path(output_dir).expanduser() if output_dir is not None else run_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     rows_by_agent = read_history_rows(run_dir)
+    snapshot = resolve_config_snapshot(run_dir, config_snapshot)
+    assessment_mode = resolve_opinion_assessment_mode(snapshot, rows_by_agent)
 
     summary_path = out_dir / "experiment_summary.md"
     summary_path.write_text(
-        build_experiment_summary(rows_by_agent, config_snapshot or {}),
+        build_experiment_summary(rows_by_agent, snapshot),
         encoding="utf-8",
     )
     generated_paths = [summary_path]
-    generated_paths.extend(write_standard_charts(out_dir, rows_by_agent))
-
-    polarization_report_path = None
-    try:
-        polarization_paths = write_polarization_outputs(
+    generated_paths.extend(
+        write_standard_charts(
+            out_dir,
+            rows_by_agent,
+            include_voting_chart=False,
+        )
+    )
+    generated_paths.extend(
+        write_opinion_analysis_outputs(
             run_dir=run_dir,
             output_dir=out_dir,
             options=opts,
         )
-        generated_paths.extend(polarization_paths)
-        polarization_report_path = out_dir / "polarization_report.md"
-    except ValueError as exc:
-        error_path = out_dir / "polarization_report.md"
-        error_path.write_text(f"# 舆论极化统计报告\n\n无法生成极化统计：{exc}\n", encoding="utf-8")
-        generated_paths.append(error_path)
-        polarization_report_path = error_path
+    )
+
+    polarization_report_path = None
+    if assessment_mode == "llm_voting":
+        try:
+            posthoc_voting_rows = read_posthoc_voting_rows(run_dir)
+            voting_rows = posthoc_voting_rows or rows_by_agent
+            generated_paths.append(
+                write_opinion_voting_trend_svg(
+                    out_dir / "opinion_voting_trends.svg",
+                    voting_rows,
+                )
+            )
+            polarization_paths = write_voting_polarization_outputs(
+                rows_by_agent=voting_rows,
+                output_dir=out_dir,
+                options=opts,
+                expected_agent_ids=set(rows_by_agent),
+            )
+            polarization_report_path = out_dir / "opinion_voting_polarization_report.md"
+            generated_paths.extend(polarization_paths)
+        except ValueError as exc:
+            polarization_report_path = _write_polarization_error_report(
+                out_dir / "opinion_voting_polarization_report.md",
+                exc,
+                title="LLM 投票极化统计报告",
+            )
+            generated_paths.append(polarization_report_path)
+    else:
+        try:
+            polarization_paths = write_polarization_outputs(
+                run_dir=run_dir,
+                output_dir=out_dir,
+                options=opts,
+            )
+            polarization_report_path = out_dir / "polarization_report.md"
+            generated_paths.extend(polarization_paths)
+        except ValueError as exc:
+            polarization_report_path = _write_polarization_error_report(
+                out_dir / "polarization_report.md",
+                exc,
+                title="舆论极化统计报告",
+            )
+            generated_paths.append(polarization_report_path)
+
+        # 附加投票链独立失败时，不得覆盖已经生成的连续观念报告。
+        try:
+            posthoc_voting_rows = read_posthoc_voting_rows(run_dir)
+            generated_paths.append(
+                write_opinion_voting_trend_svg(
+                    out_dir / "opinion_voting_trends.svg",
+                    posthoc_voting_rows or rows_by_agent,
+                )
+            )
+            if posthoc_voting_rows:
+                generated_paths.extend(
+                    write_voting_polarization_outputs(
+                        rows_by_agent=posthoc_voting_rows,
+                        output_dir=out_dir,
+                        options=opts,
+                        expected_agent_ids=set(rows_by_agent),
+                    )
+                )
+        except ValueError as exc:
+            generated_paths.append(
+                _write_polarization_error_report(
+                    out_dir / "opinion_voting_polarization_report.md",
+                    exc,
+                    title="LLM 投票极化统计报告",
+                )
+            )
 
     return AnalysisResult(
         run_dir=run_dir,
@@ -267,6 +499,85 @@ def analyze_history_run(
         polarization_report_path=polarization_report_path,
         generated_paths=generated_paths,
     )
+
+
+def _write_polarization_error_report(path: Path, exc: ValueError, *, title: str) -> Path:
+    """将单类极化分析错误写入自己的报告，避免覆盖其他分析结果。"""
+
+    path.write_text(f"# {title}\n\n无法生成极化统计：{exc}\n", encoding="utf-8")
+    return path
+
+
+def resolve_config_snapshot(run_dir: Path, config_snapshot: dict | None) -> dict:
+    """优先使用调用方快照，否则读取运行目录中的精确快照文件。"""
+
+    if config_snapshot:
+        return dict(config_snapshot)
+    path = run_dir / "config_snapshot.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"无法读取配置快照 {path}：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"配置快照根节点必须是对象：{path}")
+    return payload
+
+
+def read_posthoc_voting_rows(run_dir: Path) -> dict[str, list[dict]]:
+    """把结束后投票 JSON 转成现有投票分析器使用的精确字段。"""
+
+    path = run_dir / "opinion_voting_posthoc.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"无法读取结束后投票结果 {path}：{exc}") from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"结束后投票结果根节点必须是数组：{path}")
+    rows_by_agent: dict[str, list[dict]] = defaultdict(list)
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError(f"结束后投票结果包含非对象元素：{path}")
+        agent_id = item.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            raise ValueError(f"结束后投票结果缺少 agent_id：{path}")
+        rows_by_agent[agent_id].append({
+            "opinion_assessment_topic": item.get("topic", ""),
+            "opinion_voting_tick": item.get("tick", ""),
+            "opinion_voting_choice_counts": json.dumps(item.get("choice_counts", {}), ensure_ascii=False),
+            "opinion_voting_option_roles": json.dumps(item.get("option_roles", {}), ensure_ascii=False),
+            "opinion_voting_requested_voters": item.get("requested_voters", ""),
+            "opinion_voting_successful_votes": item.get("successful_votes", ""),
+            "opinion_voting_failed_votes": item.get("failed_votes", ""),
+            "opinion_voting_skipped_reason": item.get("skipped_reason", ""),
+            "opinion_voting_stance": item.get("stance", ""),
+            "opinion_voting_stance_valid": item.get("stance_valid", ""),
+            "opinion_voting_options": json.dumps(item.get("options", []), ensure_ascii=False),
+            "opinion_voting_window_start_tick": item.get("window_start_tick", ""),
+            "opinion_voting_window_end_tick": item.get("window_end_tick", ""),
+            "opinion_voting_speech_history": json.dumps(item.get("speech_history", []), ensure_ascii=False),
+        })
+    return dict(rows_by_agent)
+
+
+def resolve_opinion_assessment_mode(config_snapshot: dict, rows_by_agent: dict[str, list[dict]]) -> str:
+    """按配置快照或历史记录中的精确方法字段确定分析方式。"""
+
+    mode = config_snapshot.get("opinion_assessment_mode")
+    if mode in {"llm_voting", "llm_as_judge", "rule"}:
+        return str(mode)
+    recorded_modes = {
+        str(row.get("opinion_assessment_method"))
+        for rows in rows_by_agent.values()
+        for row in rows
+        if row.get("opinion_assessment_method") in {"llm_voting", "llm_as_judge", "rule_context_assessment"}
+    }
+    if "llm_voting" in recorded_modes:
+        return "llm_voting"
+    return "llm_as_judge"
 
 
 def resolve_history_run_dir(history_dir: str | Path) -> Path:
@@ -329,12 +640,15 @@ def read_csv_rows(path: Path) -> list[dict]:
 
 
 def build_experiment_summary(rows_by_agent: dict[str, list[dict]], config_snapshot: dict) -> str:
+    voting_mode = config_snapshot.get("opinion_assessment_mode") == "llm_voting"
     final_opinions = {}
     pressure_peaks = defaultdict(dict)
     mediator_peaks = defaultdict(float)
     behavior_counts = Counter()
     post_scores = []
     abnormal_ticks = []
+    vote_totals = Counter()
+    failed_vote_total = 0
 
     for agent_id, rows in rows_by_agent.items():
         if not rows:
@@ -365,6 +679,9 @@ def build_experiment_summary(rows_by_agent: dict[str, list[dict]], config_snapsh
                     "after": after,
                     "reason": row.get("opinion_assessment_reason", ""),
                 })
+            for option, count in json_obj(row.get("opinion_voting_choice_counts")).items():
+                vote_totals[str(option)] += int(parse_float(count))
+            failed_vote_total += int(parse_float(row.get("opinion_voting_failed_votes")))
 
     lines = [
         "# 实验运行摘要",
@@ -375,7 +692,7 @@ def build_experiment_summary(rows_by_agent: dict[str, list[dict]], config_snapsh
         json.dumps(config_snapshot, ensure_ascii=False, indent=2, default=str),
         "```",
         "",
-        "## 最终观念分布",
+        "## 保留的连续 opinion（LLM 投票不写回）" if voting_mode else "## 最终观念分布",
         "",
         markdown_table(["agent_id", "final_opinion"], [
             [agent_id, f"{value:.3f}"]
@@ -406,14 +723,34 @@ def build_experiment_summary(rows_by_agent: dict[str, list[dict]], config_snapsh
         f"- 发帖样本数：{len(post_scores)}",
         f"- 发帖文本立场均值：{mean(post_scores):.3f}" if post_scores else "- 发帖文本立场均值：无发帖样本",
         "",
+        "## LLM 投票汇总",
+        "",
+        markdown_table(["option", "votes"], [
+            [option, count] for option, count in vote_totals.items()
+        ]),
+        "",
+        f"- 失败票数：{failed_vote_total}",
+        "",
         "## 输出图表",
         "",
         "- `opinion_trends.svg`",
+        "- `opinion_dashboard.html`",
+        "- `opinion_distribution.svg`",
+        "- `opinion_distribution.csv`",
+        "- `opinion_analysis.json`",
+        "- `opinion_voting_trends.svg`",
+        "- `opinion_voting_polarization_trends.svg`",
         "- `effective_pressure_trends.svg`",
         "- `mediator_peak_trends.svg`",
+        "- `memory_event_trends.svg`",
+        "- `memory_vector_trends.svg`",
         "- `polarization_report.md`",
         "- `polarization_metrics.csv`",
         "- `polarization_agent_shift.csv`",
+        "- `opinion_voting_polarization_report.md`",
+        "- `opinion_voting_polarization_metrics.csv`",
+        "- `opinion_voting_agent_metrics.csv`",
+        "- `opinion_voting_skipped_records.csv`",
         "",
         "## 明显观念变化",
         "",
@@ -432,9 +769,24 @@ def build_experiment_summary(rows_by_agent: dict[str, list[dict]], config_snapsh
     return "\n".join(lines)
 
 
-def write_standard_charts(output_dir: Path, rows_by_agent: dict[str, list[dict]]) -> list[Path]:
+def write_standard_charts(
+    output_dir: Path,
+    rows_by_agent: dict[str, list[dict]],
+    *,
+    voting_rows_by_agent: dict[str, list[dict]] | None = None,
+    include_voting_chart: bool = True,
+) -> list[Path]:
+    """生成标准趋势图，并允许调用方隔离附加投票趋势。"""
+
     generated = []
     generated.append(write_opinion_trend_svg(output_dir / "opinion_trends.svg", rows_by_agent))
+    if include_voting_chart:
+        generated.append(
+            write_opinion_voting_trend_svg(
+                output_dir / "opinion_voting_trends.svg",
+                voting_rows_by_agent or rows_by_agent,
+            )
+        )
     generated.append(write_multi_series_svg(
         output_dir / "effective_pressure_trends.svg",
         rows_by_agent,
@@ -455,7 +807,117 @@ def write_standard_charts(output_dir: Path, rows_by_agent: dict[str, list[dict]]
         y_min=0.0,
         y_max=1.0,
     ))
+    generated.append(write_memory_count_trend_svg(
+        output_dir / "memory_event_trends.svg",
+        rows_by_agent,
+        field="active_memory_events",
+        title="Active Memory Events",
+    ))
+    generated.append(write_memory_count_trend_svg(
+        output_dir / "memory_vector_trends.svg",
+        rows_by_agent,
+        field="active_memory_vectors",
+        title="Active Memory Vectors",
+    ))
     return generated
+
+
+def write_memory_count_trend_svg(
+    output_path: Path,
+    rows_by_agent: dict[str, list[dict]],
+    *,
+    field: str,
+    title: str,
+) -> Path:
+    """绘制每个智能体的活跃记忆数量趋势。"""
+
+    maximum = max(
+        (parse_float(row.get(field)) for rows in rows_by_agent.values() for row in rows),
+        default=1.0,
+    )
+    return write_multi_series_svg(
+        output_path,
+        rows_by_agent,
+        value_getter=lambda row: parse_float(row.get(field)),
+        title=title,
+        y_min=0.0,
+        y_max=max(1.0, maximum),
+    )
+
+
+def write_opinion_voting_trend_svg(output_path: Path, rows_by_agent: dict[str, list[dict]]) -> Path:
+    """按评测时间步汇总所有智能体的各选项票数。"""
+
+    counts_by_tick: dict[int, Counter] = defaultdict(Counter)
+    options: list[str] = []
+    seen_options: set[str] = set()
+    for rows in rows_by_agent.values():
+        for row in rows:
+            raw_tick = row.get("opinion_voting_tick")
+            if raw_tick in (None, ""):
+                continue
+            tick = _strict_nonnegative_int(raw_tick)
+            requested = _strict_nonnegative_int(row.get("opinion_voting_requested_voters"))
+            successful = _strict_nonnegative_int(row.get("opinion_voting_successful_votes"))
+            failed = _strict_nonnegative_int(row.get("opinion_voting_failed_votes"))
+            counts = json_obj(row.get("opinion_voting_choice_counts"))
+            roles = json_obj(row.get("opinion_voting_option_roles"))
+            normalized_counts = {
+                option: _strict_nonnegative_int(value)
+                for option, value in counts.items()
+            }
+            speech_history_complete = True
+            if "opinion_voting_speech_history" in row:
+                raw_history = row.get("opinion_voting_speech_history")
+                if isinstance(raw_history, list):
+                    speech_history = raw_history
+                else:
+                    try:
+                        speech_history = json.loads(str(raw_history))
+                    except (TypeError, json.JSONDecodeError):
+                        speech_history = None
+                speech_history_complete = isinstance(speech_history, list) and bool(speech_history)
+            # 趋势图与统计使用相同完整性门槛，避免部分票数造成视觉误导。
+            if (
+                tick is None
+                or requested is None
+                or successful is None
+                or failed is None
+                or requested <= 0
+                or successful != requested
+                or failed != 0
+                or not counts
+                or set(counts) != set(roles)
+                or not speech_history_complete
+                or any(value is None for value in normalized_counts.values())
+                or sum(int(value) for value in normalized_counts.values() if value is not None) != successful
+            ):
+                continue
+            for option, count in counts.items():
+                option_text = str(option)
+                if option_text not in seen_options:
+                    seen_options.add(option_text)
+                    options.append(option_text)
+                counts_by_tick[tick][option_text] += int(normalized_counts[option] or 0)
+    rows_by_option = {
+        option: [
+            {"tick": tick, "vote_count": counts_by_tick[tick].get(option, 0)}
+            for tick in sorted(counts_by_tick)
+        ]
+        for option in options
+    }
+    max_votes = max(
+        (row["vote_count"] for rows in rows_by_option.values() for row in rows),
+        default=1,
+    )
+    return write_multi_series_svg(
+        output_path,
+        rows_by_option,
+        value_getter=lambda row: parse_float(row.get("vote_count")),
+        title="LLM Opinion Voting Trends",
+        y_min=0.0,
+        y_max=float(max(1, max_votes)),
+    )
 
 
 def write_opinion_trend_svg(output_path: Path, rows_by_agent: dict[str, list[dict]]) -> Path:
@@ -467,6 +929,312 @@ def write_opinion_trend_svg(output_path: Path, rows_by_agent: dict[str, list[dic
         y_min=-1.0,
         y_max=1.0,
     )
+
+
+def opinion_distribution_categories(options: AnalysisOptions) -> list[dict[str, str]]:
+    """返回与现有极化阈值一致、互斥且覆盖全部 opinion 的五档定义。"""
+
+    if not (
+        options.neutral_threshold >= 0
+        and options.oppose_threshold < -options.neutral_threshold
+        and options.support_threshold > options.neutral_threshold
+    ):
+        raise ValueError(
+            "观念分布要求 oppose_threshold < -neutral_threshold <= neutral_threshold < support_threshold。"
+        )
+    return [
+        {"key": "strong_oppose", "label": "明显反对", "color": "#b91c1c"},
+        {"key": "lean_oppose", "label": "偏反对", "color": "#f97316"},
+        {"key": "neutral", "label": "中立", "color": "#a3a3a3"},
+        {"key": "lean_support", "label": "偏支持", "color": "#22c55e"},
+        {"key": "strong_support", "label": "明显支持", "color": "#15803d"},
+    ]
+
+
+def opinion_distribution_key(value: float, options: AnalysisOptions) -> str:
+    """按照互斥阈值把单个连续观念值归入一档。"""
+
+    if value <= options.oppose_threshold:
+        return "strong_oppose"
+    if value < -options.neutral_threshold:
+        return "lean_oppose"
+    if value <= options.neutral_threshold:
+        return "neutral"
+    if value < options.support_threshold:
+        return "lean_support"
+    return "strong_support"
+
+
+def build_opinion_distribution(
+    opinions_by_agent: dict[str, float],
+    categories: list[dict[str, str]],
+    options: AnalysisOptions,
+) -> list[dict[str, object]]:
+    """计算一个时刻中每档观念的数量和占比。"""
+
+    counts = Counter(opinion_distribution_key(value, options) for value in opinions_by_agent.values())
+    total = len(opinions_by_agent)
+    return [
+        {
+            **category,
+            "count": counts[category["key"]],
+            "share": counts[category["key"]] / total if total else 0.0,
+        }
+        for category in categories
+    ]
+
+
+def write_opinion_analysis_outputs(
+    *,
+    run_dir: Path,
+    output_dir: Path,
+    options: AnalysisOptions,
+) -> list[Path]:
+    """生成完整观念序列、首末分布和可筛选的交互分析页面。"""
+
+    series_by_agent = read_agent_opinions(run_dir)
+    ticks = select_ticks(series_by_agent, allow_incomplete=False)
+    if options.data_length is not None:
+        ticks = ticks[:options.data_length]
+    if not ticks:
+        raise ValueError(f"没有可用于观念分布的完整 tick：{run_dir}")
+    categories = opinion_distribution_categories(options)
+    initial_tick = ticks[0]
+    final_tick = ticks[-1]
+    stages = []
+    for key, label, tick in [
+        ("initial", "初始时刻", initial_tick),
+        ("final", "结束时刻", final_tick),
+    ]:
+        opinions = opinions_for_tick(series_by_agent, tick, allow_incomplete=False)
+        stages.append({
+            "key": key,
+            "label": label,
+            "tick": tick,
+            "n_agents": len(opinions),
+            "distribution": build_opinion_distribution(opinions, categories, options),
+        })
+    payload = {
+        "version": 1,
+        "thresholds": {
+            "oppose_threshold": options.oppose_threshold,
+            "neutral_threshold": options.neutral_threshold,
+            "support_threshold": options.support_threshold,
+        },
+        "tick_range": {"start": initial_tick, "end": final_tick, "count": len(ticks)},
+        "agent_ids": sorted(series_by_agent),
+        "series": [
+            {
+                "agent_id": agent_id,
+                "points": [
+                    {"tick": tick, "opinion": series_by_agent[agent_id][tick]}
+                    for tick in ticks
+                ],
+            }
+            for agent_id in sorted(series_by_agent)
+        ],
+        "stages": stages,
+    }
+    json_path = output_dir / "opinion_analysis.json"
+    csv_path = output_dir / "opinion_distribution.csv"
+    svg_path = output_dir / "opinion_distribution.svg"
+    html_path = output_dir / "opinion_dashboard.html"
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_opinion_distribution_csv(csv_path, stages)
+    write_opinion_distribution_svg(svg_path, stages)
+    write_opinion_dashboard_html(html_path, payload)
+    return [json_path, csv_path, svg_path, html_path]
+
+
+def write_opinion_distribution_csv(path: Path, stages: list[dict]) -> None:
+    """写出首末时刻各观念档位的数量和占比。"""
+
+    fields = ["stage", "stage_label", "tick", "n_agents", "category", "category_label", "count", "share"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for stage in stages:
+            for item in stage["distribution"]:
+                writer.writerow({
+                    "stage": stage["key"],
+                    "stage_label": stage["label"],
+                    "tick": stage["tick"],
+                    "n_agents": stage["n_agents"],
+                    "category": item["key"],
+                    "category_label": item["label"],
+                    "count": item["count"],
+                    "share": format_number(item["share"]),
+                })
+
+
+def write_opinion_distribution_svg(path: Path, stages: list[dict]) -> Path:
+    """绘制初始与结束时刻的五档观念占比分组柱状图。"""
+
+    width, height = 960, 520
+    left, right, top, bottom = 74, 30, 64, 120
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    categories = stages[0]["distribution"]
+    group_width = plot_width / max(1, len(categories))
+    bar_width = min(42.0, group_width * 0.28)
+
+    def y_pos(share: float) -> float:
+        return top + plot_height * (1.0 - clamp_number(share, 0.0, 1.0))
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<style>.axis{stroke:#333}.grid{stroke:#ddd}.title{font:18px sans-serif;fill:#222}.label{font:13px sans-serif;fill:#333}.tick{font:12px sans-serif;fill:#555}.value{font:11px sans-serif;fill:#222}</style>',
+        f'<rect width="{width}" height="{height}" fill="white"/>',
+        f'<text class="title" x="{width / 2}" y="32" text-anchor="middle">Initial and Final Opinion Distribution</text>',
+    ]
+    for share in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        y = y_pos(share)
+        lines.append(f'<line class="grid" x1="{left}" y1="{y:.2f}" x2="{left + plot_width}" y2="{y:.2f}"/>')
+        lines.append(f'<text class="tick" x="{left - 10}" y="{y + 4:.2f}" text-anchor="end">{share:.0%}</text>')
+    lines.append(f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"/>')
+    lines.append(f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"/>')
+    stage_colors = ["#2563eb", "#dc2626"]
+    for category_index, category in enumerate(categories):
+        center = left + group_width * (category_index + 0.5)
+        lines.append(
+            f'<text class="label" x="{center:.2f}" y="{top + plot_height + 28}" text-anchor="middle">'
+            f'{escape_text(category["label"])}</text>'
+        )
+        for stage_index, stage in enumerate(stages):
+            item = stage["distribution"][category_index]
+            share = float(item["share"])
+            x = center + (stage_index - 0.5) * (bar_width + 8) - bar_width / 2
+            y = y_pos(share)
+            bar_height = top + plot_height - y
+            lines.append(
+                f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_width:.2f}" height="{bar_height:.2f}" '
+                f'fill="{stage_colors[stage_index]}" rx="2"/>'
+            )
+            lines.append(
+                f'<text class="value" x="{x + bar_width / 2:.2f}" y="{max(top + 12, y - 6):.2f}" text-anchor="middle">'
+                f'{share:.1%} ({item["count"]})</text>'
+            )
+    legend_y = height - 44
+    for index, stage in enumerate(stages):
+        x = width / 2 - 160 + index * 260
+        lines.append(f'<rect x="{x:.2f}" y="{legend_y - 12}" width="16" height="16" fill="{stage_colors[index]}" rx="2"/>')
+        lines.append(
+            f'<text class="label" x="{x + 24:.2f}" y="{legend_y + 1}">'
+            f'{escape_text(stage["label"])} (tick={stage["tick"]}, n={stage["n_agents"]})</text>'
+        )
+    lines.append("</svg>")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def write_opinion_dashboard_html(path: Path, payload: dict) -> Path:
+    """生成无需外部依赖的交互式观念分析页面。"""
+
+    payload_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    template = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>观念变化分析</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1f2937; background: #f6f7f4; }
+    body { margin: 0; padding: 24px; }
+    main { max-width: 1180px; margin: 0 auto; }
+    h1 { margin: 0 0 6px; font-size: 24px; }
+    h2 { margin: 28px 0 10px; font-size: 17px; }
+    .meta { color: #6b7280; font-size: 13px; }
+    .toolbar { display: flex; align-items: center; gap: 10px; margin: 18px 0 8px; }
+    label { font-size: 13px; font-weight: 600; }
+    select { min-width: 260px; border: 1px solid #9ca3af; border-radius: 4px; padding: 7px 10px; background: white; color: #111827; }
+    .chart { width: 100%; min-height: 420px; background: white; border: 1px solid #d1d5db; }
+    .distribution { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+    .stage { background: white; border-top: 3px solid #374151; padding: 14px; }
+    .stage h3 { margin: 0 0 12px; font-size: 15px; }
+    .row { display: grid; grid-template-columns: 88px 1fr 92px; gap: 10px; align-items: center; margin: 9px 0; font-size: 12px; }
+    .track { height: 14px; background: #e5e7eb; }
+    .fill { height: 100%; min-width: 0; }
+    .number { text-align: right; font-variant-numeric: tabular-nums; }
+    @media (max-width: 760px) { body { padding: 14px; } .distribution { grid-template-columns: 1fr; } select { min-width: 0; width: 100%; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>观念变化分析</h1>
+  <div class="meta" id="meta"></div>
+  <div class="toolbar">
+    <label for="agent-select">曲线范围</label>
+    <select id="agent-select"></select>
+  </div>
+  <svg id="opinion-chart" class="chart" viewBox="0 0 1000 460" role="img" aria-label="智能体观念变化曲线"></svg>
+  <h2>初始与结束时刻观念分布</h2>
+  <div id="distribution" class="distribution"></div>
+</main>
+<script>
+const data = __PAYLOAD__;
+const palette = ['#2563eb','#dc2626','#16a34a','#9333ea','#ea580c','#0891b2','#be123c','#4d7c0f'];
+const select = document.getElementById('agent-select');
+const chart = document.getElementById('opinion-chart');
+document.getElementById('meta').textContent = `tick ${data.tick_range.start} - ${data.tick_range.end} · ${data.agent_ids.length} 个智能体 · ${data.tick_range.count} 个完整时间点`;
+
+// 下拉框同时支持全体曲线和指定单一智能体。
+select.innerHTML = '<option value="__all__">全部智能体</option>' + data.agent_ids.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+select.addEventListener('change', drawChart);
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+}
+function linePath(points, x, y) {
+  return points.map((point, index) => `${index ? 'L' : 'M'} ${x(point.tick).toFixed(2)} ${y(point.opinion).toFixed(2)}`).join(' ');
+}
+function drawChart() {
+  const selected = select.value;
+  const series = selected === '__all__' ? data.series : data.series.filter(item => item.agent_id === selected);
+  const left = 70, right = 28, top = 30, bottom = 58, width = 1000, height = 460;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  const minTick = data.tick_range.start, maxTick = data.tick_range.end;
+  const x = tick => left + (maxTick === minTick ? plotWidth / 2 : (tick - minTick) / (maxTick - minTick) * plotWidth);
+  const y = opinion => top + (1 - (opinion + 1) / 2) * plotHeight;
+  let html = '<rect width="1000" height="460" fill="white"/>';
+  [-1,-0.5,0,0.5,1].forEach(value => {
+    const py = y(value);
+    html += `<line x1="${left}" y1="${py}" x2="${left + plotWidth}" y2="${py}" stroke="${value === 0 ? '#9ca3af' : '#e5e7eb'}"/>`;
+    html += `<text x="${left - 12}" y="${py + 4}" text-anchor="end" font-size="12" fill="#6b7280">${value.toFixed(1)}</text>`;
+  });
+  html += `<line x1="${left}" y1="${top}" x2="${left}" y2="${top + plotHeight}" stroke="#374151"/>`;
+  html += `<line x1="${left}" y1="${top + plotHeight}" x2="${left + plotWidth}" y2="${top + plotHeight}" stroke="#374151"/>`;
+  html += `<text x="${left}" y="${height - 20}" font-size="12" fill="#6b7280">tick ${minTick}</text>`;
+  html += `<text x="${left + plotWidth}" y="${height - 20}" text-anchor="end" font-size="12" fill="#6b7280">tick ${maxTick}</text>`;
+  series.forEach((item, index) => {
+    const color = palette[(data.agent_ids.indexOf(item.agent_id) + palette.length) % palette.length];
+    html += `<path d="${linePath(item.points, x, y)}" fill="none" stroke="${color}" stroke-width="${selected === '__all__' ? 1.4 : 3}" opacity="${selected === '__all__' ? 0.7 : 1}"><title>${escapeHtml(item.agent_id)}</title></path>`;
+    if (selected !== '__all__') {
+      item.points.forEach(point => {
+        html += `<circle cx="${x(point.tick)}" cy="${y(point.opinion)}" r="3" fill="${color}"><title>${escapeHtml(item.agent_id)} · tick ${point.tick} · opinion ${point.opinion.toFixed(3)}</title></circle>`;
+      });
+    }
+  });
+  chart.innerHTML = html;
+}
+
+// 分布条直接展示数量和百分比，两个时刻使用同一组分类阈值。
+document.getElementById('distribution').innerHTML = data.stages.map(stage => `
+  <section class="stage">
+    <h3>${escapeHtml(stage.label)} · tick ${stage.tick} · n=${stage.n_agents}</h3>
+    ${stage.distribution.map(item => `
+      <div class="row">
+        <span>${escapeHtml(item.label)}</span>
+        <div class="track"><div class="fill" style="width:${(item.share * 100).toFixed(2)}%;background:${item.color}"></div></div>
+        <span class="number">${item.count} · ${(item.share * 100).toFixed(1)}%</span>
+      </div>`).join('')}
+  </section>`).join('');
+drawChart();
+</script>
+</body>
+</html>
+"""
+    path.write_text(template.replace("__PAYLOAD__", payload_json), encoding="utf-8")
+    return path
 
 
 def write_multi_series_svg(
@@ -528,6 +1296,713 @@ def write_multi_series_svg(
     return output_path
 
 
+def write_voting_polarization_outputs(
+    *,
+    rows_by_agent: dict[str, list[dict]],
+    output_dir: Path,
+    options: AnalysisOptions,
+    expected_agent_ids: set[str] | None = None,
+) -> list[Path]:
+    """生成 LLM 投票模式专用的逐轮指标、个体指标、趋势图和报告。"""
+
+    agent_metrics, skipped_records, observed_ticks = read_voting_agent_metrics(rows_by_agent)
+    expected = set(expected_agent_ids or rows_by_agent)
+    for tick in observed_ticks:
+        recorded_agent_ids = {
+            metric.agent_id for metric in agent_metrics if metric.tick == tick
+        } | {
+            record.agent_id for record in skipped_records if record.tick == tick
+        }
+        for agent_id in sorted(expected - recorded_agent_ids):
+            skipped_records.append(VotingSkippedRecord(
+                tick=tick,
+                agent_id=agent_id,
+                reason="missing_record",
+                requested_votes=None,
+                successful_votes=None,
+                failed_votes=None,
+            ))
+    metrics_path = output_dir / "opinion_voting_polarization_metrics.csv"
+    agent_path = output_dir / "opinion_voting_agent_metrics.csv"
+    skipped_path = output_dir / "opinion_voting_skipped_records.csv"
+    report_path = output_dir / "opinion_voting_polarization_report.md"
+    chart_path = output_dir / "opinion_voting_polarization_trends.svg"
+    output_paths = [metrics_path, agent_path, skipped_path, report_path, chart_path]
+    write_voting_skipped_records_csv(skipped_path, skipped_records)
+    if _all_voting_speech_windows_empty(rows_by_agent):
+        # 空发言窗口属于正常无数据状态，保留审计记录但不计算极化指标。
+        write_voting_metrics_csv(metrics_path, [])
+        write_voting_agent_metrics_csv(agent_path, agent_metrics)
+        write_voting_polarization_chart(chart_path, [])
+        write_voting_no_data_report(
+            report_path,
+            agent_metrics,
+            skipped_records,
+            metrics_path,
+            agent_path,
+            skipped_path,
+            reason="全部 posthoc voting 记录的线上发言窗口均为空。",
+        )
+        return output_paths
+
+    # 只使用请求全部成功且字段关系完整的记录，不用部分票数替代完整投票。
+    ticks = sorted({metric.tick for metric in agent_metrics})
+    if options.data_length is not None:
+        ticks = ticks[:options.data_length]
+        tick_set = set(ticks)
+        agent_metrics = [metric for metric in agent_metrics if metric.tick in tick_set]
+        skipped_records = [record for record in skipped_records if record.tick in tick_set]
+        write_voting_skipped_records_csv(skipped_path, skipped_records)
+    if not ticks:
+        write_voting_metrics_csv(metrics_path, [])
+        write_voting_agent_metrics_csv(agent_path, [])
+        write_voting_polarization_chart(chart_path, [])
+        write_voting_no_data_report(
+            report_path,
+            [],
+            skipped_records,
+            metrics_path,
+            agent_path,
+            skipped_path,
+            reason="没有完整投票记录可进入统计。",
+        )
+        return output_paths
+    tick_metrics = compute_voting_tick_metrics(agent_metrics, ticks)
+    write_voting_metrics_csv(metrics_path, tick_metrics)
+    write_voting_agent_metrics_csv(agent_path, agent_metrics)
+    write_voting_polarization_chart(chart_path, tick_metrics)
+    try:
+        baseline_ticks, final_ticks = split_windows(
+            ticks,
+            options.voting_baseline_window_size,
+            options.voting_final_window_size,
+            series_name="llm_voting 完整评测轮次",
+        )
+    except ValueError as exc:
+        write_voting_no_data_report(
+            report_path,
+            agent_metrics,
+            skipped_records,
+            metrics_path,
+            agent_path,
+            skipped_path,
+            reason=str(exc),
+        )
+        return output_paths
+    stats = summarize_voting_windows(tick_metrics, baseline_ticks, final_ticks)
+    ci_low, ci_high = bootstrap_voting_polarization_delta(
+        agent_metrics,
+        baseline_ticks,
+        final_ticks,
+        samples=options.bootstrap_samples,
+        seed=options.seed,
+    )
+
+    write_voting_polarization_report(
+        report_path=report_path,
+        metrics_path=metrics_path,
+        agent_path=agent_path,
+        options=options,
+        ticks=ticks,
+        baseline_ticks=baseline_ticks,
+        final_ticks=final_ticks,
+        stats=stats,
+        ci_low=ci_low,
+        ci_high=ci_high,
+        agent_metrics=agent_metrics,
+        tick_metrics=tick_metrics,
+        skipped_records=skipped_records,
+        skipped_path=skipped_path,
+    )
+    return output_paths
+
+
+def _all_voting_speech_windows_empty(rows_by_agent: dict[str, list[dict]]) -> bool:
+    """仅识别明确记录了空 speech history 的 posthoc 投票数据。"""
+
+    voting_rows = [
+        row
+        for rows in rows_by_agent.values()
+        for row in rows
+        if row.get("opinion_voting_tick") not in (None, "")
+    ]
+    if not voting_rows:
+        return False
+    for row in voting_rows:
+        if "opinion_voting_speech_history" not in row:
+            return False
+        raw_history = row.get("opinion_voting_speech_history")
+        if isinstance(raw_history, list):
+            history = raw_history
+        else:
+            try:
+                history = json.loads(str(raw_history))
+            except (TypeError, json.JSONDecodeError):
+                return False
+        if not isinstance(history, list) or history:
+            return False
+    return True
+
+
+def write_voting_no_data_report(
+    report_path: Path,
+    agent_metrics: list[VotingAgentMetric],
+    skipped_records: list[VotingSkippedRecord],
+    metrics_path: Path,
+    agent_path: Path,
+    skipped_path: Path,
+    *,
+    reason: str,
+) -> None:
+    """为没有足够完整记录的运行生成可审计报告。"""
+
+    ticks = sorted({metric.tick for metric in agent_metrics})
+    agent_ids = sorted(
+        {metric.agent_id for metric in agent_metrics}
+        | {record.agent_id for record in skipped_records}
+    )
+    lines = [
+        "# LLM 投票极化统计报告",
+        "",
+        "## 数据状态",
+        "",
+        "- 状态：完整数据不足，未进行首末窗口比较",
+        f"- 原因：{reason}",
+        f"- 纳入统计的完整记录数：{len(agent_metrics)}",
+        f"- 跳过记录数：{len(skipped_records)}",
+        f"- 智能体数量：{len(agent_ids)}",
+        f"- 完整记录所在 tick：{', '.join(str(tick) for tick in ticks) if ticks else '无'}",
+        "",
+        "未计算总体投票指标、bootstrap 置信区间或极化判定。",
+        "",
+        "## 输出文件",
+        "",
+        f"- `{metrics_path}`",
+        f"- `{agent_path}`（仅包含完整投票记录）",
+        f"- `{skipped_path}`（记录全部跳过原因）",
+        "",
+    ]
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _strict_nonnegative_int(value: object) -> int | None:
+    """只接受有限、非负且没有小数部分的整数值。"""
+
+    try:
+        number = float(str(value))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < 0 or not number.is_integer():
+        return None
+    return int(number)
+
+
+def read_voting_agent_metrics(
+    rows_by_agent: dict[str, list[dict]],
+) -> tuple[list[VotingAgentMetric], list[VotingSkippedRecord], set[int]]:
+    """只返回完整投票指标，并为所有未纳入记录保存精确原因。"""
+
+    metrics: list[VotingAgentMetric] = []
+    skipped: list[VotingSkippedRecord] = []
+    observed_ticks: set[int] = set()
+    valid_roles = {"support", "oppose", "unknown"}
+    keyed_rows: list[tuple[str, int | None, dict]] = []
+    key_counts: Counter = Counter()
+    for agent_id, rows in sorted(rows_by_agent.items()):
+        for row in rows:
+            raw_tick = row.get("opinion_voting_tick")
+            if raw_tick in (None, ""):
+                continue
+            tick = _strict_nonnegative_int(raw_tick)
+            keyed_rows.append((agent_id, tick, row))
+            if tick is not None:
+                observed_ticks.add(tick)
+                key_counts[(agent_id, tick)] += 1
+
+    previous_valid_by_agent: dict[str, VotingAgentMetric] = {}
+    for agent_id, tick, row in sorted(
+        keyed_rows,
+        key=lambda item: (item[0], item[1] if item[1] is not None else -1),
+    ):
+        requested_votes = _strict_nonnegative_int(row.get("opinion_voting_requested_voters"))
+        successful_votes = _strict_nonnegative_int(row.get("opinion_voting_successful_votes"))
+        failed_votes = _strict_nonnegative_int(row.get("opinion_voting_failed_votes"))
+
+        def skip(reason: str) -> None:
+            skipped.append(VotingSkippedRecord(
+                tick=tick,
+                agent_id=agent_id,
+                reason=reason,
+                requested_votes=requested_votes,
+                successful_votes=successful_votes,
+                failed_votes=failed_votes,
+            ))
+
+        if tick is None:
+            skip("invalid_tick")
+            continue
+        if key_counts[(agent_id, tick)] > 1:
+            skip("duplicate_record")
+            continue
+        if requested_votes is None or successful_votes is None or failed_votes is None:
+            skip("invalid_vote_totals")
+            continue
+        skipped_reason = str(row.get("opinion_voting_skipped_reason") or "").strip()
+        if "opinion_voting_speech_history" in row:
+            raw_history = row.get("opinion_voting_speech_history")
+            if isinstance(raw_history, list):
+                speech_history = raw_history
+            else:
+                try:
+                    speech_history = json.loads(str(raw_history))
+                except (TypeError, json.JSONDecodeError):
+                    skip("invalid_speech_history")
+                    continue
+            if not isinstance(speech_history, list):
+                skip("invalid_speech_history")
+                continue
+            if not speech_history:
+                skip(skipped_reason or "no_online_speech_in_window")
+                continue
+        if requested_votes == 0:
+            skip(skipped_reason or "no_requested_votes")
+            continue
+        if requested_votes != successful_votes + failed_votes:
+            skip("inconsistent_vote_totals")
+            continue
+        if failed_votes > 0 or successful_votes != requested_votes:
+            skip("incomplete_votes")
+            continue
+
+        counts = json_obj(row.get("opinion_voting_choice_counts"))
+        roles = json_obj(row.get("opinion_voting_option_roles"))
+        if not counts or not roles:
+            skip("missing_counts_or_roles")
+            continue
+        if set(counts) != set(roles):
+            skip("count_role_options_mismatch")
+            continue
+        if set(roles.values()) - valid_roles:
+            skip("invalid_option_role")
+            continue
+        if "support" not in roles.values() or "oppose" not in roles.values():
+            skip("missing_direction_role")
+            continue
+        normalized_counts = {
+            option: _strict_nonnegative_int(value)
+            for option, value in counts.items()
+        }
+        if any(value is None for value in normalized_counts.values()):
+            skip("invalid_choice_count")
+            continue
+        complete_counts = {
+            option: int(value)
+            for option, value in normalized_counts.items()
+            if value is not None
+        }
+        if sum(complete_counts.values()) != successful_votes:
+            skip("choice_count_total_mismatch")
+            continue
+
+        role_counts = {
+            role: sum(count for option, count in complete_counts.items() if roles[option] == role)
+            for role in valid_roles
+        }
+        divisor = float(successful_votes)
+        support_share = role_counts["support"] / divisor
+        oppose_share = role_counts["oppose"] / divisor
+        unknown_share = role_counts["unknown"] / divisor
+        known_share = support_share + oppose_share
+        decisiveness = abs(support_share - oppose_share) / known_share if known_share else 0.0
+        stance_result = classify_voting_stance(
+            requested_voters=requested_votes,
+            successful_votes=successful_votes,
+            choice_counts=complete_counts,
+            option_roles=roles,
+        )
+        stance_valid = int(bool(stance_result["stance_valid"]))
+        stance = str(stance_result["stance"])
+        previous_valid = previous_valid_by_agent.get(agent_id)
+        metric = VotingAgentMetric(
+            tick=tick,
+            agent_id=agent_id,
+            requested_votes=requested_votes,
+            successful_votes=successful_votes,
+            failed_votes=failed_votes,
+            skipped_reason=skipped_reason,
+            support_share=support_share,
+            oppose_share=oppose_share,
+            unknown_share=unknown_share,
+            known_share=known_share,
+            decisiveness=decisiveness,
+            stance=stance,
+            stance_valid=stance_valid,
+            stance_agreement=float(stance_result["stance_agreement"]),
+            stance_direction_margin=float(stance_result["stance_direction_margin"]),
+            stance_success_rate=float(stance_result["stance_success_rate"]),
+            previous_valid_tick=previous_valid.tick if previous_valid is not None else 0,
+            previous_valid_stance=previous_valid.stance if previous_valid is not None else "",
+            stance_changed=int(
+                bool(stance_valid and previous_valid is not None and previous_valid.stance != stance)
+            ),
+        )
+        metrics.append(metric)
+        if stance_valid:
+            previous_valid_by_agent[agent_id] = metric
+    return metrics, skipped, observed_ticks
+
+
+def compute_voting_tick_metrics(
+    agent_metrics: list[VotingAgentMetric],
+    ticks: list[int],
+) -> list[VotingTickMetric]:
+    """对每轮投票先按智能体归一化，再计算总体极化。"""
+
+    by_tick: dict[int, list[VotingAgentMetric]] = defaultdict(list)
+    for metric in agent_metrics:
+        by_tick[metric.tick].append(metric)
+    out = []
+    for tick in ticks:
+        rows = by_tick[tick]
+        valid = [row for row in rows if row.successful_votes > 0]
+        if not valid:
+            raise ValueError(f"投票 tick {tick} 没有成功票。")
+        support_share = mean(row.support_share for row in valid)
+        oppose_share = mean(row.oppose_share for row in valid)
+        unknown_share = mean(row.unknown_share for row in valid)
+        known_share = support_share + oppose_share
+        decisiveness = mean(row.decisiveness for row in valid)
+        camp_balance = 4.0 * (support_share / known_share) * (oppose_share / known_share) if known_share else 0.0
+        polarization_index = camp_balance * known_share * decisiveness
+        requested_votes = sum(row.requested_votes for row in rows)
+        successful_votes = sum(row.successful_votes for row in rows)
+        failed_votes = sum(row.failed_votes for row in rows)
+        stance_counts = Counter(row.stance for row in rows)
+        stance_divisor = float(len(rows)) if rows else 1.0
+        comparable = [row for row in rows if row.stance_valid and row.previous_valid_tick > 0]
+        changed = [row for row in comparable if row.stance_changed]
+        out.append(VotingTickMetric(
+            tick=tick,
+            n_agents=len(rows),
+            valid_agents=len(valid),
+            requested_votes=requested_votes,
+            successful_votes=successful_votes,
+            failed_votes=failed_votes,
+            success_rate=successful_votes / requested_votes if requested_votes else 0.0,
+            support_share=support_share,
+            oppose_share=oppose_share,
+            unknown_share=unknown_share,
+            known_share=known_share,
+            decisiveness=decisiveness,
+            camp_balance=camp_balance,
+            polarization_index=polarization_index,
+            stance_valid_agents=len(rows) - stance_counts[VOTING_STANCE_INVALID],
+            stance_invalid_agents=stance_counts[VOTING_STANCE_INVALID],
+            stance_support_count=stance_counts[VOTING_ROLE_SUPPORT],
+            stance_oppose_count=stance_counts[VOTING_ROLE_OPPOSE],
+            stance_unknown_count=stance_counts[VOTING_ROLE_UNKNOWN],
+            stance_support_share=stance_counts[VOTING_ROLE_SUPPORT] / stance_divisor,
+            stance_oppose_share=stance_counts[VOTING_ROLE_OPPOSE] / stance_divisor,
+            stance_unknown_share=stance_counts[VOTING_ROLE_UNKNOWN] / stance_divisor,
+            stance_invalid_share=stance_counts[VOTING_STANCE_INVALID] / stance_divisor,
+            stance_comparable_agents=len(comparable),
+            stance_changed_agents=len(changed),
+            stance_unchanged_agents=len(comparable) - len(changed),
+            stance_changed_share=len(changed) / len(comparable) if comparable else 0.0,
+            stance_changed_to_support=sum(row.stance == VOTING_ROLE_SUPPORT for row in changed),
+            stance_changed_to_oppose=sum(row.stance == VOTING_ROLE_OPPOSE for row in changed),
+            stance_changed_to_unknown=sum(row.stance == VOTING_ROLE_UNKNOWN for row in changed),
+        ))
+    return out
+
+
+def summarize_voting_windows(
+    metrics: list[VotingTickMetric],
+    baseline_ticks: list[int],
+    final_ticks: list[int],
+) -> dict[str, float]:
+    by_tick = {metric.tick: metric for metric in metrics}
+    names = [
+        "success_rate", "support_share", "oppose_share", "unknown_share",
+        "known_share", "decisiveness", "camp_balance", "polarization_index",
+    ]
+    out: dict[str, float] = {}
+    for name in names:
+        baseline = metric_mean([by_tick[tick] for tick in baseline_ticks], name)
+        final = metric_mean([by_tick[tick] for tick in final_ticks], name)
+        out[f"baseline_{name}"] = baseline
+        out[f"final_{name}"] = final
+        out[f"delta_{name}"] = final - baseline
+    return out
+
+
+def voting_window_index(
+    by_agent_tick: dict[tuple[str, int], VotingAgentMetric],
+    sampled_agents: list[str],
+    ticks: list[int],
+) -> float:
+    values = []
+    for tick in ticks:
+        rows = [by_agent_tick[(agent_id, tick)] for agent_id in sampled_agents if (agent_id, tick) in by_agent_tick]
+        valid = [row for row in rows if row.successful_votes > 0]
+        if not valid:
+            continue
+        support = mean(row.support_share for row in valid)
+        oppose = mean(row.oppose_share for row in valid)
+        known = support + oppose
+        decisiveness = mean(row.decisiveness for row in valid)
+        balance = 4.0 * (support / known) * (oppose / known) if known else 0.0
+        values.append(balance * known * decisiveness)
+    return mean(values) if values else 0.0
+
+
+def bootstrap_voting_polarization_delta(
+    agent_metrics: list[VotingAgentMetric],
+    baseline_ticks: list[int],
+    final_ticks: list[int],
+    *,
+    samples: int,
+    seed: int,
+) -> tuple[float | None, float | None]:
+    if samples == 0:
+        return None, None
+    by_agent_tick = {(metric.agent_id, metric.tick): metric for metric in agent_metrics}
+    agent_ids = sorted({metric.agent_id for metric in agent_metrics})
+    eligible = [
+        agent_id for agent_id in agent_ids
+        if any((agent_id, tick) in by_agent_tick for tick in baseline_ticks)
+        and any((agent_id, tick) in by_agent_tick for tick in final_ticks)
+    ]
+    if not eligible:
+        return None, None
+    rng = random.Random(seed)
+    deltas = []
+    for _ in range(samples):
+        sampled = [eligible[rng.randrange(len(eligible))] for _ in eligible]
+        baseline = voting_window_index(by_agent_tick, sampled, baseline_ticks)
+        final = voting_window_index(by_agent_tick, sampled, final_ticks)
+        deltas.append(final - baseline)
+    deltas.sort()
+    low_index = max(0, int(0.025 * (len(deltas) - 1)))
+    high_index = min(len(deltas) - 1, int(0.975 * (len(deltas) - 1)))
+    return deltas[low_index], deltas[high_index]
+
+
+def write_voting_metrics_csv(path: Path, metrics: list[VotingTickMetric]) -> None:
+    fields = list(VotingTickMetric.__dataclass_fields__)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for metric in metrics:
+            writer.writerow({field: format_number(getattr(metric, field)) for field in fields})
+
+
+def write_voting_agent_metrics_csv(path: Path, metrics: list[VotingAgentMetric]) -> None:
+    fields = list(VotingAgentMetric.__dataclass_fields__)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for metric in metrics:
+            writer.writerow({field: format_number(getattr(metric, field)) for field in fields})
+
+
+def write_voting_skipped_records_csv(path: Path, records: list[VotingSkippedRecord]) -> None:
+    """保存未进入总体统计的投票记录及其跳过原因。"""
+
+    fields = list(VotingSkippedRecord.__dataclass_fields__)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for record in sorted(records, key=lambda item: (item.tick is None, item.tick or -1, item.agent_id)):
+            writer.writerow({field: format_number(getattr(record, field)) for field in fields})
+
+
+def build_voting_stance_report_sections(
+    agent_metrics: list[VotingAgentMetric],
+    tick_metrics: list[VotingTickMetric],
+) -> list[str]:
+    """生成可直接并入投票极化报告的立场变化章节。"""
+
+    if not tick_metrics:
+        raise ValueError("没有可生成立场趋势报告的投票轮次。")
+    final = tick_metrics[-1]
+    changed_transitions = [row for row in agent_metrics if row.stance_changed]
+    transition_counts = Counter(
+        f"{row.previous_valid_stance}->{row.stance}"
+        for row in changed_transitions
+    )
+    metrics_by_agent: dict[str, list[VotingAgentMetric]] = defaultdict(list)
+    for metric in agent_metrics:
+        metrics_by_agent[metric.agent_id].append(metric)
+    changes_by_agent = Counter(row.agent_id for row in changed_transitions)
+
+    agent_rows = []
+    for agent_id, rows in sorted(metrics_by_agent.items()):
+        ordered = sorted(rows, key=lambda item: item.tick)
+        valid = [row for row in ordered if row.stance_valid]
+        first = valid[0] if valid else None
+        last = valid[-1] if valid else None
+        agent_rows.append([
+            agent_id,
+            voting_stance_label(first.stance) if first else "无有效评测",
+            voting_stance_label(last.stance) if last else "无有效评测",
+            len(valid),
+            len(ordered) - len(valid),
+            changes_by_agent[agent_id],
+        ])
+
+    tick_rows = [
+        [
+            metric.tick,
+            metric.stance_support_count,
+            metric.stance_oppose_count,
+            metric.stance_unknown_count,
+            metric.stance_invalid_agents,
+            metric.stance_changed_agents,
+            format_number(metric.stance_changed_share),
+        ]
+        for metric in tick_metrics
+    ]
+    transition_rows = [
+        [voting_transition_label(key), count]
+        for key, count in sorted(transition_counts.items())
+    ] or [["无立场变化", 0]]
+    lines = [
+        "## 立场分类与变化趋势", "",
+        "### 分类规则", "",
+        "- 成功票比例低于 0.80 时记为评测无效，不算作立场未知。",
+        "- 未知票比例不低于 0.50 时记为未知。",
+        "- 支持或反对票比例不低于 0.60，且相对另一方向领先不低于 0.20，才判为对应立场。",
+        "- 其他有效结果记为未知。", "",
+        "### 每轮全体分布", "",
+        markdown_table(
+            ["tick", "支持", "反对", "未知", "评测无效", "发生变化", "变化比例"],
+            tick_rows,
+        ), "",
+        "### 最后一轮", "",
+        f"- 时间步：{final.tick}",
+        f"- 支持：{final.stance_support_count}/{final.n_agents}（{format_number(final.stance_support_share)}）",
+        f"- 反对：{final.stance_oppose_count}/{final.n_agents}（{format_number(final.stance_oppose_share)}）",
+        f"- 未知：{final.stance_unknown_count}/{final.n_agents}（{format_number(final.stance_unknown_share)}）",
+        f"- 评测无效：{final.stance_invalid_agents}/{final.n_agents}（{format_number(final.stance_invalid_share)}）", "",
+        "### 立场转移", "",
+        f"- 可比较转移次数：{sum(metric.stance_comparable_agents for metric in tick_metrics)}",
+        f"- 实际变化次数：{len(changed_transitions)}", "",
+        markdown_table(["变化方向", "次数"], transition_rows), "",
+        "### 逐智能体摘要", "",
+        markdown_table(
+            ["agent_id", "首次有效立场", "最后有效立场", "有效轮次", "无效轮次", "变化次数"],
+            agent_rows,
+        ), "",
+    ]
+    return lines
+
+
+def voting_stance_label(stance: str) -> str:
+    return {
+        VOTING_ROLE_SUPPORT: "支持",
+        VOTING_ROLE_OPPOSE: "反对",
+        VOTING_ROLE_UNKNOWN: "未知",
+        VOTING_STANCE_INVALID: "评测无效",
+    }.get(stance, stance)
+
+
+def voting_transition_label(value: str) -> str:
+    before, separator, after = value.partition("->")
+    if not separator:
+        return value
+    return f"{voting_stance_label(before)} -> {voting_stance_label(after)}"
+
+
+def write_voting_polarization_chart(path: Path, metrics: list[VotingTickMetric]) -> Path:
+    series = {
+        field: [{"tick": metric.tick, "value": getattr(metric, field)} for metric in metrics]
+        for field in [
+            "polarization_index",
+            "stance_support_share",
+            "stance_oppose_share",
+            "stance_unknown_share",
+            "stance_invalid_share",
+        ]
+    }
+    return write_multi_series_svg(
+        path,
+        series,
+        value_getter=lambda row: parse_float(row.get("value")),
+        title="LLM Voting Polarization Trends",
+        y_min=0.0,
+        y_max=1.0,
+    )
+
+
+def write_voting_polarization_report(
+    *,
+    report_path: Path,
+    metrics_path: Path,
+    agent_path: Path,
+    options: AnalysisOptions,
+    ticks: list[int],
+    baseline_ticks: list[int],
+    final_ticks: list[int],
+    stats: dict[str, float],
+    ci_low: float | None,
+    ci_high: float | None,
+    agent_metrics: list[VotingAgentMetric],
+    tick_metrics: list[VotingTickMetric],
+    skipped_records: list[VotingSkippedRecord],
+    skipped_path: Path,
+) -> None:
+    final_known = stats["final_known_share"]
+    support_known = stats["final_support_share"] / final_known if final_known else 0.0
+    oppose_known = stats["final_oppose_share"] / final_known if final_known else 0.0
+    side_pass = min(support_known, oppose_known) >= options.min_side_share
+    known_pass = final_known >= options.min_voting_known_share
+    decisiveness_pass = stats["final_decisiveness"] >= options.min_voting_decisiveness
+    delta_pass = stats["delta_polarization_index"] >= options.min_voting_polarization_delta
+    unknown_pass = stats["delta_unknown_share"] <= 0.0
+    ci_pass = ci_low is not None and ci_low > 0.0
+    strict_pass = side_pass and known_pass and decisiveness_pass and delta_pass and unknown_pass and ci_pass
+    names = [
+        "success_rate", "support_share", "oppose_share", "unknown_share",
+        "known_share", "decisiveness", "camp_balance", "polarization_index",
+    ]
+    lines = [
+        "# LLM 投票极化统计报告", "", "## 数据范围", "",
+        f"- 投票轮次数：{len(ticks)}",
+        f"- 投票 tick：{', '.join(str(tick) for tick in ticks)}",
+        f"- 基线轮次：{', '.join(str(tick) for tick in baseline_ticks)}",
+        f"- 末端轮次：{', '.join(str(tick) for tick in final_ticks)}",
+        f"- 纳入统计的完整记录数：{len(agent_metrics)}",
+        f"- 跳过记录数：{len(skipped_records)}", "",
+        "## 指标定义", "",
+        "- 只有请求票数全部成功、票数之和一致且选项角色完整的记录进入统计。",
+        "- 失败、缺失、重复或结构不完整的记录写入跳过审计表。",
+        "- 所有份额先在单个智能体内部按成功票归一化，再对智能体取平均。",
+        "- `camp_balance = 4 × support_known × oppose_known`。",
+        "- `polarization_index = camp_balance × known_share × decisiveness`。", "",
+        "## 前后窗口统计", "",
+        markdown_table(["指标", "基线窗口均值", "末端窗口均值", "变化"], [metric_row(stats, name) for name in names]),
+        "", "## bootstrap 检验", "",
+        f"- 投票极化指数变化 bootstrap 95% CI：[{format_number(ci_low)}, {format_number(ci_high)}]", "",
+        "## 判定标准", "",
+        markdown_table(["标准", "是否满足"], [
+            [f"已知票中的支持、反对份额均不低于 {options.min_side_share}", yes_no(side_pass)],
+            [f"有效立场覆盖率不低于 {options.min_voting_known_share}", yes_no(known_pass)],
+            [f"个体明确度不低于 {options.min_voting_decisiveness}", yes_no(decisiveness_pass)],
+            [f"投票极化指数增长不低于 {options.min_voting_polarization_delta}", yes_no(delta_pass)],
+            ["未知份额没有上升", yes_no(unknown_pass)],
+            ["bootstrap 置信区间下界大于 0", yes_no(ci_pass)],
+        ]),
+        "", f"**严格判定：{yes_no(strict_pass)}**", "",
+    ]
+    lines.extend(build_voting_stance_report_sections(agent_metrics, tick_metrics))
+    lines.extend([
+        "## 输出文件", "",
+        f"- `{metrics_path}`", f"- `{agent_path}`", f"- `{skipped_path}`", "",
+    ])
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def write_polarization_outputs(run_dir: Path, output_dir: Path, options: AnalysisOptions) -> list[Path]:
     series_by_agent = read_agent_opinions(run_dir)
     ticks = select_ticks(series_by_agent, allow_incomplete=options.allow_incomplete_ticks)
@@ -548,7 +2023,18 @@ def write_polarization_outputs(run_dir: Path, output_dir: Path, options: Analysi
         )
         for tick in ticks
     ]
-    baseline_ticks, final_ticks = split_windows(ticks, options.window_size)
+    metrics_path = output_dir / "polarization_metrics.csv"
+    shifts_path = output_dir / "polarization_agent_shift.csv"
+    report_path = output_dir / "polarization_report.md"
+    # 短运行仍可输出逐 tick 指标，但不放宽首尾窗口必须互斥的要求。
+    write_metrics_csv(metrics_path, metrics)
+    write_agent_shift_csv(shifts_path, [])
+    baseline_ticks, final_ticks = split_windows(
+        ticks,
+        options.opinion_baseline_window_size,
+        options.opinion_final_window_size,
+        series_name="连续 opinion tick",
+    )
     shifts = compute_agent_shifts(series_by_agent, baseline_ticks, final_ticks)
     stats = summarize_windows(metrics, baseline_ticks, final_ticks)
     sign_test_p = one_sided_sign_test([shift.delta_abs_opinion for shift in shifts])
@@ -558,10 +2044,6 @@ def write_polarization_outputs(run_dir: Path, output_dir: Path, options: Analysi
         seed=options.seed,
     )
 
-    metrics_path = output_dir / "polarization_metrics.csv"
-    shifts_path = output_dir / "polarization_agent_shift.csv"
-    report_path = output_dir / "polarization_report.md"
-    write_metrics_csv(metrics_path, metrics)
     write_agent_shift_csv(shifts_path, shifts)
     write_polarization_report(
         report_path=report_path,
@@ -719,9 +2201,28 @@ def mean_pairwise_abs_distance(values: list[float]) -> float:
     return total / count
 
 
-def split_windows(ticks: list[int], window_size: int) -> tuple[list[int], list[int]]:
-    size = min(window_size, len(ticks))
-    return ticks[:size], ticks[-size:]
+def split_windows(
+    ticks: list[int],
+    baseline_window_size: int,
+    final_window_size: int,
+    *,
+    series_name: str,
+) -> tuple[list[int], list[int]]:
+    """按独立首尾长度切分，并拒绝任何重叠窗口。"""
+
+    if baseline_window_size < 1 or final_window_size < 1:
+        raise ValueError(f"{series_name} 的基线和末端窗口长度必须大于等于 1。")
+    required = baseline_window_size + final_window_size
+    if len(ticks) < required:
+        raise ValueError(
+            f"{series_name} 共有 {len(ticks)} 个可用点，基线窗口 {baseline_window_size} 个、"
+            f"末端窗口 {final_window_size} 个，共需要 {required} 个不重叠点。"
+        )
+    baseline_ticks = ticks[:baseline_window_size]
+    final_ticks = ticks[-final_window_size:]
+    if set(baseline_ticks) & set(final_ticks):
+        raise ValueError(f"{series_name} 的基线窗口与末端窗口发生重叠。")
+    return baseline_ticks, final_ticks
 
 
 def compute_agent_shifts(

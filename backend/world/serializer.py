@@ -44,9 +44,13 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             "opinion": round(a.opinion, 3),
             "opinion_scores": dict(a.opinion_scores),
             "last_opinion_assessment": a.last_opinion_assessment,
+            "last_opinion_voting": a.last_opinion_voting,
             "last_think": _extract_last_think(a.history),
             "sleeping": a.sleeping,
             "sleep_ticks_remaining": a.sleep_ticks_remaining,
+            "personal_bed_id": getattr(a, "personal_bed_id", None),
+            "personal_bed_position": getattr(a, "personal_bed_position", None),
+            "personal_bed_entrance": getattr(a, "personal_bed_entrance", None),
             "inside_building_id": a.inside_building_id,
         }
         for a in world.agents.values()
@@ -57,6 +61,8 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             "pos": o.position,
             "type": type(o).__name__,
             "kind": getattr(o, "kind", "objects"),  # 物品种类标识，前端用于查找描述元数据
+            "owner_agent_id": getattr(o, "owner_agent_id", None),
+            "free_num": getattr(o, "free_num", None),
             "description": o.get_desc() if hasattr(o, "get_desc") else "",  # 由 objects.get_desc() 动态生成
             # num 为 None 表示对象无数量属性；num <= 0 时前端隐藏图形
             "num": getattr(o, "num", None),
@@ -72,32 +78,17 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
     ]
     posts = []
     if platform is not None:
-        posts = [
-            {
-                "id": p.id,
-                "author_id": p.author_id,
-                "topic": getattr(p, "topic", ""),
-                "content": p.content,
-                "time": p.time,
-                "likes": p.likes,
-                "dislikes": p.dislikes,
-                "opinion_index": round(p.opinion_index, 3),
-                "is_news": getattr(p, "is_news", False),
-                "is_rumor": getattr(p, "is_rumor", False),
-                "source_type": getattr(p, "source_type", "agent"),
-                "comments": [
-                    {
-                        "id": c.id,
-                        "author_id": c.author_id,
-                        "content": c.content,
-                        "time": c.time,
-                        "agreement_to_post": getattr(c, "agreement_to_post", 0.0),
-                    }
-                    for c in p.comments_list
-                ],
-            }
-            for p in platform.posts
-        ]
+        posts_lock = getattr(platform, "_posts_lock", None)
+        if posts_lock is None:
+            post_objects = list(platform.posts)
+        else:
+            with posts_lock:
+                post_objects = list(platform.posts)
+        # 复用 Post 的锁内快照，保证前端状态与浏览载荷字段一致。
+        for post in post_objects:
+            post_data = post.to_dict()
+            post_data["opinion_index"] = round(post.opinion_index, 3)
+            posts.append(post_data)
     return {
         "time": world.time,
         "scenario_name": getattr(world, "scenario_name", "default_town"),

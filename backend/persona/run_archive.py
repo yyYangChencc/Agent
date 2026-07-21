@@ -10,7 +10,14 @@ from persona.logger import get_logger
 logger = get_logger(__name__)
 
 
-def archive_runtime_run(runtime, recorder, *, reason: str, scenario_name: str = "") -> dict | None:
+def archive_runtime_run(
+    runtime,
+    recorder,
+    *,
+    reason: str,
+    scenario_name: str = "",
+    voting_results: list[dict] | None = None,
+) -> dict | None:
     """关闭当前记录器，并为已有 tick 生成配置快照、摘要和图表。"""
 
     if runtime is None or recorder is None:
@@ -23,6 +30,23 @@ def archive_runtime_run(runtime, recorder, *, reason: str, scenario_name: str = 
 
     # 只有真实运行过 tick 才创建归档目录并补写配置快照。
     output_dir = Path(recorder.ensure_output_dir())
+    # 未预先完成投票时保留同步入口，server 可传入异步并行结果。
+    if voting_results is None:
+        voting_results = runtime.world.opinion_assessor.finalize_voting(
+            list(runtime.world.agents.values()),
+            tick_count,
+        )
+    (output_dir / "opinion_voting_posthoc.json").write_text(
+        json.dumps(voting_results, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    with (output_dir / "platform_exposure_events.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
+        for event in getattr(runtime.platform, "exposure_events", []) or []:
+            handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+    # 即使平台尚未产生事件，也保留空账本以明确归档契约。
+    with (output_dir / "platform_events.jsonl").open("w", encoding="utf-8", newline="\n") as handle:
+        for event in getattr(runtime.platform, "events", []) or []:
+            handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
     config_snapshot = build_runtime_config_snapshot(runtime, reason=reason, scenario_name=scenario_name)
     (output_dir / "config_snapshot.json").write_text(
         json.dumps(config_snapshot, ensure_ascii=False, indent=2, default=str),
@@ -38,6 +62,29 @@ def archive_runtime_run(runtime, recorder, *, reason: str, scenario_name: str = 
         logger.warning("[Archive] summarize run failed output_dir=%s: %s", output_dir, exc, exc_info=True)
 
     run_name = output_dir.name
+    output_names = [
+        "opinion_trends.svg",
+        "opinion_dashboard.html",
+        "opinion_distribution.svg",
+        "opinion_distribution.csv",
+        "opinion_analysis.json",
+        "opinion_voting_trends.svg",
+        "opinion_voting_polarization_trends.svg",
+        "effective_pressure_trends.svg",
+        "mediator_peak_trends.svg",
+        "memory_event_trends.svg",
+        "memory_vector_trends.svg",
+        "polarization_report.md",
+        "polarization_metrics.csv",
+        "polarization_agent_shift.csv",
+        "opinion_voting_polarization_report.md",
+        "opinion_voting_polarization_metrics.csv",
+        "opinion_voting_agent_metrics.csv",
+        "opinion_voting_skipped_records.csv",
+        "opinion_voting_posthoc.json",
+        "platform_exposure_events.jsonl",
+        "platform_events.jsonl",
+    ]
     archived = {
         "run_name": run_name,
         "output_dir": str(output_dir),
@@ -46,13 +93,11 @@ def archive_runtime_run(runtime, recorder, *, reason: str, scenario_name: str = 
         "summary_path": str(summary_path) if summary_path is not None else "",
         "summary_url": f"/history/{run_name}/experiment_summary.md" if summary_path is not None else "",
         "config_url": f"/history/{run_name}/config_snapshot.json",
+        # 只向前端返回本次分析实际生成的文件，避免模式分流后出现失效链接。
         "charts": [
-            {"name": "opinion_trends.svg", "url": f"/history/{run_name}/opinion_trends.svg"},
-            {"name": "effective_pressure_trends.svg", "url": f"/history/{run_name}/effective_pressure_trends.svg"},
-            {"name": "mediator_peak_trends.svg", "url": f"/history/{run_name}/mediator_peak_trends.svg"},
-            {"name": "polarization_report.md", "url": f"/history/{run_name}/polarization_report.md"},
-            {"name": "polarization_metrics.csv", "url": f"/history/{run_name}/polarization_metrics.csv"},
-            {"name": "polarization_agent_shift.csv", "url": f"/history/{run_name}/polarization_agent_shift.csv"},
+            {"name": name, "url": f"/history/{run_name}/{name}"}
+            for name in output_names
+            if (output_dir / name).exists()
         ],
         "error": summary_error,
     }
@@ -91,7 +136,10 @@ def build_runtime_config_snapshot(runtime, *, reason: str, scenario_name: str = 
         "default_opinion_topic": runtime.config.default_opinion_topic,
         "opinion_assessment_mode": runtime.config.opinion_assessment_mode,
         "psychological_assessment_mode": runtime.config.psychological_assessment_mode,
+        "psychological_assessment_enabled": runtime.config.psychological_assessment_enabled,
         "dynamic_role_card_enabled": runtime.config.dynamic_role_card_enabled,
+        "dynamic_role_card_behavior_enabled": runtime.config.dynamic_role_card_behavior_enabled,
+        "dynamic_role_card_opinion_enabled": runtime.config.dynamic_role_card_opinion_enabled,
         "agent_config": asdict(runtime.config),
         "agents": agents,
     }

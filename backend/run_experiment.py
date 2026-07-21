@@ -32,7 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", choices=sorted(EXPERIMENT_VERSIONS), default="full")
     parser.add_argument("--scenario", choices=list_scenarios(), default="default_town")
     parser.add_argument("--output-base", default=str(Path(__file__).parent / "history"))
-    parser.add_argument("--opinion-mode", choices=["llm", "rule"], default="llm")
+    parser.add_argument(
+        "--opinion-mode",
+        choices=["llm_as_judge", "llm_voting", "rule"],
+        default="llm_as_judge",
+    )
     parser.add_argument("--psychology-mode", choices=["llm", "rule", "off"], default="llm")
     parser.add_argument("--llm", choices=["real", "mock"], default="real")
     return parser.parse_args()
@@ -41,12 +45,16 @@ def parse_args() -> argparse.Namespace:
 async def run_experiment(args: argparse.Namespace) -> Path:
     """构建默认场景并运行指定 tick 数。"""
 
+    _validate_experiment_contract(args)
     random.seed(args.seed)
     config = _build_config(args)
-    recorder = HistoryRecorder(base_dir=args.output_base)
+    recorder = HistoryRecorder(base_dir=args.output_base, scenario_name=args.scenario)
     llm_client = _build_llm_client(args, config)
     scenario = get_scenario(args.scenario)
     runtime = scenario.build_runtime(history_recorder=recorder, reset_memory=True, config=config, llm_client=llm_client)
+    # 实验入口的显式观念模式优先于场景默认值，避免场景静默改变处理组。
+    runtime.config.opinion_assessment_mode = args.opinion_mode
+    runtime.config.post_opinion_scoring_mode = "rule" if args.opinion_mode == "rule" else "llm"
     _apply_experiment_version(runtime, args.version)
     # 命令行实验一旦进入运行流程，就创建输出目录并保存配置快照。
     recorder.ensure_output_dir()
@@ -55,7 +63,15 @@ async def run_experiment(args: argparse.Namespace) -> Path:
     try:
         for _ in range(config.simulation_step_limit):
             await runtime.world.astep()
+        # 投票不进入模拟循环，结束后按十个时间步切分全部个人发言。
+        voting_results = await runtime.world.opinion_assessor.afinalize_voting(
+            list(runtime.world.agents.values()),
+            runtime.world.time,
+        )
+        _write_posthoc_voting(recorder.output_dir, voting_results)
     finally:
+        _write_platform_exposure_events(recorder.output_dir, runtime.platform.exposure_events)
+        _write_platform_events(recorder.output_dir, getattr(runtime.platform, "events", []) or [])
         recorder.close()
         runtime.mem.close()
 
@@ -66,20 +82,56 @@ async def run_experiment(args: argparse.Namespace) -> Path:
     return Path(recorder.output_dir)
 
 
+def _write_posthoc_voting(output_dir: str | Path, voting_results: list[dict]) -> Path:
+    """把结束后投票保存为独立结构化文件，避免污染实时状态行。"""
+
+    path = Path(output_dir) / "opinion_voting_posthoc.json"
+    path.write_text(
+        json.dumps(voting_results, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_platform_exposure_events(output_dir: str | Path, events: list[dict]) -> Path:
+    """逐行保存平台曝光阶段，供推荐和关注实验审计。"""
+
+    path = Path(output_dir) / "platform_exposure_events.jsonl"
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for event in events:
+            handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+    return path
+
+
+def _write_platform_events(output_dir: str | Path, events: list[dict]) -> Path:
+    """逐行保存统一平台事件，供运行回放和完整性审计。"""
+
+    path = Path(output_dir) / "platform_events.jsonl"
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        for event in events:
+            handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+    return path
+
+
 def _build_config(args: argparse.Namespace) -> AgentConfig:
     config = AgentConfig()
     config.simulation_step_limit = max(1, int(args.ticks))
     config.opinion_assessment_mode = args.opinion_mode
-    config.post_opinion_scoring_mode = args.opinion_mode
-    config.psychological_assessment_mode = "rule" if args.psychology_mode == "rule" else "llm"
+    # 发帖立场评分仍使用原有 llm/rule 契约，不复用观念评测方式名称。
+    config.post_opinion_scoring_mode = "rule" if args.opinion_mode == "rule" else "llm"
+    config.psychological_assessment_mode = args.psychology_mode
     if args.psychology_mode == "off":
-        # 关闭心理评测时把阈值提高到不可触发，保留世界和观念评测流程。
+        # 显式关闭评测；高阈值只用于兼容读取旧配置的代码路径。
+        config.psychological_assessment_enabled = False
         config.psychological_pressure_default_threshold = 999.0
         config.psychological_pressure_thresholds = {
             "satiety": 999.0,
             "relax": 999.0,
             "money": 999.0,
         }
+        config.dynamic_role_card_enabled = False
+        config.dynamic_role_card_behavior_enabled = False
+        config.dynamic_role_card_opinion_enabled = False
     return config
 
 
@@ -92,7 +144,13 @@ def _build_llm_client(args: argparse.Namespace, config: AgentConfig):
 
 
 def _apply_experiment_version(runtime, version: str) -> None:
-    if version == "no_psychology":
+    if version == "full":
+        runtime.config.psychological_assessment_enabled = True
+        runtime.config.dynamic_role_card_enabled = True
+        runtime.config.dynamic_role_card_behavior_enabled = True
+        runtime.config.dynamic_role_card_opinion_enabled = True
+    elif version == "no_psychology":
+        runtime.config.psychological_assessment_enabled = False
         runtime.config.psychological_pressure_default_threshold = 999.0
         runtime.config.psychological_pressure_thresholds = {
             "satiety": 999.0,
@@ -100,8 +158,20 @@ def _apply_experiment_version(runtime, version: str) -> None:
             "money": 999.0,
         }
         runtime.config.dynamic_role_card_enabled = False
+        runtime.config.dynamic_role_card_behavior_enabled = False
+        runtime.config.dynamic_role_card_opinion_enabled = False
     elif version == "no_role_card":
+        runtime.config.psychological_assessment_enabled = True
         runtime.config.dynamic_role_card_enabled = False
+        runtime.config.dynamic_role_card_behavior_enabled = False
+        runtime.config.dynamic_role_card_opinion_enabled = False
+
+
+def _validate_experiment_contract(args: argparse.Namespace) -> None:
+    """拒绝会使实验版本含义坍缩的参数组合。"""
+
+    if args.psychology_mode == "off" and args.version != "no_psychology":
+        raise ValueError("--psychology-mode off 只能与 --version no_psychology 同时使用")
 
 
 def _write_config_snapshot(runtime, output_dir: str, args: argparse.Namespace) -> None:
@@ -142,7 +212,12 @@ def _config_snapshot(runtime, args: argparse.Namespace) -> dict:
         "default_opinion_topic": runtime.config.default_opinion_topic,
         "opinion_assessment_mode": runtime.config.opinion_assessment_mode,
         "psychological_assessment_mode": runtime.config.psychological_assessment_mode,
+        "psychological_assessment_enabled": runtime.config.psychological_assessment_enabled,
         "dynamic_role_card_enabled": runtime.config.dynamic_role_card_enabled,
+        "dynamic_role_card_behavior_enabled": runtime.config.dynamic_role_card_behavior_enabled,
+        "dynamic_role_card_opinion_enabled": runtime.config.dynamic_role_card_opinion_enabled,
+        "requested_opinion_mode": args.opinion_mode,
+        "requested_psychology_mode": args.psychology_mode,
         "agent_config": asdict(runtime.config),
         "agents": agents,
     }

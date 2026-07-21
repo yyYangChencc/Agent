@@ -1,9 +1,75 @@
 from __future__ import annotations
+import json
 from typing import TYPE_CHECKING
 from persona.opinion.scale import get_opinion_topic_definition
 
 if TYPE_CHECKING:
     from persona.agents.agent import Agent
+
+
+# 所有行为决策共用同一份世界规则，避免不同决策入口产生相互冲突的物品认知。
+GENERAL_AGENT_BEHAVIOR_RULES = """## 智能体通用扮演与行为规则
+以下规则在所有行为决策中持续有效；当前子模块的工具范围和输出格式仍以本次提示词为准。
+
+### 身份与信息边界
+- 你是 2D 网格世界中的自主智能体，只能依据当前状态、当前观测、相关记忆、近期历史和工具反馈决策。
+- 不得编造对象 ID、智能体 ID、帖子 ID、坐标、库存、价格、收益、距离、人物状态或已经发生的事件。
+- 所有标识符必须逐字使用输入中出现的原值；不得改写其大小写、前后缀、编号、格式或结构。
+- 当前观测是当前时间步的直接证据；记忆用于补充当前未观测到的信息。二者冲突时采用当前观测，并根据最新工具反馈修正后续行动。
+
+### 坐标、对象与建筑种类
+- 世界坐标统一写作 [row, col]；调用 move 时，x 必须填写 row，y 必须填写 col。
+- kind 是精确种类名。可交互物品种类为 food、bed；建筑种类为 company、food_shop、playground，building 是通用建筑基类。entity_type=object 是记忆查询分类，不是物品 kind。
+- food：地图食物。只有目标 kind=food 且位于欧氏距离 sqrt(2) 内时才能调用 eat；成功后增加 satiety、减少该食物库存，库存归零后对象消失。
+- bed：床。只有目标 kind=bed、存在空闲床位且位于欧氏距离 sqrt(2) 内时才能调用 sleep；目标带有 owner_agent_id 时，只有 ID 与 owner_agent_id 完全相同的智能体可以使用。进入睡眠后按时间步恢复 relax，睡眠结束前不能执行其他行动。处于建筑内部时必须先离开建筑才能睡觉。
+- company：公司建筑。调用 enter_building 后立即工作一次；停留期间每个时间步继续自动工作。每次工作增加 money、消耗 relax，并产生工作对应的 esteem 变化；具体数值只采用观测或记忆中的 salary、relax_cost 和工具反馈。
+- food_shop：食品店建筑。调用 enter_building 后立即尝试购买一次食物；停留期间每个时间步继续自动购买。库存充足且 money 不低于 price 时，每次扣除 price、增加 provide 对应的 satiety；余额不足或售罄时不会成功购买。
+- playground：游乐场建筑。调用 enter_building 后立即娱乐一次；停留期间每个时间步继续自动娱乐。money 不低于 price 时，每次扣除 price、增加 provide 对应的 relax；余额不足时不会产生恢复效果。
+- building：通用建筑。可以进入和离开，但只有观测、记忆或工具说明明确给出的具体效果才可作为决策依据。
+
+### 世界交互规则
+- 每轮只选择一个当前子模块允许的动作；不得把多个工具调用塞入一次 action。
+- food 和 bed 是物品，分别使用 eat 和 sleep，不得对它们调用 enter_building。
+- company、food_shop、playground 和明确标为 building 的对象使用 enter_building，不得对它们调用 eat 或 sleep。
+- 建筑占据的坐标不可作为普通落脚点。已有 entrance 时优先 move 到 entrance；没有 entrance 时可 move 到建筑 position，寻路会停在最近可达位置，然后下一轮再调用 enter_building。
+- enter_building 仅在目标建筑位于欧氏距离 sqrt(2) 内时调用。处于一个建筑内时，进入其他建筑前必须先调用 exit_building 或 move 离开当前建筑。
+- inside_building_id 不是 none 时，必须检查继续停留的自动效果。任务已满足、余额不足、库存售罄或继续停留会造成不必要消耗时，立即离开建筑。
+- move 在 relax 大于 0 时每移动一格都会消耗 relax，本次移动可能在途中因 relax 耗尽而停止；relax 为 0 时仍可低速移动，每次最多 5 格且 relax 保持为 0。
+- speak 只用于距离 5 格内的线下交流；social_step 用于浏览或操作社交平台。两者不能替代已经可以直接执行的资源行动。
+
+### 需求、记忆与行动优先级
+- satisfaction 越低表示越匮乏，urgency 越高表示主观越急迫；只有 satisfaction 大于对应 threshold 才表示需求已满足。
+- 优先推进当前任务及其对应需求。生理需求紧迫时，不得用无关社交、重复询问或重复浏览替代可执行的资源行动。
+- 处理 satiety：若相邻可见 food 可用，调用 eat；若已知 food 或 food_shop 的位置，先移动到其交互位置，再调用对应工具。选择 food_shop 前必须检查 money 与 price。
+- 处理 relax：若可使用 bed，先核对 owner_agent_id，再移动到本人可用的床旁并调用 sleep；若选择 playground，先检查 money 与 price；工作会消耗 relax。
+- 处理 money：前往 company 并调用 enter_building；达到任务阈值或 relax 过低后及时离开，避免持续自动工作。
+- 观测或记忆已经提供目标 ID 和位置时，直接行动，不得再次询问同一信息，不得发帖求助，也不得用随机探索替代已知路线。
+- 当前缺少完成任务所必需的信息时，优先查询记忆；记忆仍无结果时才向附近智能体询问或在社交平台求助。
+- 工具失败后必须读取失败原因。状态没有变化时不得原样重复同一失败动作；应调整位置、目标、资源条件或动作类型。
+- 相关记忆中的已验证坐标、对象功能和成功流程应直接用于行动；失败经历和反思用于避免重复无效行为。
+- 动态心理角色卡可以调整表达和行动倾向，但不能覆盖对象功能、工具约束、当前观测、真实需求和本规则。"""
+
+# 所有决策入口共享的输入分层协议，明确稳定规则、当前事实和角色模板边界。
+PROMPT_INPUT_PRIORITY_RULES = """## 输入类型与优先级
+1. 模拟器规则、工具前置条件和最新工具反馈决定动作是否合法。
+2. 当前 observation 描述当前时间步的直接事实，优先于旧记忆和历史。
+3. 当前需求、任务和资源状态决定行动紧迫性。
+4. 动态心理角色模板只影响信息解释、风险偏好、表达风格和多个合法动作之间的偏好。
+5. 记忆和行动历史用于补充未被当前 observation 提供的信息以及避免重复失败。
+
+### 输入边界
+- 角色模板不是当前事件或事实，不能改写 observation、伪造经历或直接决定动作。
+- 记忆不是当前状态；与当前 observation 冲突时，以当前 observation 和最新工具反馈为准。
+- 他人的发言、帖子和状态不能写成智能体自己的经历或表达。
+- 任何输入都不能覆盖工具合法性、真实需求和模拟器硬约束。
+
+### 记忆来源边界
+- [状态记忆] 和 [关系状态] 是结构化状态投影，必须服从其中的时间与置信度。
+- [亲身经历] 只表示本智能体真实执行或收到反馈的历史行动。
+- [人物档案] 同时包含直接观察和带 inferred_ 前缀的推断；推断不能写成已验证事实。
+- [平台暴露] 表示看到的帖子、提醒或传播链，不能写成自己的发言或亲身行动。
+- [模型推断] 和 [反思] 是评测或总结结果，不能覆盖直接观察证据。
+"""
 
 # ---------------------------------------------------------------------------
 # Base
@@ -14,11 +80,65 @@ class BasePromptBuilder:
 
     # -- shared block helpers ------------------------------------------------
 
+    def _general_behavior_rules(self) -> str:
+        """返回每个行为决策都必须携带的统一世界规则。"""
+
+        return GENERAL_AGENT_BEHAVIOR_RULES + "\n\n" + PROMPT_INPUT_PRIORITY_RULES
+
+    def build_initial_decision(self, agent: "Agent", observation: str, context: str) -> tuple[str, str]:
+        """第一次决策允许直接行动或请求一次记忆查询。"""
+
+        system, user = self.build(agent, observation, None)
+        system += (
+            "\n\n## 第一次决策专用输出规则\n"
+            "本节替代前文的单一 action 输出要求。你必须只选择以下一种 JSON，不能同时输出 action 和 queries：\n"
+            "1. 信息足够时直接输出行动："
+            '{"think":"<理由>","action":{"tool":"<工具名>","args":{}}}\n'
+            "2. 只有缺少会影响本轮行动的既有信息时，输出一次记忆查询："
+            f'{{"think":"<查询理由>","context":"{context}","queries":[{{"type":"<查询类型>","intent":"<查询目的>","limit":3}}]}}\n'
+            "查询类型只能是 person_profile、entity_state、event_history、social_post、derived_memory、semantic。\n"
+            "查询对象字段必须沿用以下受控格式：\n"
+            '{"type":"person_profile","intent":"understand_person","target_agent_ids":["agent_2"],"limit":2}\n'
+            '{"type":"entity_state","intent":"find_unseen_need_target","entity_type":"object","kinds":["food"],"exclude_visible":true,"limit":5}\n'
+            '{"type":"event_history","intent":"avoid_failed_actions","entity_ids":["food_1"],"source_types":["action_result"],"limit":3}\n'
+            '{"type":"social_post","intent":"inspect_known_posts","post_ids":[1],"limit":3}\n'
+            '{"type":"derived_memory","intent":"reuse_task_summary","memory_types":["episodic","procedural"],"limit":3}\n'
+            '{"type":"semantic","intent":"recall_similar_experience","query":"自然语言检索文本","memory_types":["episodic","procedural","reflective","semantic"],"limit":3}\n'
+            "queries 必须非空，最多 5 条，每条 limit 最大为 5；不得输出 SQL。"
+        )
+        user += "\n\n## 决策阶段\n这是第一次决策，当前尚未提供召回记忆。请直接行动，或输出一次受控记忆查询。"
+        return system, user
+
+    def build_after_memory_decision(
+        self,
+        agent: "Agent",
+        observation: str,
+        mem_info,
+    ) -> tuple[str, str]:
+        """第二次决策只允许根据查询结果输出行动。"""
+
+        system, user = self.build(agent, observation, mem_info)
+        system += (
+            "\n\n## 查询后第二次决策专用输出规则\n"
+            "记忆查询机会已经使用完毕。本次只能输出包含 think 和 action 的行动 JSON。\n"
+            "禁止输出 context、queries 或任何新的记忆查询；信息仍不足时输出空 action。"
+        )
+        user += "\n\n## 决策阶段\n这是记忆查询后的第二次决策。只能根据当前输入和相关记忆输出行动。"
+        return system, user
+
     def _state_block(self, agent: "Agent") -> str:
-        return (
+        lines = [
             f"- 位置：({agent.position[0]}, {agent.position[1]}) "
             f"| 时间步：t={agent.world.time}"
-        )
+        ]
+        personal_bed_id = getattr(agent, "personal_bed_id", None)
+        if personal_bed_id is not None:
+            lines.append(
+                f"- 专属床铺：bed_id={personal_bed_id} | "
+                f"position={agent.personal_bed_position} | entrance={agent.personal_bed_entrance} | "
+                f"owner_agent_id={agent.id}；只能在此床调用 sleep"
+            )
+        return "\n".join(lines)
 
     def _urgency_block(self, agent: "Agent") -> str:
         d = agent.urgency
@@ -43,16 +163,44 @@ class BasePromptBuilder:
         if agent.speaking_style:
             lines.append(f"- 说话风格：{agent.speaking_style}")
         lines.append(f"- 当前情绪：{agent.emotion}")
-        return "\n".join(lines)
+        return "[ROLE_TEMPLATE_ONLY]\n" + "\n".join(lines) + "\n[/ROLE_TEMPLATE_ONLY]"
 
-    def _role_card_instruction(self) -> str:
+    def _role_card_instruction(self, agent: "Agent | None" = None) -> str:
+        if agent is not None and (
+            not getattr(agent.config, "dynamic_role_card_enabled", True)
+            or not getattr(agent.config, "dynamic_role_card_behavior_enabled", True)
+        ):
+            return (
+                "- 当前实验版本关闭动态心理角色卡；不得假设、补造或引用角色卡影响，"
+                "只能依据当前观测、真实需求、记忆和工具规则决定动作。\n"
+            )
         return (
             "- 必须按照“动态心理角色卡”调整本轮认知、表达、社交和行动倾向；"
             "若角色卡与工具规则、地图观测或真实需求冲突，以工具规则、地图观测和真实需求为准\n"
         )
 
+    def _role_card_system_block(self, agent: "Agent") -> str:
+        """将动态角色卡作为 system 层的稳定行为约束和当前内容。"""
+
+        if (
+            not getattr(agent.config, "dynamic_role_card_enabled", True)
+            or not getattr(agent.config, "dynamic_role_card_behavior_enabled", True)
+        ):
+            return (
+                "## 动态心理角色卡\n"
+                "当前实验版本关闭行为角色卡；不得假设、补造或引用角色卡影响。"
+            )
+        return (
+            "## 动态心理角色卡（稳定行为约束）\n"
+            "角色卡只影响信息解释、风险偏好、表达风格以及多个合法动作之间的偏好；"
+            "它不是当前事实，不能改写 observation、伪造经历、覆盖真实需求或工具规则。\n"
+            f"{self._psychological_role_card_block(agent)}"
+        )
+
     def _psychological_role_card_block(self, agent: "Agent") -> str:
         if not getattr(agent.config, "dynamic_role_card_enabled", True):
+            return "（动态心理角色卡已在当前实验版本中关闭）"
+        if not getattr(agent.config, "dynamic_role_card_behavior_enabled", True):
             return "（动态心理角色卡已在当前实验版本中关闭）"
         assessment = agent.last_psychological_assessment
         if not isinstance(assessment, dict):
@@ -135,29 +283,78 @@ class BasePromptBuilder:
             return "（无历史记录）"
         return "\n".join(f"  {i + 1}. {h}" for i, h in enumerate(recent))
 
-    def _memory_block(self, mem_info: list | str | None) -> str:
+    def _memory_block(self, agent: "Agent", mem_info: list | str | None) -> str:
         if not mem_info:
             return "（无相关记忆）"
+        per_item_limit = max(1, int(agent.config.memory_prompt_max_chars_per_item))
+        total_limit = max(1, int(agent.config.memory_prompt_max_total_chars))
         if isinstance(mem_info, list):
             if not mem_info:
                 return "（无相关记忆）"
             lines = ["可用记忆会影响本轮行动，应优先用于确定位置、对象、已验证流程和失败教训："]
             for memory in mem_info:
-                lines.append(f"  - {self._memory_action_hint(memory)}")
-            return "\n".join(lines)
-        return mem_info
+                # 单条记忆先截断，再限制全部记忆的总长度。
+                hint = self._memory_action_hint(str(memory)[:per_item_limit])
+                next_line = f"  - {hint}"
+                if len("\n".join(lines + [next_line])) > total_limit:
+                    break
+                lines.append(next_line)
+            return "\n".join(lines)[:total_limit]
+        return str(mem_info)[:total_limit]
 
     def _memory_action_hint(self, memory: str) -> str:
+        # 先按来源标记分流，避免把 observe 或平台暴露误写成亲身经历。
+        direct_observation = (
+            "source=observe" in memory
+            or "source=direct_observation" in memory
+            or "provenance=direct_observation" in memory
+        )
+        platform_exposure = (
+            "source=social_browse" in memory
+            or "source=social_notification" in memory
+            or "provenance=platform_exposure" in memory
+            or "provenance=platform_event" in memory
+        )
+        personal_social = (
+            "source=social_feedback" in memory
+            or "source=conversation" in memory
+            or "provenance=self_social_action" in memory
+        )
+        personal_action = (
+            "source=action_result" in memory
+            or "source=need_event" in memory
+            or "provenance=self_action" in memory
+        )
+        if platform_exposure:
+            return f"[平台暴露] {memory}。保留作者、传播来源和提醒目标，不得写成自己的表达。"
+        if personal_social:
+            return f"[亲身社交经历] {memory}。这是本智能体真实执行或参与的社交历史。"
+        if direct_observation:
+            return f"[状态记忆] {memory}。这是直接观察到的事实投影，不是本智能体执行的经历。"
+        if personal_action:
+            return f"[亲身经历] {memory}。参考真实结果和需求变化，避免重复低收益行动。"
+        if "[state" in memory:
+            return f"[状态记忆] {memory}。这是带时间和置信度的状态投影；与当前观察冲突时采用当前观察。"
+        if "[person_profile" in memory:
+            return f"[人物档案] {memory}。observed_ 字段是观察记录，inferred_ 字段只是人物印象。"
+        if "[relation" in memory:
+            return f"[关系状态] {memory}。只用于理解当前关注、信任或互动关系。"
         if "[semantic" in memory:
-            return f"[地图/规则] {memory}。若其中含坐标或对象ID，可直接用于 move / enter_building / eat / sleep。"
+            return f"[语义知识] {memory}。若其中含已验证坐标或对象ID，可用于合法行动。"
         if "[procedural" in memory:
             return f"[行动流程] {memory}。若当前任务匹配，应优先复用该流程。"
         if "[episodic" in memory:
-            return f"[过往经验] {memory}。参考其结果，避免重复低收益行动。"
+            return f"[亲身经历] {memory}。参考真实结果和需求变化，避免重复低收益行动。"
         if "[reflective" in memory:
-            return f"[反思] {memory}。若与当前卡住原因相同，应按其中焦点调整行动。"
+            return f"[模型推断/反思] {memory}。只能作为解释和策略参考，不能覆盖直接事实。"
+        if "[social" in memory and (
+            "provenance=self_social_action" in memory
+            or "source=social_feedback" in memory
+            or "source=conversation" in memory
+        ):
+            return f"[亲身社交经历] {memory}。这是本智能体真实执行或参与的社交历史。"
         if "[social" in memory:
-            return f"[社交记忆] {memory}。用于决定是否发帖、评论或联系相关智能体。"
+            return f"[平台暴露] {memory}。保留作者、传播来源和提醒目标，不得写成自己的表达。"
         return memory
 
     def _opinion_block(self, agent: "Agent") -> str:
@@ -185,17 +382,27 @@ class BasePromptBuilder:
 class MemoryPlannerPromptBuilder(BasePromptBuilder):
     """为行动前的记忆查询计划生成 prompt。"""
 
-    def build(self, agent: "Agent", observation: str, context: str = "world") -> tuple[str, str]:
+    def build(
+        self,
+        agent: "Agent",
+        observation: str,
+        context: str = "world",
+        recalled_memories: list[str] | None = None,
+    ) -> tuple[str, str]:
         system = (
             f"你是自主智能体 {agent.id} 的记忆查询规划器，只负责决定本轮要查询哪些记忆。\n"
+            "## 记忆规划规则\n"
+            "只判断完成当前任务所必需的信息是否缺失，并生成受控查询；不执行行动，不改写 observation，不根据心理角色模板决定是否召回。\n\n"
             "你不是行动决策器，禁止输出 move、eat、speak、social_step、sleep、enter_building、exit_building 等世界动作。\n"
             "你不能输出 SQL、数据库语句、表扫描请求或任何未列出的查询类型。\n"
-            "当前 observe 或当前浏览内容已经包含的信息不要重复查询：\n"
+            "当前 observe、当前浏览内容或基础召回已经包含的信息不要重复查询：\n"
             "- 当前看见的物品/建筑已经有最新位置，不要为这些可见物品查询 entity_state。\n"
             "- 当前看见的人可以查询 person_profile，因为 observe 只提供位置，不提供印象和历史。\n"
             "- 当前输入的 social.notifications 若包含 [系统新闻]，说明系统刚投放高优先级新闻；应优先考虑查询 social_post、semantic 或 reflective 记忆来理解新闻背景。\n"
             "- 当前看不见但任务或需求需要的目标，可以查询 entity_state。\n"
             "- 需要过去经验、任务流程、反思、地图背景时，使用 semantic 查询 Chroma 长期记忆。\n"
+            "- semantic 查询每轮最多 1 条；query 必须是一句聚焦的信息需求，不得复制 observation、帖子或评论原文，且最多 500 个字符。\n"
+            "- 结构化查询中的 ID、类型或 kinds 列表每个最多 10 项，只保留完成当前任务必需的值。\n"
             "只输出一个合法 JSON 对象字符串，不要输出 Markdown、额外解释或标签。\n"
             "输出 schema：\n"
             "{\n"
@@ -210,7 +417,7 @@ class MemoryPlannerPromptBuilder(BasePromptBuilder):
             '    {"type": "semantic", "intent": "recall_similar_experience", "query": "自然语言检索文本", "memory_types": ["episodic", "procedural", "reflective", "semantic"], "limit": 3}\n'
             "  ]\n"
             "}\n"
-            "queries 最多 5 条，每条 limit 最大 5。"
+            "没有仍然缺失的信息时 queries 必须为空数组。queries 最多 5 条，每条 limit 最大 5。"
         )
         user = (
             "## 当前状态\n"
@@ -220,15 +427,46 @@ class MemoryPlannerPromptBuilder(BasePromptBuilder):
             f"{self._urgency_block(agent)}\n"
             f"{self._focus_block(agent)}"
             f"{self._opinion_block(agent)}\n\n"
-            "## 动态心理角色卡\n"
-            f"{self._psychological_role_card_block(agent)}\n\n"
             f"## 当前上下文类型\n{context}\n\n"
             "## 当前输入\n"
             f"{observation}\n\n"
+            "## 已完成的基础召回\n"
+            f"{self._planner_memory_block(agent, recalled_memories or [])}\n\n"
             "## 近期历史\n"
-            f"{self._history_block(agent)}"
+            f"{self._planner_history_block(agent)}"
         )
         return system, user
+
+    def _planner_history_block(self, agent: "Agent", max_n: int = 5) -> str:
+        """排除原始观察，只给 planner 少量有界行动与查询历史。"""
+
+        values = []
+        for item in reversed(agent.history):
+            text = str(item or "")
+            if text.startswith("observation:") or text.startswith("conversation:"):
+                continue
+            values.append(text[:300])
+            if len(values) >= max_n:
+                break
+        values.reverse()
+        if not values:
+            return "（无历史记录）"
+        return "\n".join(f"  {index + 1}. {item}" for index, item in enumerate(values))[:1200]
+
+    def _planner_memory_block(self, agent: "Agent", memories: list[str]) -> str:
+        """只向规划器展示已召回内容，不附加行动建议。"""
+
+        if not memories:
+            return "（基础召回无结果）"
+        per_item_limit = max(1, int(agent.config.memory_prompt_max_chars_per_item))
+        total_limit = max(1, int(agent.config.memory_prompt_max_total_chars))
+        lines = []
+        for memory in memories:
+            next_line = f"- {str(memory)[:per_item_limit]}"
+            if len("\n".join(lines + [next_line])) > total_limit:
+                break
+            lines.append(next_line)
+        return "\n".join(lines)[:total_limit] or "（基础召回无结果）"
 
 
 # ---------------------------------------------------------------------------
@@ -244,29 +482,21 @@ class WorldPromptBuilder(BasePromptBuilder):
         system = (
             f"你是自主智能体 {agent.id}，运行在一个 2D 网格世界中。\n"
             f"{persona_block}\n"
+            f"{self._general_behavior_rules()}\n\n"
+            f"{self._role_card_system_block(agent)}\n\n"
             "你的目标是根据当前状态、观测和记忆，选择最合理的单一动作。\n\n"
             "行为原则：\n"
-            "- satisfaction越低表示越匮乏，urgency越高表示主观越急迫；satisfaction大于阈值才表示该需求已满足\n"
             "- 优先执行当前任务，通过行动提高对应satisfaction，若行动可顺便解决其他需求，可在不耽误当前主任务的前提下进行\n"
             "- 若任务为 none，根据需求自由决策\n"
             "- 若任务长时间无进展，优先依据当前焦点行动\n"
-            "- 每轮只能执行一个工具调用\n"
-            "- 建筑交互规则：建筑效果只通过 enter_building 后的自动 interact 获得\n"
-            "- enter_building 成功后会立即自动 interact；之后只要 inside_building_id 不是 none，每个时间步都会自动 interact，直到执行 exit_building 或 move 离开建筑\n"
-            "- 如果 inside_building_id 不是 none，思考时必须先判断当前需求和任务是否还需要留在建筑内；若已满足或继续停留会造成浪费，应调用 exit_building 或 move 离开\n"
-            "- 移动规则：move 不再有单次移动距离上限，但每移动一格都会消耗 relax；若 relax 降为 0，本次移动会停止，之后不能继续 move\n"
             "- 恢复规则：relax 不再每个时间步自动衰减；如果本轮没有 move 且没有工作，relax 会缓慢恢复\n"
-            "- 工作规则：公司工作会获得 money 但消耗 relax；relax 很低时应避免长时间工作，除非 money 需求更紧急\n"
             "- 根据当前情况选择最合适的动作：\n"
             "  · 有任务目标且知道目标位置时 → 使用 move 前往，配合 eat/sleep/enter_building/exit_building 完成任务\n"
             "  · 观测 social.notifications 中若出现 [系统新闻]，这是系统投放的高优先级新闻；可优先使用 social_step 查看平台详情、表达观点或据此调整行动，但不强制压过更紧急的生理/安全需求\n"
             "  · 想分享经历、表达观点、了解他人动态时 → 使用 social_step 浏览或发布内容\n"
-            "  · 确实不知道某信息（如食物/建筑位置）且记忆中也没有时 → 用 speak 询问附近智能体，或用 social_step 发帖求助\n"
-            "  · 禁止：发帖询问你已知的信息（记忆中或观测到的建筑、食物、商店位置等）\n"
             "  · 任务为 none 且所有需求已满足时，可自由选择任意动作\n"
-            "- 记忆中的位置信息是可靠的，直接使用，不需要反复确认\n\n"
-            "- 必须按照“动态心理角色卡”调整本轮认知、表达、社交和行动倾向；"
-            "若角色卡与工具规则、地图观测或真实需求冲突，以工具规则、地图观测和真实需求为准\n"
+            "- 记忆中的位置信息可直接用于行动；若当前观测给出更新信息，以当前观测为准\n\n"
+            f"{self._role_card_instruction(agent)}"
             f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
             '{"think": "任务 eat something，satiety=10 未满足。记忆中 food_1 位于 (7,5)，当前位置 (3,5)，使用 move 前往。move 工具满足前提。", '
@@ -281,14 +511,12 @@ class WorldPromptBuilder(BasePromptBuilder):
             f"{self._urgency_block(agent)}\n"
             f"{self._focus_block(agent)}"
             f"{self._opinion_block(agent)}\n\n"
-            "## 动态心理角色卡\n"
-            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 观测（半径5格）\n"
             f"{observation}\n\n"
             "## 近期历史\n"
             f"{self._history_block(agent)}\n\n"
             "## 相关记忆\n"
-            f"{self._memory_block(mem_info)}\n\n"
+            f"{self._memory_block(agent, mem_info)}\n\n"
             "## 可调用工具\n"
             f"{agent.world.tools_prompt}"
         )
@@ -308,6 +536,7 @@ class SocialPromptBuilder(BasePromptBuilder):
         system = (
             f"你是社交平台智能体 {agent.id}。\n"
             f"{persona_block}\n"
+            f"{self._general_behavior_rules()}\n\n"
             "你的目标是通过社交平台获取有用信息、表达观点、建立社交联系。\n"
             "每轮只能执行一个社交动作。\n\n"
             "行为原则：\n"
@@ -320,13 +549,16 @@ class SocialPromptBuilder(BasePromptBuilder):
             "- opinion_index 表示你在发布这条帖子时对 topic 的立场快照，必须是 -1 到 1 的数值：-1=强烈反对/负向，0=中立/不关心/不确定，1=强烈支持/正向\n"
             "- 不允许重复发布与你历史发帖相同或只是换一种说法的内容\n"
             "- 禁止发帖询问你已知的信息（如记忆中已有的建筑、食物位置等）\n"
-            "- 仅对当前浏览内容里明确列出的帖子执行 comment_post / like_post / dislike_post\n"
+            "- comment_post / like_post / dislike_post / reply_comment / repost_post / quote_post 的 post_id 只能逐字复制本轮浏览 payload 的 visible_post_ids 中的整数\n"
             "- 调用 comment_post 时必须填写 post_id、content、agreement_to_post；agreement_to_post 只表示你有多认同被评论帖子本身，必须是 -1 到 1 的数值\n"
             "- agreement_to_post 不是你对帖主是否友善、是否尊重对方，也不是你的最终观念分数；观点认同、社交友善、尊重表达是三件不同的事\n"
-            "- 调用 comment_post / like_post / dislike_post 时，post_id 必须逐字复制“当前可互动帖子ID列表”或“帖子ID”字段中的整数\n"
+            "- 调用 reply_comment 时，comment_id 必须逐字复制本轮浏览 payload 中目标帖子的 posts[].comments[].id；不得使用未在本轮展示的评论 ID\n"
+            "- 调用 follow_author 时，author_id 必须逐字复制本轮浏览 payload 的 account_ids 中的字符串\n"
+            "- 调用 unfollow_author 时，author_id 必须逐字复制本轮浏览 payload 的 following_ids；该字段与下方“当前关注列表”一致\n"
+            "- 调用 repost_post / quote_post 时必须显式填写 opinion_index，表示你转发时对帖子 topic 的立场快照，必须是 -1 到 1 的数值\n"
             "- 禁止把发布时间、评论数量、列表顺序、作者编号、历史记忆中的帖子编号当成 post_id\n"
             "- 浏览时可以参与互动（点赞/评论），但不要为了参与而发布无新增内容的帖子\n\n"
-            f"{self._role_card_instruction()}"
+            f"{self._role_card_instruction(agent)}"
             f"{self._action_format_block('{\"tool\": \"<tool_name>\", \"args\": {\"<key>\": <value>}}', '若本轮无可执行动作：')}\n\n"
             "示例：\n"
             '{"think": "我对姜萍事件形成了谨慎支持的看法，并且这不是复述当前帖子。", '
@@ -337,6 +569,8 @@ class SocialPromptBuilder(BasePromptBuilder):
             '"action": {}}'
         )
 
+        system += "\n\n" + self._role_card_system_block(agent)
+
         user = (
             "## 当前状态\n"
             f"- 时间步：t={agent.world.time}\n"
@@ -344,14 +578,14 @@ class SocialPromptBuilder(BasePromptBuilder):
             f"{self._urgency_block(agent)}\n"
             f"{self._focus_block(agent)}"
             f"{self._opinion_block(agent)}\n\n"
-            "## 动态心理角色卡\n"
-            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 你的发帖历史\n"
             f"{agent.get_post_history() or '（暂无发帖记录）'}\n\n"
+            "## 当前关注列表\n"
+            f"{json.dumps(list(getattr(agent, 'followers', []) or []), ensure_ascii=False)}\n\n"
             "## 当前浏览的帖子\n"
             f"{posts_info}\n\n"
             "## 相关记忆\n"
-            f"{self._memory_block(mem_info)}\n\n"
+            f"{self._memory_block(agent, mem_info)}\n\n"
             "## 可调用工具\n"
             f"{agent.platform.tools_prompt}"
         )
@@ -371,6 +605,7 @@ class ConversationPromptBuilder(BasePromptBuilder):
         system = (
             f"你是智能体 {agent.id}，当前正在进行对话。\n"
             f"{persona_block}\n"
+            f"{self._general_behavior_rules()}\n\n"
             "你需要根据收到的消息和上下文，决定是回复还是保持沉默（沉默将终止对话）。\n\n"
             "行为原则：\n"
             "- 若剩余轮数为 0，必须主动收尾或保持沉默\n"
@@ -378,7 +613,7 @@ class ConversationPromptBuilder(BasePromptBuilder):
             "- 对话消息中若包含 session 或 intent，应优先围绕该会话线程和意图回复，避免混淆多个话题\n"
             "- 回答事实问题时，优先依据观察和记忆；不知道时直接说明不知道，不要编造坐标、对象ID或他人状态\n"
             "- 禁止执行移动、进食等非对话动作\n\n"
-            f"{self._role_card_instruction()}"
+            f"{self._role_card_instruction(agent)}"
             f"{self._action_format_block('{\"tool\": \"speak\", \"args\": {\"content\": \"<回复内容>\", \"ID\": \"<对方ID>\", \"response_to\": \"<被回复的原文>\"}}', '沉默时：')}\n\n"
             "示例：\n"
             '{"think": "对方询问食物位置，剩余 2 轮，目的未达成，应回复。", '
@@ -396,15 +631,14 @@ class ConversationPromptBuilder(BasePromptBuilder):
             "- topic_stance 是对新闻主题的立场，social_valence 是对人的态度，二者必须分开。\n"
             "- 示例：{\"think\":\"对方表达压力，我给出支持性回应。\",\"action\":{\"tool\":\"speak\",\"args\":{\"ID\":\"agent_2\",\"content\":\"我理解你现在有点撑不住，可以先去休息一下。\",\"response_to\":\"我有点撑不住了\",\"intent\":\"emotional_support\",\"social_valence\":0.8,\"topic\":\"\",\"topic_stance\":null}}}\n"
         )
+        system += "\n\n" + self._role_card_system_block(agent)
         user = (
             "## 当前状态\n"
             f"{self._state_block(agent)}\n\n"
-            "## 动态心理角色卡\n"
-            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 收到的消息与对话历史\n"
             f"{observation}\n\n"
             "## 相关记忆\n"
-            f"{self._memory_block(mem_info)}"
+            f"{self._memory_block(agent, mem_info)}"
         )
         return system, user
 
@@ -424,25 +658,26 @@ class ReflectPromptBuilder(BasePromptBuilder):
         valid_need_keys = "、".join(agent.satisfaction.keys())
         system = (
             f"你是智能体 {agent.id} 的决策模块，当前没有进行中的任务。\n"
+            f"{self._general_behavior_rules()}\n\n"
             "请根据当前需求状态，自由决定一个最合适的任务名称，并指定该任务所针对的需求键。\n\n"
             "决策原则：\n"
             "  1. 优先针对 satisfaction 值最低（客观最匮乏）的需求\n"
             "  2. satisfaction 相近时，选 urgency 值最高（主观最渴望）的需求\n"
             "  3. 任务名称应简洁描述智能体接下来要做的事（例如：'寻找食物'、'前往休息'、'赚钱打工'）\n"
             "  4. 需求键必须是以下之一：satiety（饱腹度）、relax（放松度）、money（金钱）\n"
-            "  5. 若存在动态心理角色卡，应按照其中的认知偏置、行为倾向和约束调整任务选择\n\n"
+            "  5. 若存在动态心理角色卡，应按照其中的认知偏置、行为倾向和约束调整任务选择；"
+            "角色卡关闭时不得假设或补造角色卡影响\n\n"
             "输出格式（必须严格遵守）：\n"
             "<Think>[分析各需求的 satisfaction/urgency 数值与紧迫程度，给出综合判断]</Think>\n"
             "<Task>任务名称</Task>\n"
             "<UrgencyKey>需求键</UrgencyKey>"
         )
         system += f"\n\n注意：当前真实可选需求键为：{valid_need_keys}。必须以此列表为准。"
+        system += "\n\n" + self._role_card_system_block(agent)
         user = (
             "## 当前状态\n"
             f"{self._state_block(agent)}\n"
             f"{self._urgency_block(agent)}\n\n"
-            "## 动态心理角色卡\n"
-            f"{self._psychological_role_card_block(agent)}\n\n"
             "## 最近观测\n"
             f"{agent.history[-1] if agent.history else '（无）'}\n\n"
             "## 近期历史\n"
@@ -476,17 +711,17 @@ class ReflectPromptBuilder(BasePromptBuilder):
         system = (
             f"你是智能体 {agent.id}。\n"
             f"你正在执行任务「{agent.task}」，但已连续多个时间步没有取得进展。\n"
+            f"{self._general_behavior_rules()}\n\n"
             "请做一次简短的微反思：分析为何没有进展，并明确接下来最应该做什么。\n\n"
             "输出格式（必须严格遵守）：\n"
             "<Insight>一句话判断，不超过50字</Insight>\n"
             "<Focus>接下来最应专注的事，不超过30字</Focus>"
         )
+        system += "\n\n" + self._role_card_system_block(agent)
         user = (
             f"当前任务：{agent.task}\n"
             f"当前需求值：{urgency_info}\n"
             f"当前焦点：{agent.current_focus or '（未设定）'}\n\n"
-            "动态心理角色卡：\n"
-            f"{self._psychological_role_card_block(agent)}\n\n"
             "近期行动历史：\n"
             + "\n".join(agent.history[-6:])
         )

@@ -2,6 +2,11 @@ from __future__ import annotations
 import json
 import math
 from typing import TYPE_CHECKING
+from persona.agent_memory.query_builder import (
+    DEFAULT_SEMANTIC_QUERY_MAX_BYTES,
+    build_memory_planner_observation_text,
+    build_semantic_observation_text,
+)
 from persona.logger import get_logger
 from persona.need_events import apply_need_delta
 from persona.opinion.scale import clamp_opinion
@@ -51,6 +56,8 @@ class Agent:
         self.next_action: str | None = None
         self.history: list[str] = []
         self.trajectory_buffer: list[dict] = []  # 当前任务内的 obs/action/reward 轨迹
+        self._current_episode_id: str = ""       # 当前 tick 的经历链标识，由 World 设置
+        self._current_episode_tick: int | None = None  # 当前经历链所属的世界时间步
 
         # satisfaction 是客观满足度；urgency 是主观急迫度；pressure_* 是需求缺口
         # 的累积压力层，供心理评测器判断是否激活。
@@ -87,6 +94,7 @@ class Agent:
         self.conversation_opted_out: bool = False
         self.conversation_event_log: list[dict] = []  # 已落地的线下对话消息，供历史与评测追踪
         self.need_event_log: list[dict] = []          # 需求满足度变化事件，供实验解释链追踪
+        self._pending_need_events: list[dict] = []    # 尚未归入动作经历的需求事件
         self.visited_building_ids: set[str] = set()   # 已进入过的建筑 ID，用于自我实现探索奖励
         self.visited_building_kinds: set[str] = set() # 已进入过的建筑类型，用于避免重复奖励
         self.known_social_contacts: set[str] = set()  # 已发生过线上互动的真实智能体
@@ -111,15 +119,21 @@ class Agent:
         self.opinion_scores: dict[str, float] = {}
         self.last_opinion_assessment: dict | None = None
         self.opinion_assessment_history: list[dict] = []
+        self.last_opinion_voting: dict | None = None
+        self.opinion_voting_history: list[dict] = []
         self.last_opinion_before_assessment: float = self.opinion
-        self.opinion_seen_posts_buffer: list[dict] = []  # 当前观念评测周期内实际看过的当前主题帖子。
+        self.opinion_seen_posts_buffer: list[dict] = []  # 当前观念评测窗口内实际看过的全部帖子。
         self._last_opinion_assessment_tick: int = 0      # 记录上次观念评测时间，用于间隔兜底。
         self._last_opinion_evidence_signature: str = ""  # 已评测证据签名，避免同一证据重复触发 LLM。
         self.online_trust: dict[str, float] = {}   # 线上信任，主要由点赞/点踩调整
         self.offline_trust: dict[str, float] = {}  # 线下信任，保留给后续线下关系建模
         self._last_seen_posts: list = []            # 上一次 social_step 中可见的帖子
+        self._last_seen_comment_ids_by_post: dict[int, set[str]] = {}  # 本轮浏览时实际展示的评论 ID 快照。
+        self._last_feed_request_id: str = ""        # 上一次浏览事务标识，用于关联后续互动。
+        self._last_browse_account_ids: list[str] = [] # 上一次浏览提供的可关注账号 ID。
         self.last_action: dict = {}                 # 最近一次世界动作摘要，供实验日志记录。
         self.last_social_action: dict = {}          # 最近一次社交动作摘要，供实验日志记录。
+        self.social_reaction_history: list[dict] = []  # 完整点赞/点踩记录，供观念评测读取。
         self.did_move_this_tick: bool = False       # 本 tick 是否真实发生移动，用于 relax 被动恢复。
         self.did_work_this_tick: bool = False       # 本 tick 是否真实发生工作，用于 relax 被动恢复。
 
@@ -130,10 +144,13 @@ class Agent:
         self.sleeping: bool = False
         self.sleep_ticks_remaining: int = 0
         self.sleeping_on_bed_id: str | None = None
+        self.personal_bed_id: str | None = None
+        self.personal_bed_position: list[int] | None = None
+        self.personal_bed_entrance: list[int] | None = None
         self._sleep_start_satisfaction: dict[str, float] = {}
         self._sleep_start_time: int = 0
         self.inside_building_id: str | None = None
-        self._pending_social_notifications: list[str] = []  # 待推送的社交通知
+        self._pending_social_notifications: list[str | dict] = []  # 待推送的兼容或结构化社交通知
 
         self.world.add_agent(self)
 
@@ -151,8 +168,7 @@ class Agent:
         observation_text = self._format_structured_context(observation)
         self.add_history("observation", observation_text)
         self._store_observation_memory(observation)
-        mem_info = self._planned_recall(observation, observation_text, context="world")
-        action = self.policy.decide(self, observation_text, mem_info)
+        action = self._decide_with_optional_memory(self.policy, observation, observation_text, context="world")
         self.add_history("action", action)
         return action
 
@@ -162,8 +178,7 @@ class Agent:
         observation_text = self._format_structured_context(observation)
         self.add_history("observation", observation_text)
         self._store_observation_memory(observation)
-        mem_info = await self._aplanned_recall(observation, observation_text, context="world")
-        action = await self.policy.adecide(self, observation_text, mem_info)
+        action = await self._adecide_with_optional_memory(self.policy, observation, observation_text, context="world")
         self.add_history("action", action)
         return action
 
@@ -176,46 +191,150 @@ class Agent:
             return None
         logger.info("[%s] 正在查看帖子...", self.id)
         posts, posts_info = self._receive_post()
+        posts_info.setdefault("episode_id", self._current_episode_id)
         self._last_seen_posts = posts
         self._record_opinion_seen_posts(posts_info)
         # 社交浏览结果先以 JSON 写入记忆，再转成 prompt 字符串交给社交 policy。
         self._store_social_browse_memory(posts_info)
         posts_text = self._format_structured_context(posts_info)
         logger.debug("[%s] 收到帖子内容: %s", self.id, posts_text)
-        mem_info = self._planned_recall(posts_info, posts_text, context="social")
-        raw = self.social_policy.decide(self, posts_text, mem_info)
+        raw = self._decide_with_optional_memory(self.social_policy, posts_info, posts_text, context="social")
         feedback = self.platform.execute(self.id, raw)
+        if isinstance(feedback, dict):
+            feedback.setdefault("episode_id", self._current_episode_id)
+        self._record_opinion_authored_post(feedback)
+        self._record_social_reaction(feedback)
+        self._store_social_feedback_memory(feedback)
+        logger.debug("[%s] 社交平台反馈: %s", self.id, feedback)
+        return self._format_structured_context(feedback)
+
+    async def asocial_step(self) -> str | None:
+        """异步完成社交浏览决策，避免同步 LLM 阻塞整个 tick。"""
+
+        if self.platform is None or self.social_policy is None:
+            return None
+        logger.info("[%s] 正在查看帖子...", self.id)
+        posts, posts_info = self._receive_post()
+        posts_info.setdefault("episode_id", self._current_episode_id)
+        self._last_seen_posts = posts
+        self._record_opinion_seen_posts(posts_info)
+        self._store_social_browse_memory(posts_info)
+        posts_text = self._format_structured_context(posts_info)
+        logger.debug("[%s] 收到帖子内容: %s", self.id, posts_text)
+        raw = await self._adecide_with_optional_memory(self.social_policy, posts_info, posts_text, context="social")
+        feedback = self.platform.execute(self.id, raw)
+        if isinstance(feedback, dict):
+            feedback.setdefault("episode_id", self._current_episode_id)
+        self._record_opinion_authored_post(feedback)
+        self._record_social_reaction(feedback)
         self._store_social_feedback_memory(feedback)
         logger.debug("[%s] 社交平台反馈: %s", self.id, feedback)
         return self._format_structured_context(feedback)
 
     def _receive_post(self) -> tuple[list, dict]:
-        posts = self.platform.get_visible_posts(self.id)
-        return posts, self.platform.give_post(self.id)
+        limit = getattr(self.config, "social_visible_post_limit", None)
+        posts, payload = self.platform.browse(self.id, limit=limit)
+        self._last_feed_request_id = str(payload.get("feed_request_id") or "")
+        account_ids = payload.get("account_ids")
+        self._last_browse_account_ids = list(account_ids) if isinstance(account_ids, list) else []
+        self._last_seen_comment_ids_by_post = self._comment_ids_from_browse_payload(payload)
+        return posts, payload
+
+    @staticmethod
+    def _comment_ids_from_browse_payload(payload: dict) -> dict[int, set[str]]:
+        """冻结本轮载荷中实际展示的评论 ID，避免后续实时对象扩大可回复范围。"""
+
+        snapshots: dict[int, set[str]] = {}
+        payload_posts = payload.get("posts") if isinstance(payload, dict) else None
+        if not isinstance(payload_posts, list):
+            return snapshots
+        for post in payload_posts:
+            if not isinstance(post, dict):
+                continue
+            post_id = post.get("id")
+            if not isinstance(post_id, int) or isinstance(post_id, bool):
+                continue
+            comments = post.get("comments")
+            if not isinstance(comments, list):
+                snapshots[post_id] = set()
+                continue
+            snapshots[post_id] = {
+                comment["id"]
+                for comment in comments
+                if isinstance(comment, dict)
+                and isinstance(comment.get("id"), str)
+                and comment["id"]
+            }
+        return snapshots
 
     def _record_opinion_seen_posts(self, posts_info: dict) -> None:
-        """只记录本周期实际看过且 topic 等于当前观念主题的帖子。"""
+        """记录当前观念评测窗口内实际看过的全部帖子。"""
 
         if not isinstance(posts_info, dict):
             return
         posts = posts_info.get("posts") if isinstance(posts_info.get("posts"), list) else []
         if not posts:
             return
-        topic = str(self.config.default_opinion_topic or "")
         latest_by_id = {
             str(post.get("id")): dict(post)
             for post in self.opinion_seen_posts_buffer
             if isinstance(post, dict) and post.get("id") is not None
         }
         for post in posts:
-            # 观念证据只由帖子 topic 决定，不读取正文或评论内容。
-            if not isinstance(post, dict) or not self._post_matches_opinion_topic(post, topic):
+            # 固定评测窗口需要保留本轮实际看到的全部发言。
+            if not isinstance(post, dict):
                 continue
             post_id = post.get("id")
             if post_id is None:
                 continue
             latest_by_id[str(post_id)] = self._opinion_post_snapshot(post)
         self.opinion_seen_posts_buffer = list(latest_by_id.values())
+
+    def _record_opinion_authored_post(self, feedback: dict) -> None:
+        """记录本周期成功原创或引用的主题帖子，作为自身立场直接证据。"""
+
+        if (
+            not isinstance(feedback, dict)
+            or not feedback.get("ok")
+            or feedback.get("action") not in {"send_post", "quote_post"}
+        ):
+            return
+        post = feedback.get("post")
+        topic = str(self.config.default_opinion_topic or "")
+        if not isinstance(post, dict) or str(post.get("author_id") or "") != self.id:
+            return
+        if not self._post_matches_opinion_topic(post, topic) or post.get("id") is None:
+            return
+        latest_by_id = {
+            str(item.get("id")): dict(item)
+            for item in self.opinion_seen_posts_buffer
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+        latest_by_id[str(post["id"])] = self._opinion_post_snapshot(post)
+        self.opinion_seen_posts_buffer = list(latest_by_id.values())
+
+    def _record_social_reaction(self, feedback: dict) -> None:
+        """记录成功点赞或点踩的目标内容，供固定窗口观念评测使用。"""
+
+        if not isinstance(feedback, dict) or not feedback.get("ok"):
+            return
+        action = feedback.get("action")
+        if action not in {"like_post", "dislike_post"}:
+            return
+        if feedback.get("state_changed") is False:
+            return
+        post = feedback.get("post")
+        if not isinstance(post, dict):
+            return
+        self.social_reaction_history.append({
+            "action": action,
+            "tick": int(getattr(self.world, "time", 0) or 0),
+            "post_id": feedback.get("post_id"),
+            "post_author_id": post.get("author_id"),
+            "post_topic": post.get("topic"),
+            "post_content": post.get("content"),
+            "feed_request_id": feedback.get("feed_request_id", self._last_feed_request_id),
+        })
 
     def _post_matches_opinion_topic(self, post: dict, topic: str) -> bool:
         """按帖子 topic 判断是否属于当前观念主题。"""
@@ -238,6 +357,9 @@ class Agent:
             "is_news": post.get("is_news"),
             "is_rumor": post.get("is_rumor"),
             "source_type": post.get("source_type"),
+            "repost_of_post_id": post.get("repost_of_post_id"),
+            "root_post_id": post.get("root_post_id"),
+            "source_author_id": post.get("source_author_id"),
             "comments": post.get("comments") if isinstance(post.get("comments"), list) else [],
         }
 
@@ -258,18 +380,21 @@ class Agent:
     def _memory_top_k_for(self, context: str) -> int:
         """按场景调整记忆检索数量。
 
-        卡住或有当前关注主题时增加检索量；社交和对话场景减少检索量，
-        避免短 prompt 被过多长期记忆淹没。
+        四类 P2 上下文使用独立配额；卡住或有当前关注主题时只增加
+        世界行动的检索量，避免社交、对话和观念提示词被长期记忆淹没。
         """
 
-        top_k = self.config.memory_top_k
-        if self.stuck_ticks > 0 or self.current_focus:
+        context_quotas = getattr(self.config, "memory_context_top_k", {})
+        if isinstance(context_quotas, dict) and context in context_quotas:
+            try:
+                top_k = int(context_quotas[context])
+            except (TypeError, ValueError):
+                top_k = int(self.config.memory_top_k)
+        else:
+            top_k = int(self.config.memory_top_k)
+        if context == "world" and (self.stuck_ticks > 0 or self.current_focus):
             top_k += self.config.memory_focus_bonus_k
-        if context == "social":
-            top_k = max(2, top_k - 1)
-        if context == "conversation":
-            top_k = max(2, top_k - 2)
-        return min(top_k, self.config.memory_max_top_k)
+        return max(1, min(top_k, self.config.memory_max_top_k))
 
     def _memory_timeout_seconds(self) -> float | None:
         """读取记忆检索超时预算；非正数表示不启用超时。"""
@@ -280,6 +405,33 @@ class Agent:
         except (TypeError, ValueError):
             return None
         return timeout if timeout > 0 else None
+
+    def _memory_query_max_bytes(self) -> int:
+        """统一读取基础召回和 planner 使用的查询字节预算。"""
+
+        try:
+            max_bytes = int(self.config.memory_semantic_query_max_bytes)
+        except (AttributeError, TypeError, ValueError):
+            max_bytes = DEFAULT_SEMANTIC_QUERY_MAX_BYTES
+        return max(1, max_bytes)
+
+    def _memory_semantic_observation(self, observation, context: str) -> str:
+        """为旧记忆接口生成与控制器相同的精简语义观察。"""
+
+        return build_semantic_observation_text(
+            observation,
+            context,
+            max_bytes=self._memory_query_max_bytes(),
+        )
+
+    def _memory_planner_observation(self, observation, context: str) -> str:
+        """向 planner 提供精简语义和有界结构化引用。"""
+
+        return build_memory_planner_observation_text(
+            observation,
+            context,
+            max_bytes=self._memory_query_max_bytes(),
+        )
 
     def _observation_has_direct_need_target(self, obs: str | dict | list | None, context: str) -> bool:
         """当前观察已经给出可行动目标时跳过记忆查询，避免重复召回同一最新状态。"""
@@ -363,7 +515,7 @@ class Agent:
                 context=context,
                 timeout_seconds=self._memory_timeout_seconds(),
             )
-        obs_text = self._format_structured_context(obs)
+        obs_text = self._memory_semantic_observation(obs, context)
         return self.mem.smart_retrieve(
             self.id, obs_text, self.task, self.urgency, self.satisfaction_threshold,
             n_results=top_k,
@@ -381,102 +533,238 @@ class Agent:
                 context=context,
                 timeout_seconds=self._memory_timeout_seconds(),
             )
-        obs_text = self._format_structured_context(obs)
+        obs_text = self._memory_semantic_observation(obs, context)
         return await self.mem.asmart_retrieve(
             self.id, obs_text, self.task, self.urgency, self.satisfaction_threshold,
             n_results=top_k,
             context=context,
         )
 
-    def _planned_recall(self, obs: str | dict | list | None, observation_text: str, context: str = "world") -> list[str]:
-        """先由 LLM planner 生成查询计划，再执行受控记忆召回。"""
+    def _decide_with_optional_memory(
+        self,
+        policy: "Policy",
+        observation: str | dict | list | None,
+        observation_text: str,
+        *,
+        context: str,
+    ) -> str:
+        """强制基础召回，可选补查一次，最后只执行一次行动决策。"""
 
+        base_memories = self._required_recall(observation, context=context)
+        supplemental = []
+        if getattr(self.config, "memory_forced_recall_enabled", True):
+            supplemental = self._planned_recall(
+                observation,
+                observation_text,
+                context=context,
+                recalled_memories=base_memories,
+            )
+        mem_info = self._merge_recalled_memories(base_memories, supplemental)
+        return policy.decide(self, observation_text, mem_info)
+
+    async def _adecide_with_optional_memory(
+        self,
+        policy: "Policy",
+        observation: str | dict | list | None,
+        observation_text: str,
+        *,
+        context: str,
+    ) -> str:
+        """异步执行基础召回、可选补查和单次行动决策。"""
+
+        base_memories = await self._arequired_recall(observation, context=context)
+        supplemental = []
+        if getattr(self.config, "memory_forced_recall_enabled", True):
+            supplemental = await self._aplanned_recall(
+                observation,
+                observation_text,
+                context=context,
+                recalled_memories=base_memories,
+            )
+        mem_info = self._merge_recalled_memories(base_memories, supplemental)
+        return await policy.adecide(self, observation_text, mem_info)
+
+    def _required_recall(
+        self,
+        observation: str | dict | list | None,
+        *,
+        context: str,
+    ) -> list[str]:
+        """每次决策先执行基础召回；显式关闭时用于无记忆消融。"""
+
+        if not getattr(self.config, "memory_forced_recall_enabled", True):
+            return []
+        try:
+            return self.recall(observation, context=context)
+        except Exception as exc:
+            logger.warning("[%s] 基础记忆召回失败，本轮使用空基础记忆: %s", self.id, exc)
+            return []
+
+    async def _arequired_recall(
+        self,
+        observation: str | dict | list | None,
+        *,
+        context: str,
+    ) -> list[str]:
+        """异步执行决策前基础召回，失败时不阻断行动。"""
+
+        if not getattr(self.config, "memory_forced_recall_enabled", True):
+            return []
+        try:
+            return await self.arecall(observation, context=context)
+        except Exception as exc:
+            logger.warning("[%s] 异步基础记忆召回失败，本轮使用空基础记忆: %s", self.id, exc)
+            return []
+
+    def _merge_recalled_memories(self, *groups) -> list[str]:
+        """按基础召回、补查结果的顺序去重，保留稳定提示词顺序。"""
+
+        merged: list[str] = []
+        seen: set[str] = set()
+        for group in groups:
+            values = group if isinstance(group, list) else [group] if group else []
+            for value in values:
+                text = str(value or "").strip()
+                if not text or text in seen:
+                    continue
+                seen.add(text)
+                merged.append(text)
+        return merged
+
+    def _execute_requested_memory_plan(
+        self,
+        plan: str,
+        observation: str | dict | list | None,
+        *,
+        context: str,
+    ) -> list[str]:
+        """执行第一次决策明确请求的记忆查询。"""
+
+        self.add_history("memory_query", self._memory_query_history_summary(plan))
+        try:
+            return self.mem.execute_query_plan(
+                self.id, plan, observation, self.task, self.urgency, self.satisfaction_threshold,
+                n_results=self._memory_top_k_for(context), context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
+            )
+        except Exception as exc:
+            logger.warning("[%s] 主动记忆查询失败，本轮使用空记忆继续决策: %s", self.id, exc)
+            return []
+
+    async def _aexecute_requested_memory_plan(
+        self,
+        plan: str,
+        observation: str | dict | list | None,
+        *,
+        context: str,
+    ) -> list[str]:
+        """异步执行第一次决策明确请求的记忆查询。"""
+
+        self.add_history("memory_query", self._memory_query_history_summary(plan))
+        try:
+            return await self.mem.aexecute_query_plan(
+                self.id, plan, observation, self.task, self.urgency, self.satisfaction_threshold,
+                n_results=self._memory_top_k_for(context), context=context,
+                timeout_seconds=self._memory_timeout_seconds(),
+            )
+        except Exception as exc:
+            logger.warning("[%s] 异步主动记忆查询失败，本轮使用空记忆继续决策: %s", self.id, exc)
+            return []
+
+    def _planned_recall(
+        self,
+        obs: str | dict | list | None,
+        observation_text: str,
+        context: str = "world",
+        recalled_memories: list[str] | None = None,
+    ) -> list[str]:
+        """基础召回后，由独立 planner 补查一次仍然缺失的信息。"""
+
+        # 私有入口也遵守无记忆消融，避免绕过统一决策包装器再次补查。
+        if not getattr(self.config, "memory_forced_recall_enabled", True):
+            return []
         planner = getattr(self, "memory_planner", None)
+        # 关闭补充规划后只保留基础召回，规则短路也不得触发额外查询。
+        if not getattr(self.config, "memory_planner_enabled", True):
+            return []
         if self._observation_has_direct_need_target(obs, context):
-            # 当前 observe 已提供可直接行动的目标时，不调用 planner 和 Chroma，直接让 action LLM 决策。
+            # 基础召回已经完成；当前目标可行动时不再执行补充规划与查询。
             return []
         rule_plan = self._rule_based_memory_plan(obs, context)
         if rule_plan is not None and hasattr(self.mem, "execute_query_plan"):
-            return self.mem.execute_query_plan(
-                self.id,
-                rule_plan,
-                obs,
-                self.task,
-                self.urgency,
-                self.satisfaction_threshold,
-                n_results=self._memory_top_k_for(context),
-                context=context,
-                timeout_seconds=self._memory_timeout_seconds(),
-            )
+            return self._execute_requested_memory_plan(rule_plan, obs, context=context)
         if (
-            not getattr(self.config, "memory_planner_enabled", True)
-            or planner is None
+            planner is None
             or not hasattr(planner, "plan")
             or not hasattr(self.mem, "execute_query_plan")
         ):
-            return self.recall(obs, context=context)
+            return []
         try:
-            plan = planner.plan(self, observation_text, context=context)
-            self.add_history("memory_query", self._memory_query_history_summary(plan))
-            return self.mem.execute_query_plan(
-                self.id,
-                plan,
-                obs,
-                self.task,
-                self.urgency,
-                self.satisfaction_threshold,
-                n_results=self._memory_top_k_for(context),
+            planner_observation = self._memory_planner_observation(obs, context)
+            plan = planner.plan(
+                self,
+                planner_observation,
                 context=context,
-                timeout_seconds=self._memory_timeout_seconds(),
+                recalled_memories=recalled_memories or [],
             )
+            if not self._memory_plan_has_queries(plan):
+                self.add_history("memory_query", self._memory_query_history_summary(plan))
+                return []
+            return self._execute_requested_memory_plan(plan, obs, context=context)
         except Exception as exc:
-            logger.warning("[%s] 记忆查询计划执行失败，退回自动召回: %s", self.id, exc)
-            return self.recall(obs, context=context)
+            logger.warning("[%s] 记忆查询计划执行失败，本轮不再召回: %s", self.id, exc)
+            return []
 
-    async def _aplanned_recall(self, obs: str | dict | list | None, observation_text: str, context: str = "world") -> list[str]:
-        """异步 planner 召回；失败时保留旧召回路径。"""
+    async def _aplanned_recall(
+        self,
+        obs: str | dict | list | None,
+        observation_text: str,
+        context: str = "world",
+        recalled_memories: list[str] | None = None,
+    ) -> list[str]:
+        """异步执行一次独立 planner 补查。"""
 
+        # 与同步私有入口保持相同的无记忆消融边界。
+        if not getattr(self.config, "memory_forced_recall_enabled", True):
+            return []
         planner = getattr(self, "memory_planner", None)
+        # 同步和异步入口共享补充规划开关语义。
+        if not getattr(self.config, "memory_planner_enabled", True):
+            return []
         if self._observation_has_direct_need_target(obs, context):
-            # 当前观察足够完成生理/安全任务时，跳过记忆查询，减少无效 LLM/embedding 调用。
+            # 基础召回已经完成；当前目标可行动时不再执行补充规划与查询。
             return []
         rule_plan = self._rule_based_memory_plan(obs, context)
         if rule_plan is not None and hasattr(self.mem, "aexecute_query_plan"):
-            return await self.mem.aexecute_query_plan(
-                self.id,
-                rule_plan,
-                obs,
-                self.task,
-                self.urgency,
-                self.satisfaction_threshold,
-                n_results=self._memory_top_k_for(context),
-                context=context,
-                timeout_seconds=self._memory_timeout_seconds(),
-            )
+            return await self._aexecute_requested_memory_plan(rule_plan, obs, context=context)
         if (
-            not getattr(self.config, "memory_planner_enabled", True)
-            or planner is None
+            planner is None
             or not hasattr(planner, "aplan")
             or not hasattr(self.mem, "aexecute_query_plan")
         ):
-            return await self.arecall(obs, context=context)
+            return []
         try:
-            plan = await planner.aplan(self, observation_text, context=context)
-            self.add_history("memory_query", self._memory_query_history_summary(plan))
-            return await self.mem.aexecute_query_plan(
-                self.id,
-                plan,
-                obs,
-                self.task,
-                self.urgency,
-                self.satisfaction_threshold,
-                n_results=self._memory_top_k_for(context),
+            planner_observation = self._memory_planner_observation(obs, context)
+            plan = await planner.aplan(
+                self,
+                planner_observation,
                 context=context,
-                timeout_seconds=self._memory_timeout_seconds(),
+                recalled_memories=recalled_memories or [],
             )
+            if not self._memory_plan_has_queries(plan):
+                self.add_history("memory_query", self._memory_query_history_summary(plan))
+                return []
+            return await self._aexecute_requested_memory_plan(plan, obs, context=context)
         except Exception as exc:
-            logger.warning("[%s] 异步记忆查询计划执行失败，退回自动召回: %s", self.id, exc)
-            return await self.arecall(obs, context=context)
+            logger.warning("[%s] 异步记忆查询计划执行失败，本轮不再召回: %s", self.id, exc)
+            return []
+
+    def _memory_plan_has_queries(self, plan: str) -> bool:
+        """仅在规划器明确给出非空 queries 时执行记忆查询。"""
+
+        data = json.loads(plan)
+        queries = data.get("queries")
+        return isinstance(queries, list) and bool(queries)
 
     def _memory_query_history_summary(self, plan: str) -> str:
         """短期 history 只记录本轮查询摘要，避免完整 planner JSON 挤占历史窗口。"""
@@ -542,9 +830,10 @@ class Agent:
                 reply=reply,
                 observation=observation,
                 world_time=self.world.time,
+                episode_id=self._current_episode_id,
             )
 
-    def append_trajectory(self, obs: str, action: str, reward: float | None) -> None:
+    def append_trajectory(self, obs: str | dict, action: str, reward: float | None) -> None:
         """把当前任务中的一步执行结果暂存，等任务结束后再总结入长期记忆。"""
 
         self.trajectory_buffer.append({
@@ -552,6 +841,7 @@ class Agent:
             "obs": obs,
             "action": action,
             "reward": reward,
+            "episode_id": self._current_episode_id,
         })
 
     def flush_trajectory(self, task: str, need_key: str = "") -> None:
@@ -569,15 +859,20 @@ class Agent:
                 f"  reward: {reward_str}"
             )
         trajectory_text = "\n".join(lines)
-        system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
-        summary = self.reflect.llm.generate(system, user)
+        if self.config.trajectory_summary_llm_enabled:
+            system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
+            summary = self.reflect.llm.generate(system, user)
+        else:
+            summary = self._rule_trajectory_summary(task)
         logger.debug("[%s] 轨迹总结: %s", self.id, summary)
+        trajectory_episode_id = self._trajectory_episode_id()
         self.remember(
             summary,
             memory_type="episodic",
             task=task,
             need_key=need_key,
             outcome="completed",
+            episode_id=trajectory_episode_id,
             importance=0.7,
             confidence=0.7,
         )
@@ -592,6 +887,8 @@ class Agent:
                 feedback=summary,
                 reward=None,
                 world_time=self.world.time,
+                episode_id=trajectory_episode_id,
+                outcome={"status": "completed", "task": task, "need_key": need_key},
             )
         logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
         self.trajectory_buffer.clear()
@@ -611,15 +908,20 @@ class Agent:
                 f"  reward: {reward_str}"
             )
         trajectory_text = "\n".join(lines)
-        system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
-        summary = await self.reflect.llm.agenerate(system, user)
+        if self.config.trajectory_summary_llm_enabled:
+            system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
+            summary = await self.reflect.llm.agenerate(system, user)
+        else:
+            summary = self._rule_trajectory_summary(task)
         logger.debug("[%s] 轨迹总结: %s", self.id, summary)
+        trajectory_episode_id = self._trajectory_episode_id()
         await self.aremember(
             summary,
             memory_type="episodic",
             task=task,
             need_key=need_key,
             outcome="completed",
+            episode_id=trajectory_episode_id,
             importance=0.7,
             confidence=0.7,
         )
@@ -634,9 +936,61 @@ class Agent:
                 feedback=summary,
                 reward=None,
                 world_time=self.world.time,
+                episode_id=trajectory_episode_id,
+                outcome={"status": "completed", "task": task, "need_key": need_key},
             )
         logger.debug("[%s] 轨迹总结已存储，共 %d 步", self.id, len(self.trajectory_buffer))
         self.trajectory_buffer.clear()
+
+    def _rule_trajectory_summary(self, task: str) -> str:
+        """用任务步数、奖励和最后行动生成轻量轨迹摘要。"""
+
+        rewards = [entry["reward"] for entry in self.trajectory_buffer if isinstance(entry.get("reward"), (int, float))]
+        total_reward = sum(rewards)
+        last_action = str(self.trajectory_buffer[-1].get("action") or "")[:300]
+        return (
+            f"任务已完成：{task}；共执行 {len(self.trajectory_buffer)} 步；"
+            f"累计奖励 {total_reward:.3f}；最后行动：{last_action}"
+        )
+
+    def _trajectory_episode_id(self) -> str:
+        """为整段任务轨迹生成稳定经历标识。"""
+
+        if not self.trajectory_buffer:
+            return self._current_episode_id
+        start = int(self.trajectory_buffer[0].get("step") or self.world.time)
+        end = int(self.trajectory_buffer[-1].get("step") or self.world.time)
+        return f"{self.id}:task:{start}-{end}"
+
+    def store_trajectory_checkpoint(self, outcome: str = "stuck") -> None:
+        """任务未完成时保存轻量检查点，不清空仍在推进的轨迹。"""
+
+        if not self.trajectory_buffer or not hasattr(self.mem, "store_action_result"):
+            return
+        rewards = [
+            entry["reward"]
+            for entry in self.trajectory_buffer
+            if isinstance(entry.get("reward"), (int, float))
+        ]
+        summary = (
+            f"任务尚未完成：{self.task}；状态={outcome}；"
+            f"已执行 {len(self.trajectory_buffer)} 步；累计奖励 {sum(rewards):.3f}"
+        )
+        self.mem.store_action_result(
+            self.id,
+            decision={
+                "think": "task trajectory checkpoint",
+                "action": {
+                    "tool": "task_checkpoint",
+                    "args": {"task": self.task, "need_key": self.task_urgency_key},
+                },
+            },
+            feedback=summary,
+            reward=sum(rewards) if rewards else None,
+            world_time=self.world.time,
+            episode_id=self._trajectory_episode_id(),
+            outcome={"status": outcome, "task": self.task, "need_key": self.task_urgency_key},
+        )
 
     # ------------------------------------------------------------------
     # Perception & messaging
@@ -751,10 +1105,59 @@ class Agent:
             f"[对话消息 · 第 {round_n} 轮，还剩 {remaining} 轮]\n"
             f"{msgs}\n\n{metadata_block}"
         )
+        recall_observation = {
+            "round": round_n,
+            "remaining_rounds": remaining,
+            "conversation_history": list(conv_history or []),
+            "messages": inbox_messages,
+        }
         self.inbox.clear()
         self.add_history("conversation", observation)
-        mem_info = self._planned_recall(observation, observation, context="conversation")
-        action = policy.decide(self, observation, mem_info)
+        action = self._decide_with_optional_memory(
+            policy,
+            recall_observation,
+            observation,
+            context="conversation",
+        )
+        self._store_conversation_memory(messages=inbox_messages, reply=action, observation=observation)
+        if action:
+            self.add_history("conversation_reply", action)
+        else:
+            self.conversation_opted_out = True
+            logger.info("[%s] 选择结束对话（轮次 %d）", self.id, round_n)
+        return action
+
+    async def aconversation_step(
+        self,
+        policy: "Policy",
+        round_n: int,
+        max_rounds: int,
+        conv_history: list[dict] | None = None,
+    ) -> str | None:
+        """异步完成对话召回和决策，统一使用全局 LLM 并发限制。"""
+
+        if not self.inbox:
+            return None
+        inbox_messages = list(self.inbox)
+        recall_observation = {
+            "round": round_n,
+            "remaining_rounds": max_rounds - round_n,
+            "conversation_history": list(conv_history or []),
+            "messages": inbox_messages,
+        }
+        observation = json.dumps(
+            recall_observation,
+            ensure_ascii=False,
+            indent=2,
+        )
+        self.inbox.clear()
+        self.add_history("conversation", observation)
+        action = await self._adecide_with_optional_memory(
+            policy,
+            recall_observation,
+            observation,
+            context="conversation",
+        )
         self._store_conversation_memory(messages=inbox_messages, reply=action, observation=observation)
         if action:
             self.add_history("conversation_reply", action)
@@ -969,6 +1372,8 @@ class Agent:
         if task != "none" and urgency_key not in valid_keys:
             logger.warning("[%s] 无效 urgency_key: %s，合法值为 %s", self.id, urgency_key, valid_keys)
             return
+        if self.task not in {"none", "done"} and task not in {"none", self.task}:
+            self.store_trajectory_checkpoint(outcome="replaced")
         self.task = task
         self.task_urgency_key = urgency_key if task != "none" else ""
         self.current_focus = ""

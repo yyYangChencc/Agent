@@ -6,20 +6,32 @@ from persona.opinion.scale import JIANG_PING_TOPIC, OPINION_NEUTRAL
 @dataclass
 class AgentConfig:
     # LLM
-    llm_model: str = "gpt-5.5"
+    llm_model: str = "deepseek-v4-flash"
     embedding_model: str = "text-embedding-3-small"
     llm_timeout_seconds: float = 120.0
     llm_connect_timeout_seconds: float = 5.0
     llm_max_retries: int = 0
-    llm_max_concurrent_requests: int = 5
+    # 所有异步 LLM 请求共享的全局并发上限。
+    llm_max_concurrent_requests: int = 20
     llm_rate_limit_retries: int = 3
     llm_rate_limit_backoff_seconds: float = 2.0
-    embedding_timeout_seconds: float = 15.0
-    embedding_connect_timeout_seconds: float = 5.0
+    llm_server_error_retries: int = 2
+    llm_server_error_backoff_seconds: float = 1.0
+    # 单次异步请求包含排队在内最多等待 270 秒。
+    llm_total_timeout_seconds: float = 270.0
+    # embedding 连接和读写均允许等待 60 秒；异步本地排队仍受 180 秒总预算约束。
+    embedding_timeout_seconds: float = 60.0
+    embedding_connect_timeout_seconds: float = 60.0
     embedding_max_retries: int = 0
-    embedding_max_concurrent_requests: int = 5
+    embedding_max_concurrent_requests: int = 20
     embedding_rate_limit_retries: int = 2
     embedding_rate_limit_backoff_seconds: float = 1.0
+    embedding_server_error_retries: int = 2
+    embedding_server_error_backoff_seconds: float = 1.0
+    embedding_total_timeout_seconds: float = 180.0
+    # 连续服务失败后短暂冷却，避免故障期间持续压垮上游。
+    service_failure_threshold: int = 3
+    service_cooldown_seconds: float = 30.0
 
     # World
     observation_radius: int = 5
@@ -32,13 +44,42 @@ class AgentConfig:
     memory_top_k: int = 5
     memory_focus_bonus_k: int = 2
     memory_max_top_k: int = 8
+    # P2 为不同决策上下文分配独立的基础召回配额。
+    memory_context_top_k: dict[str, int] = field(default_factory=lambda: {
+        "world": 5,
+        "social": 4,
+        "conversation": 3,
+        "opinion_assessment": 6,
+    })
+    # 关闭后可用于无记忆消融；默认每次决策都先执行基础召回。
+    memory_forced_recall_enabled: bool = True
     # 记忆检索超时后直接返回已有结果，避免 embedding/Chroma 慢调用拖住 tick。
-    memory_retrieval_timeout_seconds: float = 8.0
+    memory_retrieval_timeout_seconds: float = 30.0
     # 相同记忆查询在短时间内复用结果，减少相邻 tick 的重复 SQLite/Chroma 检索。
     memory_retrieval_ttl_ticks: int = 3
-    # LLM planner 默认开启；规则短路命中时不调用 planner。
+    # LLM planner 默认开启；基础召回后只补查仍然缺失的信息。
     memory_planner_enabled: bool = True
+    # 当前观察足够行动时可跳过补查，但不会跳过 P2 基础召回。
     memory_planner_skip_when_observation_sufficient: bool = True
+    # 人物档案默认使用规则摘要，避免每个 tick 产生大量 LLM 请求。
+    memory_person_profile_llm_enabled: bool = False
+    # 向量召回查询的 UTF-8 字节上限；不影响长期记忆正文写入。
+    memory_semantic_query_max_bytes: int = 6000
+    memory_prompt_max_chars_per_item: int = 1200
+    memory_prompt_max_total_chars: int = 5000
+    # 轻量记忆维护：只控制最近性、低价值事件和活跃向量数量。
+    memory_forgetting_enabled: bool = True
+    memory_maintenance_interval_ticks: int = 10
+    memory_recency_window_ticks: int = 100
+    memory_event_retention_ticks: int = 100
+    memory_event_max_prunable_importance: float = 0.5
+    memory_event_active_limit_per_agent: int = 2000
+    memory_vector_active_limit_per_agent: int = 500
+    memory_protected_importance: float = 0.7
+    # 社交浏览只返回最近 N 条可见帖子；每条帖子仍保留全部评论。
+    social_visible_post_limit: int = 10
+    # 推荐系统开关：当前只保留配置入口，默认关闭，推荐算法暂不实现。
+    social_recommendation_enabled: bool = False
     satiety_threshold: float = 30.0
     relax_threshold: float = 30.0
     money_threshold: float = 15.0
@@ -49,6 +90,8 @@ class AgentConfig:
     # 保留旧字段兼容历史配置；当前规则不再按 tick 自动衰减 relax。
     relax_decay_rate: float = 0.0
     relax_moving_usage: float = 1.0
+    # relax 耗尽后仍允许低速移动，单次最多前进 5 格且不再扣减 relax。
+    relax_zero_move_max_steps: int = 5
     satiety_decay_rate: float = 0.5
     sleep_time: int = 8
     sleep_relax_recover: float = 60.0
@@ -176,10 +219,14 @@ class AgentConfig:
     psychological_recovery_pressure_threshold: float = 0.25
     psychological_mediator_decay_rate: float = 0.50
     psychological_mediator_clear_threshold: float = 0.05
+    # 正式消融总开关；关闭后不创建评测窗口，也不发起心理 LLM 请求。
+    psychological_assessment_enabled: bool = True
     psychological_assessment_mode: str = "llm"
     psychological_llm_fallback_to_rule: bool = True
-    # 消融实验使用；关闭后心理评测仍记录，但不进入行为/观念 prompt。
+    # 兼容旧配置的总角色卡开关；两个细分开关用于隔离行为与观念评测路径。
     dynamic_role_card_enabled: bool = True
+    dynamic_role_card_behavior_enabled: bool = True
+    dynamic_role_card_opinion_enabled: bool = True
 
     # Social platform
     popularity_like_weight: float = 1.0
@@ -191,9 +238,19 @@ class AgentConfig:
     initial_opinion: float = OPINION_NEUTRAL
     default_opinion_topic: str = JIANG_PING_TOPIC
     opinion_assessment_history_limit: int = 200
-    opinion_assessment_mode: str = "llm"
-    # 观念评测采用事件触发，并用间隔兜底，减少无证据 LLM 调用。
+    opinion_assessment_mode: str = "llm_as_judge"
+    # llm_as_judge 在模拟中生成 current honest belief，并由本地 FLAN-T5-Large 评分。
     opinion_assessment_interval: int = 5
+    opinion_flan_model_name: str = "google/flan-t5-large"
+    # llm_voting 仅在模拟结束后执行，每个窗口固定覆盖十个时间步。
+    opinion_voting_window_size: int = 10
+    opinion_voter_count: int = 10
+    # 结束后投票独立限峰，避免单账户持续并发触发上游限流和服务熔断。
+    opinion_voting_max_concurrent_requests: int = 3
+    opinion_voting_request_interval_seconds: float = 1.0
+    # 没有线上发帖或评论的窗口直接记为不可评测，不发送无意义请求。
+    opinion_voting_skip_empty_windows: bool = True
+    # llm_as_judge 保留事件触发与间隔兜底行为。
     opinion_assessment_triggered_only: bool = True
     opinion_max_delta_per_assessment: float = 0.25
     opinion_assessment_recent_social: int = 5
@@ -202,3 +259,5 @@ class AgentConfig:
 
     # Micro-reflection
     micro_reflect_interval: int = 3
+    # 任务完成后的轨迹反思默认交给 LLM 总结。
+    trajectory_summary_llm_enabled: bool = True

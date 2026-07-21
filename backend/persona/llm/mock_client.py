@@ -33,6 +33,10 @@ class MockLLMClient(LLMClient):
             return self._social_action(user_text)
         if "线下对话结构化要求" in system_text:
             return self._conversation_action(user_text)
+        if "观念评测投票者" in system_text:
+            return self._opinion_vote(user_text)
+        if "current honest belief" in system_text:
+            return self._current_honest_belief(user_text)
         if "新闻观念调研" in system_text:
             return self._opinion_assessment(user_text)
         if "社交平台文本立场评分器" in system_text:
@@ -109,7 +113,15 @@ class MockLLMClient(LLMClient):
             return self._decision("未观察到公司，本轮等待。", "", {})
 
         if need_key == "relax":
-            bed_obj = self._nearest_object(objects, {"bed"}, state["position"])
+            observer_id = observation.get("observer_id")
+            # mock 只选择公共床或当前智能体自己的专属床。
+            usable_beds = [
+                obj
+                for obj in objects
+                if obj.get("kind") == "bed"
+                and obj.get("owner_agent_id") in (None, observer_id)
+            ]
+            bed_obj = self._nearest_object(usable_beds, {"bed"}, state["position"])
             playground_obj = self._nearest_object(objects, {"playground"}, state["position"])
             target = bed_obj or playground_obj
             if target and self._adjacent(state["position"], target["position"]):
@@ -179,11 +191,17 @@ class MockLLMClient(LLMClient):
     def _opinion_assessment(self, user_text: str) -> str:
         data = self._first_json_object(user_text)
         current = self._float(data.get("current_opinion"), OPINION_NEUTRAL)
-        seen_posts = ((data.get("context") or {}).get("seen_posts") or [])
-        if seen_posts:
-            avg = sum(self._float(post.get("opinion_index"), 0.0) for post in seen_posts) / len(seen_posts)
+        context = data.get("context") or {}
+        self_posts = context.get("self_authored_posts") or []
+        observed_posts = context.get("observed_posts") or context.get("seen_posts") or []
+        if self_posts:
+            avg = sum(self._float(post.get("opinion_index"), 0.0) for post in self_posts) / len(self_posts)
+            score = clamp_opinion(current * 0.55 + avg * 0.45)
+            evidence = [f"self_authored_post opinion_index={post.get('opinion_index')}" for post in self_posts[:3]]
+        elif observed_posts:
+            avg = sum(self._float(post.get("opinion_index"), 0.0) for post in observed_posts) / len(observed_posts)
             score = clamp_opinion(current * 0.75 + avg * 0.25)
-            evidence = [f"看到帖子 opinion_index={post.get('opinion_index')}" for post in seen_posts[:3]]
+            evidence = [f"observed_post opinion_index={post.get('opinion_index')}" for post in observed_posts[:3]]
         else:
             score = current
             evidence = ["无新增主题帖子"]
@@ -196,6 +214,48 @@ class MockLLMClient(LLMClient):
             },
             ensure_ascii=False,
         )
+
+    def _current_honest_belief(self, user_text: str) -> str:
+        """根据个人表达生成确定性的自然语言观念。"""
+
+        data = self._first_json_object(user_text)
+        evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+        posts = evidence.get("self_authored_posts") if isinstance(evidence.get("self_authored_posts"), list) else []
+        comments = evidence.get("self_authored_comments") if isinstance(evidence.get("self_authored_comments"), list) else []
+        reactions = evidence.get("likes_and_dislikes") if isinstance(evidence.get("likes_and_dislikes"), list) else []
+        parts = [str(item.get("content") or item.get("comment_content") or item.get("post_content") or "") for item in posts + comments + reactions if isinstance(item, dict)]
+        belief = "结合我过去的表达和互动，我目前保持审慎立场。"
+        if any(word in "\n".join(parts).lower() for word in ["支持", "support", "marriage equality"]):
+            belief = "结合我过去的表达和互动，我目前支持该议题陈述。"
+        if any(word in "\n".join(parts).lower() for word in ["反对", "oppose", "against"]):
+            belief = "结合我过去的表达和互动，我目前反对该议题陈述。"
+        return json.dumps(
+            {
+                "current_honest_belief": belief,
+                "evidence_ids": [str(item.get("id") or item.get("comment_id") or item.get("post_id")) for item in posts + comments + reactions if isinstance(item, dict)][:12],
+            },
+            ensure_ascii=False,
+        )
+
+    def _opinion_vote(self, user_text: str) -> str:
+        """根据线上发言返回配置选项中的一个精确字符串。"""
+
+        data = self._first_json_object(user_text)
+        options = data.get("options") if isinstance(data.get("options"), list) else []
+        option_roles = data.get("option_roles") if isinstance(data.get("option_roles"), dict) else {}
+        history = data.get("online_speech_history") if isinstance(data.get("online_speech_history"), list) else []
+        text = "\n".join(str(item.get("content") or "") for item in history if isinstance(item, dict))
+        lowered = text.lower()
+        if any(word in lowered for word in ["不支持", "反对", "质疑", "怀疑", "oppose", "against", "should be illegal", "gay marriage ban"]):
+            expected_role = "oppose"
+        elif any(word in lowered for word in ["支持", "赞同", "同情", "励志", "相信", "support", "marriage equality", "should be legal", "same-sex marriage rights"]):
+            expected_role = "support"
+        else:
+            expected_role = "unknown"
+        # 角色映射由主题定义提供，mock 不根据选项文字猜测语义。
+        matching = [option for option in options if option_roles.get(option) == expected_role]
+        choice = matching[0] if matching else (options[0] if options else "")
+        return json.dumps({"choice": choice}, ensure_ascii=False)
 
     def _post_opinion_score(self, user_text: str) -> str:
         data = self._first_json_object(user_text)
@@ -225,16 +285,6 @@ class MockLLMClient(LLMClient):
                 "mediators": {
                     key: max(0.0, min(1.0, pressure))
                     for key in mediator_keys[:2]
-                },
-                "role_card_delta": {
-                    "summary": f"{need_key} 压力触发的轻量 mock 心理角色卡",
-                    "emotion_tone": "谨慎、略紧张",
-                    "cognition": ["更关注与当前需求有关的信息。"],
-                    "behavior": ["优先处理当前缺口对应的行动。"],
-                    "social_expression": ["表达更简短直接。"],
-                    "online_behavior": ["倾向于围绕当前关注主题表达低强度看法。"],
-                    "decision_bias": ["优先选择能缓解当前压力的动作。"],
-                    "constraints": ["不得编造未发生的经历。"],
                 },
                 "reason": "mock 根据有效压力生成心理中介。",
                 "evidence": [f"{need_key} pressure={pressure:.3f}"],

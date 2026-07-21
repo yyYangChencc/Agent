@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from persona.logger import get_logger
+
 if TYPE_CHECKING:
     from persona.agents.agent import Agent
     from persona.conversation.session import ConversationMessage, ConversationSession
+
+
+logger = get_logger(__name__)
 
 
 def apply_need_delta(
@@ -301,9 +306,40 @@ def _event_tick(agent: "Agent", tick: int | None) -> int:
 
 
 def _append_need_event(agent: "Agent", event: dict) -> None:
+    episode_id = str(getattr(agent, "_current_episode_id", "") or "")
+    if episode_id and not event.get("episode_id"):
+        event["episode_id"] = episode_id
     agent.need_event_log.append(event)
     if len(agent.need_event_log) > 500:
         agent.need_event_log = agent.need_event_log[-500:]
+
+    pending = getattr(agent, "_pending_need_events", None)
+    if not isinstance(pending, list):
+        pending = []
+        agent._pending_need_events = pending
+    pending.append(dict(event))
+    if len(pending) > 500:
+        del pending[:-500]
+
+    mem = getattr(agent, "mem", None)
+    if mem is None or not hasattr(mem, "store_need_event"):
+        return
+    try:
+        mem.store_need_event(agent.id, event, episode_id=episode_id)
+    except Exception as exc:
+        # 记忆持久化失败不能回滚已经发生的需求变化。
+        logger.warning("[%s] 需求事件写入记忆失败: %s", agent.id, exc, exc_info=True)
+
+
+def consume_pending_need_events(agent: "Agent") -> list[dict]:
+    """读取并清空尚未被动作经历消费的需求事件。"""
+
+    pending = getattr(agent, "_pending_need_events", None)
+    if not isinstance(pending, list) or not pending:
+        return []
+    events = [dict(event) for event in pending if isinstance(event, dict)]
+    pending.clear()
+    return events
 
 
 def _mark_positive_need_tick(agent: "Agent", need_key: str, delta: float, tick: int) -> None:

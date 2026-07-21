@@ -31,6 +31,15 @@ export function AgentCharts({ history }: Props) {
     () => history.map((p) => ({ tick: p.tick, val: emotionIndex(p.emotion), emotion: p.emotion })),
     [history],
   )
+  const votingData = useMemo(
+    () => history.filter((point) => point.opinion_voting_choice_counts !== null),
+    [history],
+  )
+  const votingOptions = useMemo(
+    () => Array.from(new Set(votingData.flatMap((point) => Object.keys(point.opinion_voting_choice_counts ?? {})))),
+    [votingData],
+  )
+  const votingColors = ['#22c55e', '#ef4444', '#eab308', '#06b6d4', '#f97316', '#ec4899']
 
   if (history.length === 0) {
     return <div className="text-xs text-gray-500 text-center py-4">暂无历史数据</div>
@@ -77,21 +86,54 @@ export function AgentCharts({ history }: Props) {
         </ResponsiveContainer>
       </div>
 
-      {/* Opinion */}
+      {/* 当前智能体的连续观念值由列表选择结果决定。 */}
       <div>
-        <div className="text-xs text-gray-400 mb-1">观念 (Opinion)</div>
-        <ResponsiveContainer width="100%" height={90}>
+        <div className="text-xs text-gray-400 mb-1">观念变化 (Opinion)</div>
+        <ResponsiveContainer width="100%" height={110}>
           <LineChart data={history} margin={CHART_MARGIN}>
             <XAxis dataKey="tick" tick={false} />
-            <YAxis domain={[-1, 1]} tick={{ fontSize: 9, fill: '#9ca3af' }} />
+            <YAxis domain={[-1, 1]} ticks={[-1, 0, 1]} tick={{ fontSize: 9, fill: '#9ca3af' }} />
             <Tooltip
               contentStyle={tooltipStyle}
               formatter={(v: number) => [v.toFixed(3), 'opinion']}
               labelFormatter={(l) => `t=${l}`}
             />
-            <Line type="monotone" dataKey="opinion" name="观念" stroke="#a78bfa" dot={false} strokeWidth={1.5} />
+            <Line type="monotone" dataKey="opinion" name="观念" stroke="#a78bfa" dot={false} strokeWidth={2} />
           </LineChart>
         </ResponsiveContainer>
+      </div>
+
+      {/* Opinion voting */}
+      <div>
+        <div className="text-xs text-gray-400 mb-1">观念投票 (LLM Voting)</div>
+        {votingData.length === 0 ? (
+          <div className="h-[90px] flex items-center justify-center text-xs text-gray-500">暂无投票数据</div>
+        ) : (
+          <ResponsiveContainer width="100%" height={110}>
+            <LineChart data={votingData} margin={CHART_MARGIN}>
+              <XAxis dataKey="tick" tick={false} />
+              <YAxis domain={[0, 'auto']} allowDecimals={false} tick={{ fontSize: 9, fill: '#9ca3af' }} />
+              <Tooltip
+                contentStyle={tooltipStyle}
+                formatter={(v: number, name: string) => [v, name]}
+                labelFormatter={(l) => `t=${l}`}
+              />
+              <Legend wrapperStyle={{ fontSize: 10 }} />
+              {votingOptions.map((option, index) => (
+                <Line
+                  key={option}
+                  type="monotone"
+                  dataKey={(point: AgentHistoryPoint) => point.opinion_voting_choice_counts?.[option] ?? 0}
+                  name={option}
+                  stroke={votingColors[index % votingColors.length]}
+                  dot
+                  strokeWidth={1.5}
+                  connectNulls
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )}
       </div>
 
       {/* Emotion */}
