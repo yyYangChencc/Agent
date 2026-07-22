@@ -65,7 +65,7 @@ class FlanT5OpinionScorer:
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self._model = AutoModelForSeq2SeqLM.from_pretrained(
                 self.model_name,
-                dtype=torch.float16,
+                dtype=torch.float32,
             ).to(self._device)
             self._model.eval()
 

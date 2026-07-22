@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--version", choices=sorted(EXPERIMENT_VERSIONS), default="full")
     parser.add_argument("--scenario", choices=list_scenarios(), default="default_town")
+    parser.add_argument(
+        "--flan-model",
+        default=None,
+        help="覆盖场景中的 FLAN 模型名称或本地模型目录",
+    )
     parser.add_argument("--output-base", default=str(Path(__file__).parent / "history"))
     parser.add_argument(
         "--opinion-mode",
@@ -54,6 +59,10 @@ async def run_experiment(args: argparse.Namespace) -> Path:
     runtime = scenario.build_runtime(history_recorder=recorder, reset_memory=True, config=config, llm_client=llm_client)
     # 实验入口的显式观念模式优先于场景默认值，避免场景静默改变处理组。
     runtime.config.opinion_assessment_mode = args.opinion_mode
+    if args.flan_model:
+        # 命令行路径优先于场景绑定，便于在不同计算节点复用同一实验配置。
+        runtime.config.opinion_flan_model_name = args.flan_model
+        runtime.world.opinion_assessor.flan_scorer.model_name = args.flan_model
     runtime.config.post_opinion_scoring_mode = "rule" if args.opinion_mode == "rule" else "llm"
     _apply_experiment_version(runtime, args.version)
     # 命令行实验一旦进入运行流程，就创建输出目录并保存配置快照。
