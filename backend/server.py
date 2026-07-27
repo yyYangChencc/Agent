@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from persona.logger import setup_logging
 from persona.logger import get_logger
+from persona.llm.debug_trace import LLMTraceStore
 from persona.runtime import SimulationRuntime
 from persona.history_recorder import HistoryRecorder
 from persona.run_archive import archive_runtime_run
@@ -338,6 +339,28 @@ async def agent_trajectory(agent_id: str):
         "agent_id": agent.id,
         "count": len(trajectory),
         "trajectory": trajectory,
+    }
+
+
+@app.get("/api/agents/{agent_id}/llm-debug")
+async def agent_llm_debug(agent_id: str, tick: int):
+    """按智能体和时间步返回完整 LLM 调试记录。"""
+
+    agent, error = _agent_or_error(agent_id)
+    if error is not None:
+        return error
+    if tick < 0:
+        return JSONResponse({"error": "tick must be greater than or equal to 0"}, status_code=400)
+    trace_store = getattr(rt.world, "llm_trace_store", None)
+    if not isinstance(trace_store, LLMTraceStore):
+        return JSONResponse({"error": "LLM debug trace is not available"}, status_code=503)
+    trace_store.prune(int(rt.world.time))
+    calls = trace_store.records_for(agent.id, tick)
+    return {
+        "agent_id": agent.id,
+        "tick": tick,
+        "count": len(calls),
+        "calls": calls,
     }
 
 

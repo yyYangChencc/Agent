@@ -109,6 +109,7 @@ def _create_agents(runtime: SimulationRuntime, agent_specs: list[dict[str, Any]]
             agent_id,
             list(item["position"]),
             speaking_style=str(item.get("speaking_style") or ""),
+            dataset_user_profile=deepcopy(item.get("dataset_user_profile") or {}),
             salary=float(item.get("salary", 0.0)),
         )
     return agents
@@ -183,6 +184,14 @@ def _place_objects(runtime: SimulationRuntime, object_specs: list[dict[str, Any]
         kind = item["kind"]
         params = dict(item.get("params") or {})
         builder = OBJECT_BUILDERS[kind]
+        object_regions = runtime.world.map_design.get("object_regions", {})
+        region = object_regions.get(item["id"], {}) if isinstance(object_regions, dict) else {}
+        # 场景对象协议统一传递占地、入口和素材键；旧场景未声明时保持单格布局。
+        layout = {
+            "footprint": deepcopy(item.get("footprint")),
+            "entrance": deepcopy(region.get("entrance")) if isinstance(region, dict) else None,
+            "sprite_key": item.get("sprite_key"),
+        }
         if kind == "food":
             builder(item["id"], params.get("num", 1), params.get("provide", 20), list(item["position"]), runtime.world)
         elif kind == "bed":
@@ -197,6 +206,7 @@ def _place_objects(runtime: SimulationRuntime, object_specs: list[dict[str, Any]
                 runtime.world,
                 free_num=params.get("free_num", 1),
                 owner_agent_id=owner_agent_id,
+                **layout,
             )
         elif kind == "company":
             builder(
@@ -205,6 +215,7 @@ def _place_objects(runtime: SimulationRuntime, object_specs: list[dict[str, Any]
                 runtime.world,
                 salary=params.get("salary", 10),
                 relax_cost=params.get("relax_cost", 10),
+                **layout,
             )
         elif kind == "food_shop":
             builder(
@@ -214,6 +225,7 @@ def _place_objects(runtime: SimulationRuntime, object_specs: list[dict[str, Any]
                 food_num=params.get("food_num", 10),
                 provide=params.get("provide", 20),
                 price=params.get("price", 5),
+                **layout,
             )
         elif kind == "playground":
             builder(
@@ -222,6 +234,7 @@ def _place_objects(runtime: SimulationRuntime, object_specs: list[dict[str, Any]
                 runtime.world,
                 provide=params.get("provide", 10),
                 price=params.get("price", 3),
+                **layout,
             )
         else:
             builder(item["id"], list(item["position"]), runtime.world)
@@ -329,16 +342,39 @@ def _seed_memories(runtime: SimulationRuntime, spec: dict[str, Any], agents: dic
     else:
         raise ValueError(f"unsupported facility_memory_scope: {facility_scope}")
 
+    scenario_memories: list[dict[str, Any]] = []
     for item in spec.get("memories") or []:
-        runtime.mem.store_agent_memory(
-            item["agent_id"],
-            item["content"],
-            memory_type=item.get("memory_type", "system"),
-            task=item.get("task"),
-            object_id=item.get("object_id"),
-            importance=float(item.get("importance", 0.9)),
-            confidence=float(item.get("confidence", 1.0)),
+        # 除核心字段外完整保留数据集来源、时间、分段和经历标识。
+        metadata = {
+            key: deepcopy(value)
+            for key, value in item.items()
+            if key not in {"agent_id", "content"}
+        }
+        metadata.setdefault("memory_type", "system")
+        metadata["importance"] = float(metadata.get("importance", 0.9))
+        metadata["confidence"] = float(metadata.get("confidence", 1.0))
+        scenario_memories.append(
+            {
+                "agent_id": item["agent_id"],
+                "content": item["content"],
+                **metadata,
+            }
         )
+    if scenario_memories:
+        if hasattr(runtime.mem, "store_agent_memories"):
+            runtime.mem.store_agent_memories(scenario_memories)
+        else:
+            for record in scenario_memories:
+                metadata = {
+                    key: value
+                    for key, value in record.items()
+                    if key not in {"agent_id", "content"}
+                }
+                runtime.mem.store_agent_memory(
+                    record["agent_id"],
+                    record["content"],
+                    **metadata,
+                )
 
 
 def _build_facility_memory(

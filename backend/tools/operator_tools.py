@@ -117,14 +117,6 @@ class Operator:
     def _in_bounds(self, x: int, y: int) -> bool:
         return 0 <= x < self.world.map.height and 0 <= y < self.world.map.width
 
-    def _adjacent_empty_cell(self, position: list[int]) -> list[int] | None:
-        bx, by = position
-        for dx, dy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]:
-            nx, ny = bx + dx, by + dy
-            if self._in_bounds(nx, ny) and self.world.map.is_empty(nx, ny):
-                return [nx, ny]
-        return None
-
     def _agent_or_error(self, operator_ID: str):
         """统一读取实体智能体，避免各工具重复判断。"""
 
@@ -144,14 +136,16 @@ class Operator:
         return obj, None
 
     def _within_interact_distance(self, agent, target) -> bool:
-        """判断智能体是否处于通用交互距离内。"""
+        """按目标完整占地判断智能体是否处于通用交互距离内。"""
 
-        target_pos = target.get_position()
         agent_pos = agent.get_position()
-        return (
+        footprint = getattr(target, "footprint", [target.get_position()])
+        return any(
             (target_pos[0] - agent_pos[0]) ** 2
             + (target_pos[1] - agent_pos[1]) ** 2
-        ) <= agent.config.eat_distance_sq
+            <= agent.config.eat_distance_sq
+            for target_pos in footprint
+        )
 
     @staticmethod
     def _remember_tool(agent, tool_name: str) -> None:
@@ -519,7 +513,7 @@ class Operator:
                 agent.inside_building_id = None
                 return "建筑不存在，已强制退出"
             target = self.world.objects[building_id]
-            exit_pos = self._adjacent_empty_cell(target.position)
+            exit_pos = self.world.find_empty_cell_around_object(target)
             if exit_pos is None:
                 return "建筑周围没有空位，无法离开"
             result = target.exit(agent)

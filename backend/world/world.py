@@ -57,9 +57,114 @@ class World:
         self.map.place(x, y, agent.id)
 
     def add_object(self, obj):
+        """校验并登记对象占用的全部地图格。"""
+
+        if obj.id in self.objects:
+            raise ValueError(f"duplicate object id: {obj.id}")
+        if (
+            not isinstance(obj.position, list)
+            or len(obj.position) != 2
+            or any(isinstance(value, bool) or not isinstance(value, int) for value in obj.position)
+        ):
+            raise ValueError(f"object position must be [row, col]: {obj.id}")
+        entrance = getattr(obj, "entrance", None)
+        if entrance is not None:
+            if (
+                not isinstance(entrance, list)
+                or len(entrance) != 2
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in entrance)
+            ):
+                raise ValueError(f"object entrance must be [row, col]: {obj.id}")
+            if entrance[0] < 0 or entrance[1] < 0 or entrance[0] >= self.map.height or entrance[1] >= self.map.width:
+                raise ValueError(f"object entrance out of bounds {entrance}: {obj.id}")
+        sprite_key = getattr(obj, "sprite_key", None)
+        if sprite_key is not None and (not isinstance(sprite_key, str) or not sprite_key):
+            raise ValueError(f"object sprite_key must be None or a non-empty string: {obj.id}")
+        footprint = getattr(obj, "footprint", None)
+        if not isinstance(footprint, list) or not footprint:
+            raise ValueError(f"object footprint must be a non-empty list: {obj.id}")
+        normalized: list[list[int]] = []
+        seen: set[tuple[int, int]] = set()
+        for cell in footprint:
+            if (
+                not isinstance(cell, list)
+                or len(cell) != 2
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in cell)
+            ):
+                raise ValueError(f"object footprint cell must be [row, col]: {obj.id}")
+            row, col = cell
+            key = (row, col)
+            if key in seen:
+                raise ValueError(f"object footprint contains duplicate cell {cell}: {obj.id}")
+            if row < 0 or col < 0 or row >= self.map.height or col >= self.map.width:
+                raise ValueError(f"object footprint cell out of bounds {cell}: {obj.id}")
+            if not self.map.is_empty(row, col):
+                occupied_id = self.map.get_e(row, col)
+                # 旧单格场景允许对象覆盖出生点；显式 footprint 始终执行严格碰撞校验。
+                if occupied_id in self.agents and not getattr(obj, "has_explicit_footprint", False):
+                    logger.warning(
+                        "[World] legacy object %s overwrites agent %s at %s",
+                        obj.id,
+                        occupied_id,
+                        cell,
+                    )
+                    seen.add(key)
+                    normalized.append([row, col])
+                    continue
+                raise ValueError(
+                    f"object footprint cell {cell} is occupied by {occupied_id}: {obj.id}"
+                )
+            seen.add(key)
+            normalized.append([row, col])
+        if tuple(obj.position) not in seen:
+            raise ValueError(f"object position must be included in footprint: {obj.id}")
+
+        obj.footprint = normalized
         self.objects[obj.id] = obj
-        x, y = obj.position
-        self.map.place(x, y, obj.id)
+        for row, col in normalized:
+            self.map.place(row, col, obj.id)
+
+    def remove_object(self, obj) -> None:
+        """从对象表和全部占地格中移除指定对象。"""
+
+        for row, col in getattr(obj, "footprint", [obj.position]):
+            if self.map.get_e(row, col) == obj.id:
+                self.map.remove(row, col)
+        self.objects.pop(obj.id, None)
+
+    def find_empty_cell_around_object(self, obj) -> list[int] | None:
+        """按入口距离从对象完整占地外围寻找空格。"""
+
+        footprint = {tuple(cell) for cell in getattr(obj, "footprint", [obj.position])}
+        reference = tuple(getattr(obj, "entrance", None) or obj.position)
+        candidates: set[tuple[int, int]] = set()
+        for row, col in footprint:
+            for row_offset, col_offset in (
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (-1, 1),
+                (1, -1),
+                (1, 1),
+            ):
+                cell = (row + row_offset, col + col_offset)
+                if cell in footprint:
+                    continue
+                if 0 <= cell[0] < self.map.height and 0 <= cell[1] < self.map.width:
+                    candidates.add(cell)
+        for row, col in sorted(
+            candidates,
+            key=lambda cell: (
+                (cell[0] - reference[0]) ** 2 + (cell[1] - reference[1]) ** 2,
+                cell[0],
+                cell[1],
+            ),
+        ):
+            if self.map.is_empty(row, col):
+                return [row, col]
+        return None
 
     def _allocate_episode_id(self) -> str:
         """分配进程内全局递增的经历链标识。"""
@@ -217,7 +322,7 @@ class World:
                 obs = observe(agent, agent.config.observation_radius)
                 action = await agent.astep(obs)
                 reward = await self.aexecute(agent, action)
-                agent.append_trajectory(obs, action, reward)
+                agent.append_trajectory(obs, action, reward, action_result=dict(agent.last_action))
                 if not agent.sleeping and agent.id not in sleeping_at_tick_start:
                     await agent.aget_reflect()
                     agent.tick_satisfaction()
@@ -245,6 +350,10 @@ class World:
         assessment_elapsed = time.perf_counter() - phase_start
 
         phase_start = time.perf_counter()
+        await self._compact_short_term_memories(agents)
+        short_term_compaction_elapsed = time.perf_counter() - phase_start
+
+        phase_start = time.perf_counter()
         self._maintain_agent_memories()
         memory_maintenance_elapsed = time.perf_counter() - phase_start
 
@@ -254,7 +363,7 @@ class World:
         history_elapsed = time.perf_counter() - phase_start
 
         logger.info(
-            "[Perf] tick=%d world_total=%.3fs news=%.3fs building=%.3fs agent_tick=%.3fs conversation=%.3fs assessment=%.3fs history=%.3fs memory_maintenance=%.3fs agents=%d",
+            "[Perf] tick=%d world_total=%.3fs news=%.3fs building=%.3fs agent_tick=%.3fs conversation=%.3fs assessment=%.3fs short_memory=%.3fs history=%.3fs memory_maintenance=%.3fs agents=%d",
             self.time,
             time.perf_counter() - step_start,
             news_elapsed,
@@ -262,6 +371,7 @@ class World:
             agent_tick_elapsed,
             conversation_elapsed,
             assessment_elapsed,
+            short_term_compaction_elapsed,
             history_elapsed,
             memory_maintenance_elapsed,
             len(agents),
@@ -410,6 +520,24 @@ class World:
             # 运行中只执行 honest belief + FLAN 评测；投票在模拟结束后统一执行。
             await self.opinion_assessor.aassess_all(agents, self.time)
 
+    async def _compact_short_term_memories(self, agents) -> None:
+        """评测结束后并发压缩达到 tick 上限的短期记忆。"""
+
+        async def _compact(agent):
+            if not hasattr(agent, "acompact_short_term_memory_if_needed"):
+                return False
+            return await agent.acompact_short_term_memory_if_needed()
+
+        results = await asyncio.gather(*[_compact(agent) for agent in agents], return_exceptions=True)
+        for agent, result in zip(agents, results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "[World] short-term memory compaction failed for %s at tick=%d: %s",
+                    agent.id,
+                    self.time,
+                    result,
+                )
+
     def _maintain_agent_memories(self) -> None:
         """每个 tick 末执行轻量记忆维护。
 
@@ -468,6 +596,14 @@ class World:
             }
         )
         agent.last_action = action_summary
+        status = str(action_summary.get("execution_status") or "")
+        agent.add_history(
+            "action_result",
+            dict(action_summary),
+            action_tool=str(action_summary.get("tool") or ""),
+            success=False if status in {"tool_not_found", "tool_exception"} else None,
+            metadata={"episode_id": episode_id},
+        )
         self._store_action_memory(
             agent,
             decision,
@@ -528,6 +664,7 @@ class World:
                 "think": think,
                 "feedback": "",
                 "reward": None,
+                "execution_status": "no_action",
             }
             self._finalize_action_result(
                 agent,
@@ -550,6 +687,7 @@ class World:
                 "think": think,
                 "feedback": "tool not found",
                 "reward": None,
+                "execution_status": "tool_not_found",
             }
             self._finalize_action_result(
                 agent,
@@ -580,6 +718,7 @@ class World:
                     "think": think,
                     "feedback": "tool execution failed",
                     "reward": None,
+                    "execution_status": "tool_exception",
                 }
                 self._finalize_action_result(
                     agent,
@@ -646,6 +785,7 @@ class World:
                 "think": think,
                 "feedback": feedback,
                 "reward": reward,
+                "execution_status": "tool_returned",
             }
             self._finalize_action_result(
                 agent,

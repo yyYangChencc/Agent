@@ -328,6 +328,24 @@ class OpenAIClient(LLMClient):
         )
         return resp.data[0].embedding if resp is not None else []
 
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """使用一次兼容接口请求按原顺序生成一批 embedding。"""
+
+        if not texts:
+            return []
+        resp = _sync_request(
+            lambda: self._embedding_client.embeddings.create(model=self._config.embedding_model, input=texts),
+            circuit=self._embedding_circuit, kind="embedding", model=self._config.embedding_model,
+            base_url=self._embedding_base_url,
+            rate_retries=_non_negative_int(self._config.embedding_rate_limit_retries, 2),
+            rate_backoff=self._config.embedding_rate_limit_backoff_seconds,
+            server_retries=_non_negative_int(self._config.embedding_server_error_retries, 2),
+            server_backoff=self._config.embedding_server_error_backoff_seconds,
+        )
+        if resp is None:
+            return []
+        return [item.embedding for item in sorted(resp.data, key=lambda item: item.index)]
+
     def generate(self, system: str, user: str, *, response_format: dict | None = None) -> str:
         resp = _sync_request(
             lambda: self._client.chat.completions.create(**_chat_kwargs(self._config, system, user, response_format)),
@@ -429,6 +447,24 @@ class AsyncOpenAIClient(LLMClient):
         )
         return resp.data[0].embedding if resp is not None else []
 
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """同步初始化阶段使用同一批量 embedding 契约。"""
+
+        if not texts:
+            return []
+        resp = _sync_request(
+            lambda: self._embedding_client.embeddings.create(model=self._config.embedding_model, input=texts),
+            circuit=self._embedding_circuit, kind="embedding", model=self._config.embedding_model,
+            base_url=self._embedding_base_url,
+            rate_retries=_non_negative_int(self._config.embedding_rate_limit_retries, 2),
+            rate_backoff=self._config.embedding_rate_limit_backoff_seconds,
+            server_retries=_non_negative_int(self._config.embedding_server_error_retries, 2),
+            server_backoff=self._config.embedding_server_error_backoff_seconds,
+        )
+        if resp is None:
+            return []
+        return [item.embedding for item in sorted(resp.data, key=lambda item: item.index)]
+
     async def agenerate(self, system: str, user: str, *, response_format: dict | None = None) -> str:
         resp = await _async_request(
             lambda: self._aclient.chat.completions.create(**_chat_kwargs(self._config, system, user, response_format)),
@@ -450,3 +486,22 @@ class AsyncOpenAIClient(LLMClient):
             total_timeout=self._config.embedding_total_timeout_seconds,
         )
         return resp.data[0].embedding if resp is not None else []
+
+    async def aget_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """异步批量接口保持输入与输出顺序一致。"""
+
+        if not texts:
+            return []
+        resp = await _async_request(
+            lambda: self._a_embedding_client.embeddings.create(model=self._config.embedding_model, input=texts),
+            semaphore=self._current_embedding_semaphore(), circuit=self._embedding_circuit, kind="embedding",
+            model=self._config.embedding_model, base_url=self._embedding_base_url,
+            rate_retries=_non_negative_int(self._config.embedding_rate_limit_retries, 2),
+            rate_backoff=self._config.embedding_rate_limit_backoff_seconds,
+            server_retries=_non_negative_int(self._config.embedding_server_error_retries, 2),
+            server_backoff=self._config.embedding_server_error_backoff_seconds,
+            total_timeout=self._config.embedding_total_timeout_seconds,
+        )
+        if resp is None:
+            return []
+        return [item.embedding for item in sorted(resp.data, key=lambda item: item.index)]

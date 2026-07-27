@@ -3,6 +3,7 @@ import hashlib
 import json
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from persona.agent_memory.controller import MemoryController
@@ -38,6 +39,8 @@ CONTEXT_MEMORY_TYPES = {
     "social": ["social", "semantic", "episodic", "reflective"],
     "conversation": ["social", "episodic", "reflective", "semantic"],
 }
+EMBEDDING_BATCH_MAX_ITEMS = 32
+EMBEDDING_BATCH_MAX_UTF8_BYTES = 24000
 
 
 class _InMemoryCollection:
@@ -211,6 +214,7 @@ class MultiAgentMemoryManager:
         后续 API 展示、访问统计和冲突调解。
         """
 
+        require_embedding = bool(metadata.pop("require_embedding", False))
         structured_metadata = dict(metadata)
         full_metadata = self._normalize_metadata(agent_id, world_time, dict(metadata))
         raw_metadata = structured_metadata
@@ -224,6 +228,10 @@ class MultiAgentMemoryManager:
         collection = self.get_agent_collection(agent_id)
         embedding = self._get_embedding(memory_text)
         if not embedding:
+            if require_embedding:
+                raise RuntimeError(
+                    f"required semantic memory embedding failed: agent_id={agent_id} memory_id={memory_id}"
+                )
             logger.warning("[%s] 获取 embedding 失败，仅保留 SQLite 长期记忆: %r", agent_id, memory_text[:60])
             self._invalidate_retrieval_cache(agent_id)
             return memory_id
@@ -235,14 +243,124 @@ class MultiAgentMemoryManager:
                 ids=[memory_id],
             )
         except Exception as exc:
+            if require_embedding:
+                raise RuntimeError(
+                    f"required semantic memory upsert failed: agent_id={agent_id} memory_id={memory_id}"
+                ) from exc
             # 向量索引失败时保留已写入的 SQLite 长期记忆，避免中断智能体流程。
             logger.warning("[%s] 向量记忆写入失败，仅保留 SQLite 长期记忆: %s", agent_id, exc, exc_info=True)
         self._invalidate_retrieval_cache(agent_id)
         return memory_id
 
+    def store_agent_memories(self, records: list[dict[str, Any]]) -> list[str]:
+        """批量双写语义记忆，并对必需记录执行失败即中止。"""
+
+        prepared: list[dict[str, Any]] = []
+        memory_ids: list[str] = []
+        for source_record in records:
+            record = deepcopy(source_record)
+            agent_id = str(record.pop("agent_id"))
+            memory_text = str(record.pop("content"))
+            world_time = int(record.pop("world_time", 0) or 0)
+            require_embedding = bool(record.pop("require_embedding", False))
+            raw_metadata = dict(record)
+            full_metadata = self._normalize_metadata(agent_id, world_time, dict(record))
+            structured_metadata = {**raw_metadata, **full_metadata}
+            for key, value in raw_metadata.items():
+                if isinstance(value, (list, tuple, dict)):
+                    structured_metadata[key] = value
+            memory_id = self._derived_memory_id(agent_id, memory_text, world_time, full_metadata)
+            # 先写 SQLite 事实底座，重试时由稳定 memory_id 保持幂等。
+            self._record_derived_memory(
+                agent_id,
+                memory_id,
+                memory_text,
+                world_time,
+                structured_metadata,
+            )
+            prepared.append(
+                {
+                    "agent_id": agent_id,
+                    "content": memory_text,
+                    "metadata": full_metadata,
+                    "memory_id": memory_id,
+                    "require_embedding": require_embedding,
+                }
+            )
+            memory_ids.append(memory_id)
+
+        for batch in self._memory_embedding_batches(prepared):
+            texts = [str(item["content"]) for item in batch]
+            embeddings = self._get_embeddings_batch(texts)
+            if len(embeddings) != len(batch):
+                embeddings = [[] for _ in batch]
+            values_by_agent: dict[str, list[tuple[dict[str, Any], list[float]]]] = {}
+            for item, embedding in zip(batch, embeddings):
+                normalized_embedding = list(embedding or [])
+                if not normalized_embedding:
+                    if item["require_embedding"]:
+                        raise RuntimeError(
+                            f"required semantic memory embedding failed: "
+                            f"agent_id={item['agent_id']} memory_id={item['memory_id']}"
+                        )
+                    logger.warning(
+                        "[%s] 批量 embedding 失败，仅保留 SQLite 长期记忆: %r",
+                        item["agent_id"],
+                        str(item["content"])[:60],
+                    )
+                    continue
+                values_by_agent.setdefault(str(item["agent_id"]), []).append((item, normalized_embedding))
+
+            for agent_id, values in values_by_agent.items():
+                collection = self.get_agent_collection(agent_id)
+                try:
+                    collection.upsert(
+                        embeddings=[embedding for _, embedding in values],
+                        documents=[str(item["content"]) for item, _ in values],
+                        metadatas=[item["metadata"] for item, _ in values],
+                        ids=[str(item["memory_id"]) for item, _ in values],
+                    )
+                except Exception as exc:
+                    if any(bool(item["require_embedding"]) for item, _ in values):
+                        raise RuntimeError(
+                            f"required semantic memory batch upsert failed: agent_id={agent_id}"
+                        ) from exc
+                    logger.warning(
+                        "[%s] 批量向量记忆写入失败，仅保留 SQLite 长期记忆: %s",
+                        agent_id,
+                        exc,
+                        exc_info=True,
+                    )
+                self._invalidate_retrieval_cache(agent_id)
+        return memory_ids
+
+    def _memory_embedding_batches(self, records: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """同时限制单批记录数和 UTF-8 总字节数。"""
+
+        batches: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_bytes = 0
+        for record in records:
+            text_bytes = len(str(record["content"]).encode("utf-8"))
+            if text_bytes > EMBEDDING_BATCH_MAX_UTF8_BYTES:
+                raise ValueError("single semantic memory exceeds embedding batch byte limit")
+            if current and (
+                len(current) >= EMBEDDING_BATCH_MAX_ITEMS
+                or current_bytes + text_bytes > EMBEDDING_BATCH_MAX_UTF8_BYTES
+            ):
+                batches.append(current)
+                current = []
+                current_bytes = 0
+            current.append(record)
+            current_bytes += text_bytes
+        if current:
+            batches.append(current)
+        return batches
+
     async def astore_agent_memory(self, agent_id: str, memory_text: str, world_time: int = 0, **metadata) -> str:
         """异步写入长期语义记忆，并保持与同步路径相同的 SQLite 双写行为。"""
 
+        require_embedding = bool(metadata.pop("require_embedding", False))
         structured_metadata = dict(metadata)
         full_metadata = self._normalize_metadata(agent_id, world_time, dict(metadata))
         raw_metadata = structured_metadata
@@ -256,6 +374,10 @@ class MultiAgentMemoryManager:
         collection = self.get_agent_collection(agent_id)
         embedding = await self._aget_embedding(memory_text)
         if not embedding:
+            if require_embedding:
+                raise RuntimeError(
+                    f"required semantic memory embedding failed: agent_id={agent_id} memory_id={memory_id}"
+                )
             logger.warning("[%s] 获取 embedding 失败，仅保留 SQLite 长期记忆: %r", agent_id, memory_text[:60])
             self._invalidate_retrieval_cache(agent_id)
             return memory_id
@@ -267,6 +389,10 @@ class MultiAgentMemoryManager:
                 ids=[memory_id],
             )
         except Exception as exc:
+            if require_embedding:
+                raise RuntimeError(
+                    f"required semantic memory upsert failed: agent_id={agent_id} memory_id={memory_id}"
+                ) from exc
             # 异步路径使用相同的 SQLite 降级契约。
             logger.warning("[%s] 异步向量记忆写入失败，仅保留 SQLite 长期记忆: %s", agent_id, exc, exc_info=True)
         self._invalidate_retrieval_cache(agent_id)
@@ -1120,6 +1246,36 @@ class MultiAgentMemoryManager:
             with self._embedding_cache_lock:
                 self._embedding_cache[text] = embedding
         return embedding
+
+    def _get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量获取 embedding，并与单条路径共享原文缓存。"""
+
+        results: list[list[float] | None] = [None for _ in texts]
+        missing_texts: list[str] = []
+        missing_indexes: list[int] = []
+        with self._embedding_cache_lock:
+            for index, text in enumerate(texts):
+                cached = self._embedding_cache.get(text)
+                if cached is None:
+                    missing_texts.append(text)
+                    missing_indexes.append(index)
+                else:
+                    results[index] = cached
+        if missing_texts:
+            try:
+                fetched = self.llm_client.get_embeddings_batch(missing_texts)
+            except Exception as exc:
+                logger.error("批量获取 embedding 失败: %s", exc, exc_info=True)
+                fetched = []
+            if len(fetched) != len(missing_texts):
+                fetched = [[] for _ in missing_texts]
+            with self._embedding_cache_lock:
+                for index, text, embedding in zip(missing_indexes, missing_texts, fetched):
+                    normalized = list(embedding or [])
+                    results[index] = normalized
+                    if normalized:
+                        self._embedding_cache[text] = normalized
+        return [list(result or []) for result in results]
 
     async def _aget_embedding(self, text: str) -> list[float]:
         """异步获取 embedding，并复用同一份进程内缓存。"""

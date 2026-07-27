@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from persona.logger import get_logger
 from persona.opinion.scale import classify_voting_stance
 from persona.llm.interface import JSON_OBJECT_RESPONSE_FORMAT
+from persona.llm.debug_trace import annotate_current_llm_trace, trace_llm_call
 from persona.llm.json_utils import parse_json_object
 from persona.opinion.scale import (
     VOTING_POLARIZATION_ROLES,
@@ -69,7 +70,24 @@ class OpinionAssessmentCoordinator:
         context = self._build_context(agent, topic, tick)
         if not self._context_has_assessment_evidence(context):
             return self._unchanged_assessment(agent, tick, topic, context=context, reason="no_window_evidence")
-        assessment_payload = self._assess_with_configured_method(agent, topic, context)
+        try:
+            assessment_payload = self._assess_with_configured_method(agent, topic, context)
+        except Exception as exc:
+            # 上游 LLM 或 FLAN 失败时跳过本轮，禁止用另一套量表污染 opinion。
+            logger.warning(
+                "[OpinionAssessment] assessment failed for %s topic=%s: %s; skip this round",
+                agent.id,
+                topic,
+                exc,
+            )
+            return self._unchanged_assessment(
+                agent,
+                tick,
+                topic,
+                context=context,
+                reason="llm_assessment_failed",
+                source="skipped_llm_failure",
+            )
         return self._store_assessment(agent, tick, topic, context, assessment_payload)
 
     async def aassess_agent(self, agent: "Agent", tick: int) -> dict:
@@ -81,7 +99,24 @@ class OpinionAssessmentCoordinator:
         context = await self._abuild_context(agent, topic, tick)
         if not self._context_has_assessment_evidence(context):
             return self._unchanged_assessment(agent, tick, topic, context=context, reason="no_window_evidence")
-        assessment_payload = await self._aassess_with_configured_method(agent, topic, context)
+        try:
+            assessment_payload = await self._aassess_with_configured_method(agent, topic, context)
+        except Exception as exc:
+            # 异步路径与同步路径保持相同的跳过语义。
+            logger.warning(
+                "[OpinionAssessment] async assessment failed for %s topic=%s: %s; skip this round",
+                agent.id,
+                topic,
+                exc,
+            )
+            return self._unchanged_assessment(
+                agent,
+                tick,
+                topic,
+                context=context,
+                reason="llm_assessment_failed",
+                source="skipped_llm_failure",
+            )
         return self._store_assessment(agent, tick, topic, context, assessment_payload)
 
     def _store_assessment(
@@ -266,7 +301,12 @@ class OpinionAssessmentCoordinator:
                 if self._skip_empty_voting_window(speech_history):
                     voting_payload = self._empty_voting_payload(topic)
                 else:
-                    voting_payload = self._assess_with_llm_voting(agent, topic, speech_history)
+                    voting_payload = self._assess_with_llm_voting(
+                        agent,
+                        topic,
+                        speech_history,
+                        trace_tick=window_end,
+                    )
                 all_results.append(
                     self._store_voting(
                         agent,
@@ -288,7 +328,12 @@ class OpinionAssessmentCoordinator:
         if self._skip_empty_voting_window(speech_history):
             voting_payload = self._empty_voting_payload(topic)
         else:
-            voting_payload = await self._aassess_with_llm_voting(agent, topic, speech_history)
+            voting_payload = await self._aassess_with_llm_voting(
+                agent,
+                topic,
+                speech_history,
+                trace_tick=window_end,
+            )
         return self._store_voting(
             agent,
             window_end,
@@ -319,6 +364,7 @@ class OpinionAssessmentCoordinator:
         *,
         context: dict | None = None,
         reason: str,
+        source: str = "unchanged_no_new_evidence",
     ) -> dict:
         """无新证据时沿用当前 opinion，不调用 LLM，也不写入观念评测记忆。"""
 
@@ -327,7 +373,7 @@ class OpinionAssessmentCoordinator:
             "tick": tick,
             "topic": topic,
             "score": score,
-            "source": "unchanged_no_new_evidence",
+            "source": source,
             "confidence": 1.0,
             "reason": reason,
             "evidence": [],
@@ -337,30 +383,18 @@ class OpinionAssessmentCoordinator:
         }
 
     def _assess_with_configured_method(self, agent: "Agent", topic: str, context: dict) -> dict:
-        # 默认优先走 LLM；任何调用或解析异常都会回退到规则评测，避免中断 tick。
-        if self._assessment_mode() == "llm_as_judge" and self.llm is not None:
-            try:
-                return self._assess_with_llm(agent, topic, context)
-            except Exception as exc:
-                logger.warning(
-                    "[OpinionAssessment] LLM assessment failed for %s topic=%s: %s; fallback to rule",
-                    agent.id,
-                    topic,
-                    exc,
-                )
+        # llm_as_judge 使用单一量表；失败由调用方记录并跳过本轮。
+        if self._assessment_mode() == "llm_as_judge":
+            if self.llm is None:
+                raise RuntimeError("llm_as_judge requires an LLM client")
+            return self._assess_with_llm(agent, topic, context)
         return self._assess_with_rules(agent, topic, context)
 
     async def _aassess_with_configured_method(self, agent: "Agent", topic: str, context: dict) -> dict:
-        if self._assessment_mode() == "llm_as_judge" and self.llm is not None:
-            try:
-                return await self._aassess_with_llm(agent, topic, context)
-            except Exception as exc:
-                logger.warning(
-                    "[OpinionAssessment] async LLM assessment failed for %s topic=%s: %s; fallback to rule",
-                    agent.id,
-                    topic,
-                    exc,
-                )
+        if self._assessment_mode() == "llm_as_judge":
+            if self.llm is None:
+                raise RuntimeError("llm_as_judge requires an LLM client")
+            return await self._aassess_with_llm(agent, topic, context)
         return self._assess_with_rules(agent, topic, context)
 
     def _assessment_mode(self) -> str:
@@ -411,16 +445,40 @@ class OpinionAssessmentCoordinator:
         # 通用 LLM 只生成自然语言观念，评分完全交给本地 FLAN 分类器。
         topic_definition = get_opinion_topic_definition(topic)
         system, user = self._honest_belief_prompt(agent, topic, context)
-        raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
-        payload = self._parse_llm_json(raw)
-        return self._score_honest_belief(topic_definition, payload)
+        trace_tick = int(context.get("window_end_tick") or agent.world.time)
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=trace_tick,
+            stage="opinion_honest_belief",
+            metadata={"topic": topic},
+        ):
+            raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            payload = self._parse_llm_json(raw)
+            self._validate_honest_belief_payload(payload)
+        return self._score_honest_belief(agent, topic_definition, payload, trace_tick)
 
     async def _aassess_with_llm(self, agent: "Agent", topic: str, context: dict) -> dict:
         topic_definition = get_opinion_topic_definition(topic)
         system, user = self._honest_belief_prompt(agent, topic, context)
-        raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
-        payload = self._parse_llm_json(raw)
-        return await asyncio.to_thread(self._score_honest_belief, topic_definition, payload)
+        trace_tick = int(context.get("window_end_tick") or agent.world.time)
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=trace_tick,
+            stage="opinion_honest_belief",
+            metadata={"topic": topic},
+        ):
+            raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            payload = self._parse_llm_json(raw)
+            self._validate_honest_belief_payload(payload)
+        return await asyncio.to_thread(
+            self._score_honest_belief,
+            agent,
+            topic_definition,
+            payload,
+            trace_tick,
+        )
 
     def _honest_belief_prompt(self, agent: "Agent", topic: str, context: dict) -> tuple[str, str]:
         """要求智能体依据上一轮状态和当前窗口发言生成简短立场反应。"""
@@ -468,8 +526,41 @@ class OpinionAssessmentCoordinator:
         )
         return system, user
 
-    def _score_honest_belief(self, topic_definition, payload: dict) -> dict:
+    def _score_honest_belief(
+        self,
+        agent: "Agent",
+        topic_definition,
+        payload: dict,
+        trace_tick: int,
+    ) -> dict:
         """使用 FLAN 五级评分并映射到项目的连续观念区间。"""
+
+        honest_belief, evidence_ids = self._validate_honest_belief_payload(payload)
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=trace_tick,
+            stage="opinion_flan_scoring",
+            metadata={"model": self.flan_scorer.model_name},
+        ):
+            rating = self.flan_scorer.score(
+                topic_statement=topic_definition.narrative,
+                honest_belief=honest_belief,
+            )
+        return {
+            "score": rating / 2.0,
+            "source": "llm_as_judge",
+            "confidence": 0.0,
+            "reason": honest_belief,
+            "evidence": [str(item) for item in evidence_ids[:12]],
+            "current_honest_belief": honest_belief,
+            "flan_rating": rating,
+            "flan_model": self.flan_scorer.model_name,
+        }
+
+    @staticmethod
+    def _validate_honest_belief_payload(payload: dict) -> tuple[str, list]:
+        """校验自然语言观念响应，并返回标准化字段。"""
 
         honest_belief = payload.get("current_honest_belief")
         if not isinstance(honest_belief, str) or not honest_belief.strip():
@@ -477,22 +568,16 @@ class OpinionAssessmentCoordinator:
         evidence_ids = payload.get("evidence_ids", [])
         if not isinstance(evidence_ids, list):
             raise ValueError("evidence_ids must be a list")
-        rating = self.flan_scorer.score(
-            topic_statement=topic_definition.narrative,
-            honest_belief=honest_belief.strip(),
-        )
-        return {
-            "score": rating / 2.0,
-            "source": "llm_as_judge",
-            "confidence": 0.0,
-            "reason": honest_belief.strip(),
-            "evidence": [str(item) for item in evidence_ids[:12]],
-            "current_honest_belief": honest_belief.strip(),
-            "flan_rating": rating,
-            "flan_model": self.flan_scorer.model_name,
-        }
+        return honest_belief.strip(), evidence_ids
 
-    def _assess_with_llm_voting(self, agent: "Agent", topic: str, speech_history: list[dict]) -> dict:
+    def _assess_with_llm_voting(
+        self,
+        agent: "Agent",
+        topic: str,
+        speech_history: list[dict],
+        *,
+        trace_tick: int | None = None,
+    ) -> dict:
         """同步兼容入口；正式异步运行使用全并行投票路径。"""
 
         options = self._voting_options(topic)
@@ -500,7 +585,14 @@ class OpinionAssessmentCoordinator:
         votes = []
         for voter_index in range(voter_count):
             try:
-                votes.append(self._one_vote(agent, topic, speech_history, options, voter_index))
+                votes.append(self._one_vote(
+                    agent,
+                    topic,
+                    speech_history,
+                    options,
+                    voter_index,
+                    trace_tick=trace_tick if trace_tick is not None else agent.world.time,
+                ))
             except Exception as exc:
                 votes.append({"voter_index": voter_index, "status": "failed", "error": str(exc)})
         return self._summarize_votes(options, voter_count, votes)
@@ -510,6 +602,8 @@ class OpinionAssessmentCoordinator:
         agent: "Agent",
         topic: str,
         speech_history: list[dict],
+        *,
+        trace_tick: int | None = None,
     ) -> dict:
         """创建该智能体的投票任务，实际启动受独立并发和间隔限制。"""
 
@@ -517,7 +611,14 @@ class OpinionAssessmentCoordinator:
         voter_count = self._voter_count()
         votes = await asyncio.gather(
             *(
-                self._aone_vote(agent, topic, speech_history, options, voter_index)
+                self._aone_vote(
+                    agent,
+                    topic,
+                    speech_history,
+                    options,
+                    voter_index,
+                    trace_tick=trace_tick if trace_tick is not None else agent.world.time,
+                )
                 for voter_index in range(voter_count)
             )
         )
@@ -530,13 +631,22 @@ class OpinionAssessmentCoordinator:
         speech_history: list[dict],
         options: list[str],
         voter_index: int,
+        *,
+        trace_tick: int,
     ) -> dict:
         if self.llm is None:
             return {"voter_index": voter_index, "status": "failed", "error": "LLM client is not configured"}
         system, user = self._voting_prompt(agent, topic, speech_history, options)
-        self._wait_for_sync_voting_start_slot()
-        raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
-        return self._parse_vote(raw, options, voter_index)
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=trace_tick,
+            stage="opinion_voting",
+            metadata={"topic": topic, "voter_index": voter_index},
+        ):
+            self._wait_for_sync_voting_start_slot()
+            raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            return self._parse_vote(raw, options, voter_index)
 
     async def _aone_vote(
         self,
@@ -545,17 +655,27 @@ class OpinionAssessmentCoordinator:
         speech_history: list[dict],
         options: list[str],
         voter_index: int,
+        *,
+        trace_tick: int,
     ) -> dict:
         if self.llm is None:
             return {"voter_index": voter_index, "status": "failed", "error": "LLM client is not configured"}
         system, user = self._voting_prompt(agent, topic, speech_history, options)
-        try:
-            async with self._current_voting_semaphore():
-                await self._wait_for_voting_start_slot()
-                raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
-            return self._parse_vote(raw, options, voter_index)
-        except Exception as exc:
-            return {"voter_index": voter_index, "status": "failed", "error": str(exc)}
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=trace_tick,
+            stage="opinion_voting",
+            metadata={"topic": topic, "voter_index": voter_index},
+        ):
+            try:
+                async with self._current_voting_semaphore():
+                    await self._wait_for_voting_start_slot()
+                    raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+                return self._parse_vote(raw, options, voter_index)
+            except Exception as exc:
+                annotate_current_llm_trace(f"{type(exc).__name__}: {exc}")
+                return {"voter_index": voter_index, "status": "failed", "error": str(exc)}
 
     def _current_voting_semaphore(self) -> asyncio.Semaphore:
         """为当前事件循环返回投票信号量，兼容重复调用同步 step。"""

@@ -29,11 +29,16 @@ REQUIRED_RUN_FILES = {
     "config_snapshot.json",
     "experiment_summary.md",
     "opinion_voting_posthoc.json",
+    "platform_analysis_report.md",
+    "platform_exposure_agent_metrics.csv",
     "platform_exposure_events.jsonl",
+    "platform_exposure_metrics.csv",
     "platform_events.jsonl",
+    "platform_propagation_metrics.csv",
     "polarization_metrics.csv",
     "polarization_agent_shift.csv",
 }
+MIN_ATTEMPTED_VOTING_SUCCESS_RATIO = 0.7
 VERSION_SWITCHES = {
     "full": {
         "psychological_assessment_enabled": True,
@@ -65,15 +70,21 @@ class MetricSpec:
 
 
 @dataclass(frozen=True)
+class ComparisonArm:
+    scenario: str | None
+    version: str
+
+
+@dataclass(frozen=True)
 class ComparisonSpec:
-    left: str
-    right: str
+    left: ComparisonArm
+    right: ComparisonArm
 
 
 @dataclass(frozen=True)
 class MatrixConfig:
     ticks: int
-    scenario: str
+    scenarios: tuple[str, ...]
     opinion_mode: str
     psychology_mode: str
     llm: str
@@ -103,7 +114,7 @@ def load_matrix_config(path: str | Path) -> tuple[MatrixConfig, dict]:
     experiment = _require_dict(raw["experiment"], "experiment")
     _require_exact_keys(experiment, {"ticks", "scenario", "opinion_mode", "psychology_mode", "llm"}, "experiment")
     ticks = _require_positive_int(experiment["ticks"], "experiment.ticks")
-    scenario = _require_nonempty_string(experiment["scenario"], "experiment.scenario")
+    scenarios = _parse_scenarios(experiment["scenario"])
     opinion_mode = _require_choice(experiment["opinion_mode"], OPINION_MODES, "experiment.opinion_mode")
     psychology_mode = _require_choice(experiment["psychology_mode"], PSYCHOLOGY_MODES, "experiment.psychology_mode")
     llm = _require_choice(experiment["llm"], LLM_MODES, "experiment.llm")
@@ -146,11 +157,11 @@ def load_matrix_config(path: str | Path) -> tuple[MatrixConfig, dict]:
     bootstrap_samples = _require_nonnegative_int(summary["bootstrap_samples"], "summary.bootstrap_samples")
     bootstrap_seed = _require_int(summary["bootstrap_seed"], "summary.bootstrap_seed")
     metrics = _parse_metrics(summary["metrics"])
-    comparisons = _parse_comparisons(summary["comparisons"], versions)
+    comparisons = _parse_comparisons(summary["comparisons"], scenarios, versions)
 
     return MatrixConfig(
         ticks=ticks,
-        scenario=scenario,
+        scenarios=scenarios,
         opinion_mode=opinion_mode,
         psychology_mode=psychology_mode,
         llm=llm,
@@ -186,7 +197,46 @@ def _parse_metrics(value: object) -> tuple[MetricSpec, ...]:
     return tuple(metrics)
 
 
-def _parse_comparisons(value: object, versions: tuple[str, ...]) -> tuple[ComparisonSpec, ...]:
+def _parse_scenarios(value: object) -> tuple[str, ...]:
+    """兼容单场景字符串，并允许使用不重复的场景字符串数组。"""
+
+    if isinstance(value, str):
+        return (_require_nonempty_string(value, "experiment.scenario"),)
+    scenarios = tuple(_require_string_list(value, "experiment.scenario"))
+    if not scenarios or len(set(scenarios)) != len(scenarios):
+        raise ValueError("experiment.scenario 必须是非空且不重复的场景字符串或字符串数组。")
+    return scenarios
+
+
+def _parse_comparison_arm(
+    value: object,
+    path: str,
+    scenarios: tuple[str, ...],
+    versions: tuple[str, ...],
+) -> ComparisonArm:
+    """读取旧版版本名或新版场景与版本组合。"""
+
+    if isinstance(value, str):
+        version = _require_nonempty_string(value, path)
+        if version not in versions:
+            raise ValueError(f"{path} 只能引用 versions 中的精确值。")
+        return ComparisonArm(scenario=None, version=version)
+    obj = _require_dict(value, path)
+    _require_exact_keys(obj, {"scenario", "version"}, path)
+    scenario = _require_nonempty_string(obj["scenario"], f"{path}.scenario")
+    version = _require_nonempty_string(obj["version"], f"{path}.version")
+    if scenario not in scenarios:
+        raise ValueError(f"{path}.scenario 只能引用 experiment.scenario 中的精确值。")
+    if version not in versions:
+        raise ValueError(f"{path}.version 只能引用 versions 中的精确值。")
+    return ComparisonArm(scenario=scenario, version=version)
+
+
+def _parse_comparisons(
+    value: object,
+    scenarios: tuple[str, ...],
+    versions: tuple[str, ...],
+) -> tuple[ComparisonSpec, ...]:
     if not isinstance(value, list) or not value:
         raise ValueError("summary.comparisons 必须是非空对象数组。")
     comparisons = []
@@ -194,14 +244,17 @@ def _parse_comparisons(value: object, versions: tuple[str, ...]) -> tuple[Compar
         path = f"summary.comparisons[{index}]"
         obj = _require_dict(item, path)
         _require_exact_keys(obj, {"left", "right"}, path)
-        left = _require_nonempty_string(obj["left"], f"{path}.left")
-        right = _require_nonempty_string(obj["right"], f"{path}.right")
-        if left not in versions or right not in versions:
-            raise ValueError(f"{path} 只能引用 versions 中的精确值。")
+        left = _parse_comparison_arm(obj["left"], f"{path}.left", scenarios, versions)
+        right = _parse_comparison_arm(obj["right"], f"{path}.right", scenarios, versions)
+        if (left.scenario is None) != (right.scenario is None):
+            raise ValueError(f"{path}.left 与 {path}.right 必须同时省略或同时提供 scenario。")
         if left == right:
             raise ValueError(f"{path}.left 与 {path}.right 不得相同。")
         comparisons.append(ComparisonSpec(left=left, right=right))
-    pairs = [(item.left, item.right) for item in comparisons]
+    pairs = [
+        (item.left.scenario, item.left.version, item.right.scenario, item.right.version)
+        for item in comparisons
+    ]
     if len(set(pairs)) != len(pairs):
         raise ValueError("summary.comparisons 不得重复。")
     return tuple(comparisons)
@@ -268,24 +321,26 @@ def _require_nonnegative_int(value: object, path: str) -> int:
 
 
 def build_run_records(config: MatrixConfig) -> list[dict]:
-    """按稳定顺序展开版本、种子和重复编号。"""
+    """按稳定顺序展开场景、版本、种子和重复编号。"""
 
     records = []
     index = 0
     for repetition in range(1, config.repetitions + 1):
         for seed in config.seeds:
-            for version in config.versions:
-                index += 1
-                records.append({
-                    "run_id": f"run-{index:06d}",
-                    "version": version,
-                    "seed": seed,
-                    "repetition": repetition,
-                    "status": "pending",
-                    "attempts": [],
-                    "output_dir": "",
-                    "completeness_report": {},
-                })
+            for scenario in config.scenarios:
+                for version in config.versions:
+                    index += 1
+                    records.append({
+                        "run_id": f"run-{index:06d}",
+                        "scenario": scenario,
+                        "version": version,
+                        "seed": seed,
+                        "repetition": repetition,
+                        "status": "pending",
+                        "attempts": [],
+                        "output_dir": "",
+                        "completeness_report": {},
+                    })
     return records
 
 
@@ -412,7 +467,7 @@ def build_run_command(
         "--ticks", str(config.ticks),
         "--seed", str(record["seed"]),
         "--version", str(record["version"]),
-        "--scenario", config.scenario,
+        "--scenario", str(record["scenario"]),
         "--output-base", str(output_base.resolve()),
         "--opinion-mode", config.opinion_mode,
         "--psychology-mode", config.psychology_mode,
@@ -446,7 +501,7 @@ def validate_run_completeness(run_dir: str | Path, config: MatrixConfig, record:
     expected_snapshot = {
         "seed": record["seed"],
         "version": record["version"],
-        "scenario_name": config.scenario,
+        "scenario_name": record["scenario"],
         "llm": config.llm,
         "ticks": config.ticks,
         "opinion_assessment_mode": config.opinion_mode,
@@ -485,9 +540,16 @@ def validate_run_completeness(run_dir: str | Path, config: MatrixConfig, record:
         _validate_agent_csv(path / f"{agent_id}.csv", agent_id, expected_ticks, errors)
         _validate_agent_jsonl(path / f"{agent_id}.jsonl", agent_id, expected_ticks, errors)
     _validate_metrics_ticks(path / "polarization_metrics.csv", expected_ticks, errors)
+    _validate_metrics_ticks(path / "platform_exposure_metrics.csv", expected_ticks, errors)
     _validate_agent_shift_ids(path / "polarization_agent_shift.csv", set(agent_ids), errors)
+    _validate_agent_shift_ids(path / "platform_exposure_agent_metrics.csv", set(agent_ids), errors)
+    voting_quality = {
+        "attempted_records": 0,
+        "complete_records": 0,
+        "attempted_success_ratio": 0.0,
+    }
     if voting_window_size is not None:
-        _validate_posthoc_voting(
+        voting_quality = _validate_posthoc_voting(
             path / "opinion_voting_posthoc.json",
             set(agent_ids),
             config.ticks,
@@ -502,6 +564,7 @@ def validate_run_completeness(run_dir: str | Path, config: MatrixConfig, record:
         "errors": errors,
         "agent_count": len(agent_ids),
         "tick_count": config.ticks if agent_ids and not errors else 0,
+        "voting_quality": voting_quality,
         "checked_at": _utc_now(),
     }
 
@@ -620,19 +683,25 @@ def _validate_posthoc_voting(
     final_tick: int,
     window_size: int,
     errors: list[str],
-) -> None:
-    """核对每个实体智能体是否具备全部互斥投票窗口。"""
+) -> dict:
+    """核对投票窗口结构，并拒绝实际投票成功率不足的运行。"""
+
+    quality = {
+        "attempted_records": 0,
+        "complete_records": 0,
+        "attempted_success_ratio": 0.0,
+    }
 
     if not path.is_file():
-        return
+        return quality
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         errors.append(f"无法读取 {path.name}：{exc}")
-        return
+        return quality
     if not isinstance(payload, list):
         errors.append(f"{path.name} 根节点必须是 JSON 数组。")
-        return
+        return quality
     expected_windows = {
         (start, min(start + window_size - 1, final_tick))
         for start in range(1, final_tick + 1, window_size)
@@ -663,8 +732,33 @@ def _validate_posthoc_voting(
         if key in actual:
             errors.append(f"{path.name} 存在重复的智能体投票窗口：{key}")
         actual.add(key)
+        speech_history = item.get("speech_history")
+        if isinstance(speech_history, list) and speech_history:
+            quality["attempted_records"] += 1
+            requested = item.get("requested_voters")
+            successful = item.get("successful_votes")
+            if (
+                isinstance(requested, int)
+                and not isinstance(requested, bool)
+                and requested > 0
+                and successful == requested
+                and item.get("stance_valid") is True
+            ):
+                quality["complete_records"] += 1
     if actual != expected:
         errors.append(f"{path.name} 的智能体投票窗口集合不完整。")
+    attempted = int(quality["attempted_records"])
+    complete = int(quality["complete_records"])
+    ratio = complete / attempted if attempted else 0.0
+    quality["attempted_success_ratio"] = ratio
+    if attempted == 0:
+        errors.append(f"{path.name} 没有包含线上发言的可评测窗口。")
+    elif ratio < MIN_ATTEMPTED_VOTING_SUCCESS_RATIO:
+        errors.append(
+            f"{path.name} 的实际投票完整率为 {ratio:.6f}，"
+            f"低于门禁 {MIN_ATTEMPTED_VOTING_SUCCESS_RATIO:.6f}。"
+        )
+    return quality
 
 
 def _validate_platform_exposure(path: Path, expected_ids: set[str], errors: list[str]) -> None:
@@ -728,15 +822,22 @@ def write_cross_run_summary(root: Path, config: MatrixConfig, manifest: dict) ->
 
     summary_dir = root / "summary"
     summary_dir.mkdir(parents=True, exist_ok=True)
+    valid_run_ids, structure_rows = validate_cross_scenario_structure(config, manifest)
+    structure_path = summary_dir / "structural_equality.json"
+    structure_path.write_text(
+        json.dumps(structure_rows, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     run_rows: list[dict] = []
     for record in manifest["runs"]:
-        if record.get("status") != "succeeded" or not record.get("completeness_report", {}).get("complete"):
+        if record.get("run_id") not in valid_run_ids:
             continue
         run_dir = Path(record["output_dir"])
         for metric in config.metrics:
             baseline, final = read_run_metric(run_dir, metric, config.window_size)
             run_rows.append({
                 "run_id": record["run_id"],
+                "scenario": record["scenario"],
                 "version": record["version"],
                 "seed": record["seed"],
                 "repetition": record["repetition"],
@@ -749,18 +850,20 @@ def write_cross_run_summary(root: Path, config: MatrixConfig, manifest: dict) ->
                 "output_dir": record["output_dir"],
             })
     _write_csv(summary_dir / "run_metrics.csv", run_rows, [
-        "run_id", "version", "seed", "repetition", "metric", "source", "column",
+        "run_id", "scenario", "version", "seed", "repetition", "metric", "source", "column",
         "baseline", "final", "delta", "output_dir",
     ])
 
     pair_rows = build_pair_rows(run_rows, config.comparisons)
     _write_csv(summary_dir / "paired_differences.csv", pair_rows, [
-        "seed", "repetition", "metric", "left_version", "right_version",
+        "seed", "repetition", "metric", "left_scenario", "left_version",
+        "right_scenario", "right_version",
         "left_run_id", "right_run_id", "left_delta", "right_delta", "difference",
     ])
     version_rows = summarize_versions(run_rows)
     _write_csv(summary_dir / "version_summary.csv", version_rows, [
-        "version", "metric", "n_runs", "mean_baseline", "mean_final", "mean_delta", "sample_stddev_delta",
+        "scenario", "version", "metric", "n_runs", "mean_baseline", "mean_final",
+        "mean_delta", "sample_stddev_delta",
     ])
     pair_summary = summarize_pairs(
         pair_rows,
@@ -768,7 +871,8 @@ def write_cross_run_summary(root: Path, config: MatrixConfig, manifest: dict) ->
         seed=config.bootstrap_seed,
     )
     _write_csv(summary_dir / "pair_summary.csv", pair_summary, [
-        "metric", "left_version", "right_version", "n_pairs", "mean_difference",
+        "metric", "left_scenario", "left_version", "right_scenario", "right_version",
+        "n_pairs", "mean_difference",
         "median_difference", "sample_stddev_difference", "min_difference", "max_difference",
         "sign_flip_p_two_sided", "bootstrap_ci_low", "bootstrap_ci_high",
     ])
@@ -779,9 +883,104 @@ def write_cross_run_summary(root: Path, config: MatrixConfig, manifest: dict) ->
         "paired_differences_path": str(summary_dir / "paired_differences.csv"),
         "version_summary_path": str(summary_dir / "version_summary.csv"),
         "pair_summary_path": str(summary_dir / "pair_summary.csv"),
+        "structural_equality_path": str(structure_path),
     }
     (summary_dir / "summary.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
+
+
+def validate_cross_scenario_structure(config: MatrixConfig, manifest: dict) -> tuple[set[str], list[dict]]:
+    """仅允许场景名、关注边及其处理规则在跨场景配对中不同。"""
+
+    complete_records = [
+        record
+        for record in manifest["runs"]
+        if record.get("status") == "succeeded"
+        and record.get("completeness_report", {}).get("complete")
+    ]
+    if len(config.scenarios) == 1:
+        return {str(record["run_id"]) for record in complete_records}, []
+
+    by_block: dict[tuple[int, int, str], dict[str, dict]] = {}
+    for record in complete_records:
+        key = (int(record["seed"]), int(record["repetition"]), str(record["version"]))
+        by_block.setdefault(key, {})[str(record["scenario"])] = record
+
+    valid_run_ids: set[str] = set()
+    rows: list[dict] = []
+    expected_scenarios = set(config.scenarios)
+    all_blocks = [
+        (seed, repetition, version)
+        for repetition in range(1, config.repetitions + 1)
+        for seed in config.seeds
+        for version in config.versions
+    ]
+    for seed, repetition, version in all_blocks:
+        records = by_block.get((seed, repetition, version), {})
+        actual_scenarios = set(records)
+        missing = sorted(expected_scenarios - actual_scenarios)
+        if missing:
+            rows.append({
+                "seed": seed,
+                "repetition": repetition,
+                "version": version,
+                "status": "incomplete_block",
+                "missing_scenarios": missing,
+                "mismatch_scenarios": [],
+            })
+            continue
+
+        normalized = {
+            scenario: _normalized_control_snapshot(Path(record["output_dir"]) / "config_snapshot.json")
+            for scenario, record in records.items()
+        }
+        reference_scenario = config.scenarios[0]
+        reference = normalized[reference_scenario]
+        mismatches = [
+            scenario
+            for scenario in config.scenarios[1:]
+            if normalized[scenario] != reference
+        ]
+        if mismatches:
+            rows.append({
+                "seed": seed,
+                "repetition": repetition,
+                "version": version,
+                "status": "structural_mismatch",
+                "missing_scenarios": [],
+                "mismatch_scenarios": mismatches,
+            })
+            continue
+        valid_run_ids.update(str(record["run_id"]) for record in records.values())
+        rows.append({
+            "seed": seed,
+            "repetition": repetition,
+            "version": version,
+            "status": "complete_equal_block",
+            "missing_scenarios": [],
+            "mismatch_scenarios": [],
+        })
+    return valid_run_ids, rows
+
+
+def _normalized_control_snapshot(path: Path) -> str:
+    """移除声明过的关注处理差异，保留其余初始化条件做精确比较。"""
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} 根节点必须是 JSON 对象。")
+    payload.pop("scenario_name", None)
+    controls = payload.get("scenario_controls")
+    if isinstance(controls, dict):
+        controls.pop("network_mode", None)
+        controls.pop("topology_rule", None)
+        controls.pop("influencer_follow_rule", None)
+    agents = payload.get("agents")
+    if isinstance(agents, dict):
+        for agent in agents.values():
+            if isinstance(agent, dict):
+                agent.pop("followers", None)
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def read_run_metric(run_dir: Path, metric: MetricSpec, window_size: int) -> tuple[float, float]:
@@ -818,42 +1017,65 @@ def _finite_float(value: object, path: Path, column: str) -> float:
 
 def build_pair_rows(run_rows: list[dict], comparisons: tuple[ComparisonSpec, ...]) -> list[dict]:
     by_key = {
-        (row["version"], row["seed"], row["repetition"], row["metric"]): row
+        (row["scenario"], row["version"], row["seed"], row["repetition"], row["metric"]): row
         for row in run_rows
     }
     rows = []
     metric_names = sorted({row["metric"] for row in run_rows})
     blocks = sorted({(row["seed"], row["repetition"]) for row in run_rows})
     for comparison in comparisons:
-        for seed, repetition in blocks:
-            for metric_name in metric_names:
-                left = by_key.get((comparison.left, seed, repetition, metric_name))
-                right = by_key.get((comparison.right, seed, repetition, metric_name))
-                if left is None or right is None:
-                    continue
-                rows.append({
-                    "seed": seed,
-                    "repetition": repetition,
-                    "metric": metric_name,
-                    "left_version": comparison.left,
-                    "right_version": comparison.right,
-                    "left_run_id": left["run_id"],
-                    "right_run_id": right["run_id"],
-                    "left_delta": left["delta"],
-                    "right_delta": right["delta"],
-                    "difference": left["delta"] - right["delta"],
-                })
+        if comparison.left.scenario is None:
+            scenario_pairs = [
+                (scenario, scenario)
+                for scenario in sorted({str(row["scenario"]) for row in run_rows})
+            ]
+        else:
+            scenario_pairs = [(comparison.left.scenario, comparison.right.scenario)]
+        for left_scenario, right_scenario in scenario_pairs:
+            for seed, repetition in blocks:
+                for metric_name in metric_names:
+                    left = by_key.get((
+                        left_scenario,
+                        comparison.left.version,
+                        seed,
+                        repetition,
+                        metric_name,
+                    ))
+                    right = by_key.get((
+                        right_scenario,
+                        comparison.right.version,
+                        seed,
+                        repetition,
+                        metric_name,
+                    ))
+                    if left is None or right is None:
+                        continue
+                    rows.append({
+                        "seed": seed,
+                        "repetition": repetition,
+                        "metric": metric_name,
+                        "left_scenario": left_scenario,
+                        "left_version": comparison.left.version,
+                        "right_scenario": right_scenario,
+                        "right_version": comparison.right.version,
+                        "left_run_id": left["run_id"],
+                        "right_run_id": right["run_id"],
+                        "left_delta": left["delta"],
+                        "right_delta": right["delta"],
+                        "difference": left["delta"] - right["delta"],
+                    })
     return rows
 
 
 def summarize_versions(run_rows: list[dict]) -> list[dict]:
-    groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str, str], list[dict]] = {}
     for row in run_rows:
-        groups.setdefault((row["version"], row["metric"]), []).append(row)
+        groups.setdefault((row["scenario"], row["version"], row["metric"]), []).append(row)
     out = []
-    for (version, metric), rows in sorted(groups.items()):
+    for (scenario, version, metric), rows in sorted(groups.items()):
         deltas = [float(row["delta"]) for row in rows]
         out.append({
+            "scenario": scenario,
             "version": version,
             "metric": metric,
             "n_runs": len(rows),
@@ -866,17 +1088,25 @@ def summarize_versions(run_rows: list[dict]) -> list[dict]:
 
 
 def summarize_pairs(pair_rows: list[dict], *, samples: int, seed: int) -> list[dict]:
-    groups: dict[tuple[str, str, str], list[float]] = {}
+    groups: dict[tuple[str, str, str, str, str], list[float]] = {}
     for row in pair_rows:
-        key = (row["metric"], row["left_version"], row["right_version"])
+        key = (
+            row["metric"],
+            row["left_scenario"],
+            row["left_version"],
+            row["right_scenario"],
+            row["right_version"],
+        )
         groups.setdefault(key, []).append(float(row["difference"]))
     out = []
-    for offset, ((metric, left, right), values) in enumerate(sorted(groups.items())):
+    for offset, ((metric, left_scenario, left_version, right_scenario, right_version), values) in enumerate(sorted(groups.items())):
         ci_low, ci_high = bootstrap_mean_ci(values, samples=samples, seed=seed + offset)
         out.append({
             "metric": metric,
-            "left_version": left,
-            "right_version": right,
+            "left_scenario": left_scenario,
+            "left_version": left_version,
+            "right_scenario": right_scenario,
+            "right_version": right_version,
             "n_pairs": len(values),
             "mean_difference": statistics.fmean(values),
             "median_difference": statistics.median(values),
@@ -939,6 +1169,12 @@ def _load_or_create_manifest(
         actual_ids = [record.get("run_id") for record in manifest.get("runs", [])]
         if actual_ids != expected_ids:
             raise ValueError("batch_manifest.json 的运行单元与当前矩阵配置不一致。")
+        if len(config.scenarios) == 1:
+            # 旧版单场景清单没有 scenario，恢复时补入配置中的精确场景名。
+            for record in manifest["runs"]:
+                record.setdefault("scenario", config.scenarios[0])
+        if any(record.get("scenario") not in config.scenarios for record in manifest["runs"]):
+            raise ValueError("batch_manifest.json 包含不属于当前配置的场景名。")
         if any(record.get("status") not in RUN_STATUSES for record in manifest["runs"]):
             raise ValueError("batch_manifest.json 包含未支持的运行状态。")
         return manifest

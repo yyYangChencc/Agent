@@ -21,6 +21,8 @@ class MockLLMClient(LLMClient):
     def generate(self, system: str, user: str, *, response_format: dict | None = None) -> str:
         system_text = str(system or "")
         user_text = str(user or "")
+        if "短期记忆压缩器" in system_text:
+            return self._short_term_memory_summary(user_text)
         if "记忆查询规划器" in system_text:
             return self._memory_plan(user_text)
         if "任务名称" in system_text and "<UrgencyKey>" in system_text:
@@ -49,11 +51,58 @@ class MockLLMClient(LLMClient):
             return self._world_action(user_text)
         return json.dumps({"think": "mock 默认不行动", "action": {}}, ensure_ascii=False)
 
+    def _short_term_memory_summary(self, user_text: str) -> str:
+        """返回确定性的短期记忆压缩结果，供集成测试使用。"""
+
+        try:
+            payload = json.loads(user_text)
+        except json.JSONDecodeError:
+            payload = {}
+        entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+        successful_actions = []
+        failed_actions = []
+        tasks = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            task = str(entry.get("task") or "")
+            if task and task not in tasks:
+                tasks.append(task)
+            content = entry.get("content") if isinstance(entry.get("content"), dict) else {}
+            status = str(content.get("execution_status") or "")
+            tool = str(content.get("tool") or "")
+            feedback = str(content.get("feedback") or "")
+            text = f"{tool}: {feedback}".strip(": ")
+            if status in {"tool_not_found", "tool_exception"} and text:
+                failed_actions.append(text)
+            elif status == "tool_returned" and text:
+                successful_actions.append(text)
+        start_tick = int(payload.get("start_tick") or 0)
+        end_tick = int(payload.get("end_tick") or start_tick)
+        return json.dumps(
+            {
+                "start_tick": start_tick,
+                "end_tick": end_tick,
+                "chronology": f"已压缩 t={start_tick} 至 t={end_tick} 的短期经历。",
+                "task_progress": "；".join(tasks[-3:]) or "未记录明确任务进展。",
+                "successful_actions": successful_actions[-5:],
+                "failed_actions": failed_actions[-5:],
+                "unresolved_goals": [],
+                "referenced_entity_ids": [],
+            },
+            ensure_ascii=False,
+        )
+
     def get_embeddings(self, text: str) -> list[float]:
         """返回固定维度向量，保证 Chroma 流程可运行。"""
 
         seed = sum(ord(ch) for ch in str(text or "")[:200])
         return [((seed + index * 17) % 97) / 97.0 for index in range(64)]
+
+    def get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """按输入顺序生成批量 mock 向量。"""
+
+        return [self.get_embeddings(text) for text in texts]
 
     def _memory_plan(self, user_text: str) -> str:
         context = self._extract_after_label(user_text, "## 当前上下文类型") or "world"

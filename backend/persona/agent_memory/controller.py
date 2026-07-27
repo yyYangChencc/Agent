@@ -9,6 +9,7 @@ from typing import Any
 from persona.agent_memory.query_builder import build_semantic_observation_text
 from persona.agent_memory.structured_store import StructuredMemoryStore
 from persona.llm.interface import JSON_OBJECT_RESPONSE_FORMAT
+from persona.llm.debug_trace import annotate_current_llm_trace, trace_llm_call
 from persona.llm.json_utils import parse_json_object
 from persona.logger import get_logger
 
@@ -971,7 +972,14 @@ class MemoryController:
                 target_id,
                 since_time=int(profile.get("last_reflected_at") or 0),
             )
-            impressions = self._summarize_person_profile(profile, facts, llm=llm)
+            with trace_llm_call(
+                llm,
+                agent_id=agent_id,
+                tick=current_time,
+                stage="person_profile_summary",
+                metadata={"target_agent_id": target_id},
+            ):
+                impressions = self._summarize_person_profile(profile, facts, llm=llm)
             self.store.update_person_profile_impressions(
                 agent_id,
                 target_id,
@@ -998,7 +1006,14 @@ class MemoryController:
                 target_id,
                 since_time=int(profile.get("last_reflected_at") or 0),
             )
-            impressions = await self._asummarize_person_profile(profile, facts, llm=llm)
+            with trace_llm_call(
+                llm,
+                agent_id=agent_id,
+                tick=current_time,
+                stage="person_profile_summary",
+                metadata={"target_agent_id": target_id},
+            ):
+                impressions = await self._asummarize_person_profile(profile, facts, llm=llm)
             self.store.update_person_profile_impressions(
                 agent_id,
                 target_id,
@@ -1894,6 +1909,7 @@ class MemoryController:
             data = self._parse_json_object(raw)
             return self._person_profile_summary_from_payload(data, fallback)
         except Exception as exc:
+            annotate_current_llm_trace(f"{type(exc).__name__}: {exc}")
             logger.debug("person profile LLM summary failed: %s", exc)
             return fallback
 
@@ -1909,6 +1925,7 @@ class MemoryController:
             data = self._parse_json_object(raw)
             return self._person_profile_summary_from_payload(data, fallback)
         except Exception as exc:
+            annotate_current_llm_trace(f"{type(exc).__name__}: {exc}")
             logger.debug("async person profile LLM summary failed: %s", exc)
             return fallback
 

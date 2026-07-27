@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { useSimStore, AgentState, ObjectState, AgentHistoryPoint } from '../store/simStore'
 import { AgentCharts } from './AgentCharts'
+import { AgentLLMDebugModal } from './AgentLLMDebugModal'
 import { AgentMemoryModal } from './AgentMemoryModal'
 
 // 物品种类元数据：按 objects.py 中 self.kind 值为键，提供前端展示信息
@@ -111,7 +112,12 @@ function ObjectDetail({ object }: { object: ObjectState }) {
         <div className="text-xs text-blue-300 leading-relaxed">{meta.func}</div>
       )}
       <div className="text-xs text-gray-400">
-        位置：<span className="text-gray-200 font-mono">({object.pos[0]}, {object.pos[1]})</span>
+        锚点：<span className="text-gray-200 font-mono">({object.pos[0]}, {object.pos[1]})</span>
+      </div>
+      <div className="text-xs text-gray-400">
+        占地：<span className="text-gray-200 font-mono">
+          {object.footprint.map(([row, col]) => `(${row}, ${col})`).join(' ')}
+        </span>
       </div>
       <div className="text-xs text-gray-400">
         剩余数量：<span className={`font-semibold ${numColor}`}>{numText}</span>
@@ -287,7 +293,15 @@ export function PsychologicalRoleCardBlock({ agent }: { agent: AgentState }) {
   )
 }
 
-function AgentDetail({ agent, onOpenMemory }: { agent: AgentState; onOpenMemory: () => void }) {
+function AgentDetail({
+  agent,
+  onOpenMemory,
+  onOpenLLMDebug,
+}: {
+  agent: AgentState
+  onOpenMemory: () => void
+  onOpenLLMDebug: () => void
+}) {
   // last_think 内容可能很长，默认折叠
   const [thinkOpen, setThinkOpen] = useState(false)
   const [chartOpen, setChartOpen] = useState(false)
@@ -313,7 +327,21 @@ function AgentDetail({ agent, onOpenMemory }: { agent: AgentState; onOpenMemory:
         >
           轨迹
         </button>
+        <button
+          type="button"
+          disabled={agent.llm_debug.display_tick === null}
+          title={agent.llm_debug.display_tick === null ? '当前没有可展示的上一 tick' : '查看上一 tick 的完整 LLM 调用'}
+          className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={onOpenLLMDebug}
+        >
+          LLM 调试
+        </button>
       </div>
+      {agent.llm_debug.display_tick !== null && (
+        <div className="text-[10px] font-mono text-gray-500">
+          tick {agent.llm_debug.display_tick} · {agent.llm_debug.call_count} 次调用尝试
+        </div>
+      )}
       <div className="text-xs text-gray-400">
         emotion: <span className="text-gray-200">{agent.emotion}</span>
       </div>
@@ -427,6 +455,7 @@ function AgentRow({ agent, selected, onClick }: { agent: AgentState; selected: b
 // 右侧智能体面板：上半部分为列表，下半部分为选中智能体或物品详情
 export function AgentPanel() {
   const [memoryAgentId, setMemoryAgentId] = useState<string | null>(null)
+  const [llmDebugAgentId, setLLMDebugAgentId] = useState<string | null>(null)
   const worldState = useSimStore((s) => s.worldState)
   const selectedAgentId = useSimStore((s) => s.selectedAgentId)
   const selectedObjectId = useSimStore((s) => s.selectedObjectId)
@@ -434,6 +463,7 @@ export function AgentPanel() {
 
   const agents = worldState?.agents ?? []
   const selected = agents.find((a) => a.id === selectedAgentId) ?? null
+  const llmDebugAgent = agents.find((a) => a.id === llmDebugAgentId) ?? null
   // 物品选中：从世界状态中找到对应物品
   const selectedObject = worldState?.objects.find((o) => o.id === selectedObjectId) ?? null
 
@@ -461,6 +491,7 @@ export function AgentPanel() {
             key={selected.id}
             agent={selected}
             onOpenMemory={() => setMemoryAgentId(selected.id)}
+            onOpenLLMDebug={() => setLLMDebugAgentId(selected.id)}
           />
         </div>
       )}
@@ -475,6 +506,16 @@ export function AgentPanel() {
           key={memoryAgentId}
           agentId={memoryAgentId}
           onClose={() => setMemoryAgentId(null)}
+        />
+      )}
+      {/* 调试面板随快照更新到严格的上一 tick。 */}
+      {llmDebugAgent && llmDebugAgent.llm_debug.display_tick !== null && (
+        <AgentLLMDebugModal
+          key={llmDebugAgent.id}
+          agentId={llmDebugAgent.id}
+          displayTick={llmDebugAgent.llm_debug.display_tick}
+          expectedCallCount={llmDebugAgent.llm_debug.call_count}
+          onClose={() => setLLMDebugAgentId(null)}
         />
       )}
     </div>

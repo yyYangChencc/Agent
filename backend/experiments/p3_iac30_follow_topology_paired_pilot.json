@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "ticks": 100,
+    "scenario": [
+      "iac_gay_marriage_30_same_side_isolated",
+      "iac_gay_marriage_30_cross_side",
+      "iac_gay_marriage_30_balanced"
+    ],
+    "opinion_mode": "llm_as_judge",
+    "psychology_mode": "llm",
+    "llm": "real"
+  },
+  "versions": [
+    "full"
+  ],
+  "seeds": [
+    41,
+    42,
+    43
+  ],
+  "repetitions": 1,
+  "execution": {
+    "timeout_seconds": null,
+    "stop_on_failure": false
+  },
+  "summary": {
+    "window_size": 10,
+    "bootstrap_samples": 10000,
+    "bootstrap_seed": 42,
+    "metrics": [
+      {
+        "name": "polarization_index",
+        "source": "polarization_metrics.csv",
+        "column": "polarization_index"
+      },
+      {
+        "name": "pairwise_mean_abs_distance",
+        "source": "polarization_metrics.csv",
+        "column": "pairwise_mean_abs_distance"
+      },
+      {
+        "name": "mean_abs_opinion",
+        "source": "polarization_metrics.csv",
+        "column": "mean_abs_opinion"
+      },
+      {
+        "name": "cross_side_exposure_share",
+        "source": "platform_exposure_metrics.csv",
+        "column": "cross_side_exposure_share"
+      },
+      {
+        "name": "same_side_exposure_share",
+        "source": "platform_exposure_metrics.csv",
+        "column": "same_side_exposure_share"
+      },
+      {
+        "name": "stance_exposure_entropy",
+        "source": "platform_exposure_metrics.csv",
+        "column": "stance_exposure_entropy"
+      },
+      {
+        "name": "influencer_exposure_share",
+        "source": "platform_exposure_metrics.csv",
+        "column": "influencer_exposure_share"
+      },
+      {
+        "name": "unique_post_coverage",
+        "source": "platform_exposure_metrics.csv",
+        "column": "unique_post_coverage"
+      },
+      {
+        "name": "exposure_interaction_conversion_rate",
+        "source": "platform_exposure_metrics.csv",
+        "column": "exposure_interaction_conversion_rate"
+      },
+      {
+        "name": "exposure_gini",
+        "source": "platform_exposure_metrics.csv",
+        "column": "exposure_gini"
+      },
+      {
+        "name": "interaction_gini",
+        "source": "platform_exposure_metrics.csv",
+        "column": "interaction_gini"
+      }
+    ],
+    "comparisons": [
+      {
+        "left": {
+          "scenario": "iac_gay_marriage_30_cross_side",
+          "version": "full"
+        },
+        "right": {
+          "scenario": "iac_gay_marriage_30_same_side_isolated",
+          "version": "full"
+        }
+      },
+      {
+        "left": {
+          "scenario": "iac_gay_marriage_30_balanced",
+          "version": "full"
+        },
+        "right": {
+          "scenario": "iac_gay_marriage_30_same_side_isolated",
+          "version": "full"
+        }
+      },
+      {
+        "left": {
+          "scenario": "iac_gay_marriage_30_cross_side",
+          "version": "full"
+        },
+        "right": {
+          "scenario": "iac_gay_marriage_30_balanced",
+          "version": "full"
+        }
+      }
+    ]
+  }
+}

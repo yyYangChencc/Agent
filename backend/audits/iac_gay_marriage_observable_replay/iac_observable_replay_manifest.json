@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "replay_scope": "IAC v2 FourForums 可观测讨论回放",
+  "dataset": "fourforums",
+  "discussion_id": "1613",
+  "discussion_title": "For or Against Gay Marriage",
+  "discussion_start": "2004-06-28 09:39:00",
+  "discussion_end": "2012-03-23 15:35:00",
+  "quarter_time": "2006-06-04 17:08:00",
+  "ordering": [
+    "creation_date",
+    "post_id 的整数值"
+  ],
+  "observable_fields": {
+    "post": [
+      "dataset",
+      "discussion_id",
+      "post_id",
+      "author_id",
+      "username",
+      "creation_date",
+      "parent_post_id",
+      "parent_missing",
+      "text_id",
+      "text",
+      "discussion_title",
+      "discussion_url",
+      "topic_id",
+      "topic"
+    ],
+    "quote": [
+      "dataset",
+      "discussion_id",
+      "post_id",
+      "quote_index",
+      "parent_quote_index",
+      "text_offset",
+      "text_id",
+      "source_discussion_id",
+      "source_post_id",
+      "source_start",
+      "source_end",
+      "truncated",
+      "altered"
+    ],
+    "mturk_author_stance": [
+      "dataset",
+      "discussion_id",
+      "author_id",
+      "topic_id",
+      "topic_stance_id_1",
+      "topic_stance_votes_1",
+      "topic_stance_id_2",
+      "topic_stance_votes_2",
+      "topic_stance_votes_other"
+    ]
+  },
+  "unobservable_platform_fields": [
+    "原平台关注关系",
+    "原平台推荐算法、特征、分数与排序结果",
+    "原平台曝光、浏览和点击日志",
+    "原平台点赞、点踩和转发事件"
+  ],
+  "source_files": {
+    "posts": {
+      "path": "D:\\agent\\Agent\\data\\processed\\iac_v2\\posts.jsonl",
+      "size_bytes": 526608666,
+      "sha256": "cd09887af99c18e90d55744670c82868de7e8e7fab8e99e7bfa92cb73173af79"
+    },
+    "quotes": {
+      "path": "D:\\agent\\Agent\\data\\processed\\iac_v2\\quote.csv",
+      "size_bytes": 27875138,
+      "sha256": "54a66693e6e40e46f149bf2bdae37031403ce340f099946a0c487f5d2e532535"
+    },
+    "mturk_author_stances": {
+      "path": "D:\\agent\\Agent\\data\\processed\\iac_v2\\mturk_author_stance.csv",
+      "size_bytes": 184225,
+      "sha256": "272176176293c084825bb121ca2a2d33b2abf2fc9f9d8646f7f8624383a71153"
+    },
+    "discussion_metadata": {
+      "path": "D:\\agent\\Agent\\data\\processed\\iac_v2\\llm_pipeline\\gay_marriage_1q\\selected_discussion_metadata.json",
+      "size_bytes": 1415,
+      "sha256": "0d44dcf29dd173ae830b8ba5e769bbb01fc6c3639c7867b30d0b4a07b133086a"
+    }
+  },
+  "output": {
+    "replay_path": "D:\\agent\\Agent\\backend\\audits\\iac_gay_marriage_observable_replay\\iac_observable_replay.jsonl",
+    "replay_size_bytes": 1560868,
+    "replay_sha256": "b2f958a3286d3a584d1fbc59bfc044ce19ab0aee316fe518d3e720bf058f91ec",
+    "record_count": 1181
+  }
+}

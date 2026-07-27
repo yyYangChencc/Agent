@@ -7,10 +7,26 @@ class objects:
     对象创建时会自动注册到 world.objects 和地图；子类通过 kind 区分前端展示和交互逻辑。
     """
 
-    def __init__(self, id, num, position, world):
+    def __init__(
+        self,
+        id,
+        num,
+        position,
+        world,
+        *,
+        footprint=None,
+        entrance=None,
+        sprite_key=None,
+    ):
         self.id = id
         self.num = num
-        self.position = position
+        self.position = list(position)
+        # 占地格和素材键属于场景协议；未声明时兼容原有单格对象。
+        self.has_explicit_footprint = footprint is not None
+        footprint_cells = [self.position] if footprint is None else footprint
+        self.footprint = [list(cell) for cell in footprint_cells]
+        self.entrance = list(entrance) if entrance is not None else None
+        self.sprite_key = sprite_key
         self.world = world
         self.world.add_object(self)
         self.kind = "objects"
@@ -19,6 +35,11 @@ class objects:
 
     def get_position(self):
         return self.position
+
+    def get_footprint(self) -> list[list[int]]:
+        """返回对象占用的全部地图格。"""
+
+        return [list(cell) for cell in self.footprint]
 
     def get_desc(self) -> str:
         return f"ID: {self.id}，类别: {self.kind}，数量 {self.num}"
@@ -59,16 +80,32 @@ class food(Interactable):
     def eaten(self):
         self.num -= 1
         if self.num <= 0:
-            self.world.map.remove(*self.position)
-            self.world.objects.pop(self.id)
+            self.world.remove_object(self)
 
 
 class building(Interactable):
     """场景中的建筑，作为可交互物品占据地图格位。进入建筑后由世界循环自动触发 interact。"""
 
-    def __init__(self, id: str, position: list, world):
+    def __init__(
+        self,
+        id: str,
+        position: list,
+        world,
+        *,
+        footprint=None,
+        entrance=None,
+        sprite_key=None,
+    ):
         # 建筑无数量属性，num 固定为 None（前端按"无限"渲染，不会因 num<=0 而隐藏）
-        super().__init__(id, None, position, world)
+        super().__init__(
+            id,
+            None,
+            position,
+            world,
+            footprint=footprint,
+            entrance=entrance,
+            sprite_key=sprite_key,
+        )
         self.kind = "building"
         self.occupants: list[str] = []
 
@@ -95,8 +132,26 @@ class building(Interactable):
 class company(building):
     """公司：建筑子类，智能体进入并停留时自动获得工作效果。"""
 
-    def __init__(self, id: str, position: list, world, salary=10, relax_cost=10):
-        super().__init__(id, position, world)
+    def __init__(
+        self,
+        id: str,
+        position: list,
+        world,
+        salary=10,
+        relax_cost=10,
+        *,
+        footprint=None,
+        entrance=None,
+        sprite_key=None,
+    ):
+        super().__init__(
+            id,
+            position,
+            world,
+            footprint=footprint,
+            entrance=entrance,
+            sprite_key=sprite_key,
+        )
         self.kind = "company"
         self.salary = salary  # 工作获得的工资
         self.relax_cost = relax_cost
@@ -138,10 +193,29 @@ class company(building):
 class bed(Interactable):
     """床：可交互物品，供智能体休息恢复 relax。"""
 
-    def __init__(self, id: str, position: list, world, free_num=1, owner_agent_id: str | None = None):
+    def __init__(
+        self,
+        id: str,
+        position: list,
+        world,
+        free_num=1,
+        owner_agent_id: str | None = None,
+        *,
+        footprint=None,
+        entrance=None,
+        sprite_key=None,
+    ):
         if owner_agent_id is not None and (not isinstance(owner_agent_id, str) or not owner_agent_id):
             raise ValueError("bed owner_agent_id must be None or a non-empty string")
-        super().__init__(id,None, position, world)
+        super().__init__(
+            id,
+            None,
+            position,
+            world,
+            footprint=footprint,
+            entrance=entrance,
+            sprite_key=sprite_key,
+        )
         self.kind = "bed"
         self.free_num = free_num
         self.occupant_id = None  # 当前占用者的 agent ID，None 表示无人占用
@@ -185,8 +259,27 @@ class bed(Interactable):
 class food_shop(building):
     """食品店：建筑子类，智能体进入并停留时自动补充 satiety。"""
 
-    def __init__(self, id: str, position: list, world,food_num=10, provide=2, price=5):
-        super().__init__(id, position, world)
+    def __init__(
+        self,
+        id: str,
+        position: list,
+        world,
+        food_num=10,
+        provide=2,
+        price=5,
+        *,
+        footprint=None,
+        entrance=None,
+        sprite_key=None,
+    ):
+        super().__init__(
+            id,
+            position,
+            world,
+            footprint=footprint,
+            entrance=entrance,
+            sprite_key=sprite_key,
+        )
         self.kind = "food_shop"
         self.food_num = food_num  # 商品数量
         self.provide = provide  # 提供的饱腹感
@@ -226,8 +319,26 @@ class food_shop(building):
 class playground(building):
     """游乐场：建筑子类，智能体进入并停留时自动恢复 relax。"""
 
-    def __init__(self, id: str, position: list, world,provide=10,price=3):
-        super().__init__(id, position, world)
+    def __init__(
+        self,
+        id: str,
+        position: list,
+        world,
+        provide=10,
+        price=3,
+        *,
+        footprint=None,
+        entrance=None,
+        sprite_key=None,
+    ):
+        super().__init__(
+            id,
+            position,
+            world,
+            footprint=footprint,
+            entrance=entrance,
+            sprite_key=sprite_key,
+        )
         self.kind = "playground"
         self.provide = provide  # 提供的放松度
         self.price = price  # 价格

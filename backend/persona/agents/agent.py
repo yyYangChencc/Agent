@@ -1,7 +1,8 @@
 from __future__ import annotations
 import json
 import math
-from typing import TYPE_CHECKING
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any
 from persona.agent_memory.query_builder import (
     DEFAULT_SEMANTIC_QUERY_MAX_BYTES,
     build_memory_planner_observation_text,
@@ -10,6 +11,8 @@ from persona.agent_memory.query_builder import (
 from persona.logger import get_logger
 from persona.need_events import apply_need_delta
 from persona.opinion.scale import clamp_opinion
+from persona.agents.short_term_memory import ShortTermMemoryBuffer
+from persona.llm.debug_trace import trace_llm_call
 
 if TYPE_CHECKING:
     from world.world import World
@@ -43,6 +46,7 @@ class Agent:
         memory_planner,
         config: "AgentConfig",
         speaking_style: str = "",
+        dataset_user_profile: dict[str, Any] | None = None,
         salary: float = 0.0,
     ):
         self.id = agent_id
@@ -54,7 +58,8 @@ class Agent:
         self.social_policy = social_policy
         self.memory_planner = memory_planner
         self.next_action: str | None = None
-        self.history: list[str] = []
+        self.short_term_memory = ShortTermMemoryBuffer()
+        self.last_short_term_compaction: dict[str, Any] = {}
         self.trajectory_buffer: list[dict] = []  # 当前任务内的 obs/action/reward 轨迹
         self._current_episode_id: str = ""       # 当前 tick 的经历链标识，由 World 设置
         self._current_episode_tick: int | None = None  # 当前经历链所属的世界时间步
@@ -111,6 +116,8 @@ class Agent:
         self.update_urgency_from_satisfaction()
 
         self.speaking_style: str = speaking_style
+        # 数据集画像是不可变初始化证据，不与运行时形成的新经历混写。
+        self.dataset_user_profile: dict[str, Any] = deepcopy(dataset_user_profile or {})
         self.emotion: str = "平静"
         # 工资：公司自动交互时每次获得的 money satisfaction 增量（>=0）
         self.salary: float = salary
@@ -166,7 +173,7 @@ class Agent:
         """
 
         observation_text = self._format_structured_context(observation)
-        self.add_history("observation", observation_text)
+        self.add_history("observation", observation)
         self._store_observation_memory(observation)
         action = self._decide_with_optional_memory(self.policy, observation, observation_text, context="world")
         self.add_history("action", action)
@@ -176,7 +183,7 @@ class Agent:
         """异步决策入口，与同步路径保持相同的结构化观察处理。"""
 
         observation_text = self._format_structured_context(observation)
-        self.add_history("observation", observation_text)
+        self.add_history("observation", observation)
         self._store_observation_memory(observation)
         action = await self._adecide_with_optional_memory(self.policy, observation, observation_text, context="world")
         self.add_history("action", action)
@@ -501,7 +508,12 @@ class Agent:
         notifications = social.get("notifications") if isinstance(social.get("notifications"), list) else []
         if notifications or obs.get("people") or obs.get("actions"):
             return False
-        recent_history = "\n".join(str(item) for item in self.history[-4:])
+        recent_entries = self.short_term_memory.recent_entries(self.config.short_term_memory_hot_ticks)
+        recent_history = "\n".join(
+            json.dumps(entry.content, ensure_ascii=False, default=str)
+            for entry in recent_entries
+            if entry.record_type in {"action_result", "feedback"}
+        )
         return "failed" not in recent_history.lower() and "error" not in recent_history.lower() and "失败" not in recent_history
 
     def recall(self, obs: str | dict | list | None, context: str = "world") -> list[str]:
@@ -833,7 +845,13 @@ class Agent:
                 episode_id=self._current_episode_id,
             )
 
-    def append_trajectory(self, obs: str | dict, action: str, reward: float | None) -> None:
+    def append_trajectory(
+        self,
+        obs: str | dict,
+        action: str,
+        reward: float | None,
+        action_result: dict | None = None,
+    ) -> None:
         """把当前任务中的一步执行结果暂存，等任务结束后再总结入长期记忆。"""
 
         self.trajectory_buffer.append({
@@ -842,7 +860,39 @@ class Agent:
             "action": action,
             "reward": reward,
             "episode_id": self._current_episode_id,
+            "action_result": dict(action_result or {}),
         })
+
+    def task_working_memory(self) -> dict[str, Any]:
+        """把当前任务轨迹投影为决策所需的有界工作记忆。"""
+
+        if not self.trajectory_buffer:
+            return {}
+        recent_count = max(1, int(self.config.short_term_memory_hot_ticks))
+        recent_entries = self.trajectory_buffer[-recent_count:]
+        rewards = [
+            entry.get("reward")
+            for entry in self.trajectory_buffer
+            if isinstance(entry.get("reward"), (int, float))
+        ]
+        return {
+            "task": self.task,
+            "task_urgency_key": self.task_urgency_key,
+            "current_focus": self.current_focus,
+            "episode_id": self._trajectory_episode_id(),
+            "step_count": len(self.trajectory_buffer),
+            "start_tick": int(self.trajectory_buffer[0].get("step") or self.world.time),
+            "end_tick": int(self.trajectory_buffer[-1].get("step") or self.world.time),
+            "cumulative_reward": sum(rewards),
+            "recent_action_results": [
+                {
+                    "step": entry.get("step"),
+                    "action_result": dict(entry.get("action_result") or {}),
+                    "reward": entry.get("reward"),
+                }
+                for entry in recent_entries
+            ],
+        }
 
     def flush_trajectory(self, task: str, need_key: str = "") -> None:
         """同步总结当前任务轨迹并写入情景记忆。"""
@@ -861,7 +911,14 @@ class Agent:
         trajectory_text = "\n".join(lines)
         if self.config.trajectory_summary_llm_enabled:
             system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
-            summary = self.reflect.llm.generate(system, user)
+            with trace_llm_call(
+                self.reflect.llm,
+                agent_id=self.id,
+                tick=self.world.time,
+                stage="trajectory_summary",
+                metadata={"task": task, "need_key": need_key},
+            ):
+                summary = self.reflect.llm.generate(system, user)
         else:
             summary = self._rule_trajectory_summary(task)
         logger.debug("[%s] 轨迹总结: %s", self.id, summary)
@@ -910,7 +967,14 @@ class Agent:
         trajectory_text = "\n".join(lines)
         if self.config.trajectory_summary_llm_enabled:
             system, user = self.reflect.prompt.trajectory_summary(trajectory_text, task)
-            summary = await self.reflect.llm.agenerate(system, user)
+            with trace_llm_call(
+                self.reflect.llm,
+                agent_id=self.id,
+                tick=self.world.time,
+                stage="trajectory_summary",
+                metadata={"task": task, "need_key": need_key},
+            ):
+                summary = await self.reflect.llm.agenerate(system, user)
         else:
             summary = self._rule_trajectory_summary(task)
         logger.debug("[%s] 轨迹总结: %s", self.id, summary)
@@ -1351,10 +1415,115 @@ class Agent:
     # History & task
     # ------------------------------------------------------------------
 
-    def add_history(self, type_: str, record: str) -> None:
-        self.history.append(f"{type_}: {record}")
-        if len(self.history) > self.config.max_history:
-            self.history = self.history[-self.config.max_history:]
+    @property
+    def history(self) -> list[str]:
+        """返回兼容旧读取方的短期记忆文本投影。"""
+
+        return self.short_term_memory.history_strings()
+
+    def add_history(
+        self,
+        type_: str,
+        record: Any,
+        *,
+        action_tool: str = "",
+        success: bool | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """追加结构化短期记录；压缩统一在 tick 安全边界执行。"""
+
+        self.short_term_memory.append(
+            world_time=int(self.world.time),
+            record_type=str(type_).strip().rstrip(":"),
+            content=record,
+            episode_id=self._current_episode_id,
+            task=self.task,
+            action_tool=action_tool,
+            success=success,
+            metadata=metadata,
+        )
+
+    def compact_short_term_memory_if_needed(self) -> bool:
+        """同步压缩达到上限的较早完整 tick。"""
+
+        snapshot = self._short_term_compaction_snapshot()
+        if snapshot is None:
+            return False
+        try:
+            summary = self.reflect.summarize_short_term_memory(
+                snapshot.payload(),
+                agent_id=self.id,
+                world_time=self.world.time,
+                start_tick=snapshot.start_tick,
+                end_tick=snapshot.end_tick,
+                max_chars=self._short_term_summary_max_chars(),
+                chunk_max_chars=self._short_term_summary_chunk_max_chars(),
+            )
+            committed = self.short_term_memory.commit_summary(snapshot, summary)
+            self._record_short_term_compaction(snapshot, committed, "completed" if committed else "stale")
+            return committed
+        except Exception as exc:
+            self._record_short_term_compaction(snapshot, False, "failed", str(exc))
+            logger.warning("[%s] 短期记忆总结失败，保留全部原始记录: %s", self.id, exc)
+            return False
+
+    async def acompact_short_term_memory_if_needed(self) -> bool:
+        """异步压缩达到上限的较早完整 tick。"""
+
+        snapshot = self._short_term_compaction_snapshot()
+        if snapshot is None:
+            return False
+        try:
+            summary = await self.reflect.asummarize_short_term_memory(
+                snapshot.payload(),
+                agent_id=self.id,
+                world_time=self.world.time,
+                start_tick=snapshot.start_tick,
+                end_tick=snapshot.end_tick,
+                max_chars=self._short_term_summary_max_chars(),
+                chunk_max_chars=self._short_term_summary_chunk_max_chars(),
+            )
+            committed = self.short_term_memory.commit_summary(snapshot, summary)
+            self._record_short_term_compaction(snapshot, committed, "completed" if committed else "stale")
+            return committed
+        except Exception as exc:
+            self._record_short_term_compaction(snapshot, False, "failed", str(exc))
+            logger.warning("[%s] 异步短期记忆总结失败，保留全部原始记录: %s", self.id, exc)
+            return False
+
+    def _short_term_compaction_snapshot(self):
+        if not getattr(self.config, "short_term_memory_summary_enabled", True):
+            return None
+        return self.short_term_memory.compaction_snapshot(
+            max_ticks=max(1, int(self.config.short_term_memory_max_ticks)),
+            hot_ticks=max(1, int(self.config.short_term_memory_hot_ticks)),
+        )
+
+    def _short_term_summary_max_chars(self) -> int:
+        return max(1, int(self.config.short_term_memory_summary_max_chars))
+
+    def _short_term_summary_chunk_max_chars(self) -> int:
+        configured = self.config.short_term_memory_summary_chunk_max_chars
+        if configured is None:
+            configured = self.config.memory_prompt_max_total_chars
+        return max(1, int(configured))
+
+    def _record_short_term_compaction(
+        self,
+        snapshot,
+        committed: bool,
+        status: str,
+        error: str = "",
+    ) -> None:
+        self.last_short_term_compaction = {
+            "tick": int(self.world.time),
+            "start_tick": snapshot.start_tick,
+            "end_tick": snapshot.end_tick,
+            "source_entry_count": len(snapshot.entry_ids),
+            "committed": bool(committed),
+            "status": status,
+            "error": error,
+        }
 
     def set_next_action(self, action: str) -> None:
         self.next_action = action
@@ -1374,6 +1543,8 @@ class Agent:
             return
         if self.task not in {"none", "done"} and task not in {"none", self.task}:
             self.store_trajectory_checkpoint(outcome="replaced")
+            # 新任务不能继承上一任务的工作轨迹。
+            self.trajectory_buffer.clear()
         self.task = task
         self.task_urgency_key = urgency_key if task != "none" else ""
         self.current_focus = ""
@@ -1446,11 +1617,17 @@ class Agent:
             for key in self.satisfaction
         }
 
-    def _place_near_sleep_position(self) -> bool:
-        """睡醒后把智能体放回床周围空格；无空格时保留当前位置。"""
+    def _place_near_sleep_position(self, bed=None) -> bool:
+        """睡醒后把智能体放回床完整占地外围；无空格时保留当前位置。"""
 
         bx, by = self.position
         with self.world._world_lock:
+            if bed is not None:
+                exit_pos = self.world.find_empty_cell_around_object(bed)
+                if exit_pos is not None:
+                    self.world.map.place(exit_pos[0], exit_pos[1], self.id)
+                    self.position = exit_pos
+                    return True
             for dx, dy in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]:
                 nx, ny = bx + dx, by + dy
                 if 0 <= nx < self.world.map.height and 0 <= ny < self.world.map.width:
@@ -1475,7 +1652,7 @@ class Agent:
         self.task = "none"
         if bed is not None:
             bed.exit_bed(self)
-        if not self._place_near_sleep_position():
+        if not self._place_near_sleep_position(bed):
             logger.warning("[%s] 睡眠结束但床周围无空位，暂留当前位置 %s", self.id, self.position)
         self.add_history("sleep_summary", f"睡眠结束，共经过 {elapsed} 步，期间需求变化：{change_str}")
         logger.info("[%s] 睡眠结束，经过 %d 步，需求变化 %s", self.id, elapsed, changes)

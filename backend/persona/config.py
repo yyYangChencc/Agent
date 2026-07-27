@@ -8,7 +8,7 @@ class AgentConfig:
     # LLM
     llm_model: str = "deepseek-v4-flash"
     embedding_model: str = "text-embedding-3-small"
-    llm_timeout_seconds: float = 120.0
+    llm_timeout_seconds: float = 150.0
     llm_connect_timeout_seconds: float = 5.0
     llm_max_retries: int = 0
     # 所有异步 LLM 请求共享的全局并发上限。
@@ -22,7 +22,8 @@ class AgentConfig:
     # embedding 连接和读写均允许等待 60 秒；异步本地排队仍受 180 秒总预算约束。
     embedding_timeout_seconds: float = 60.0
     embedding_connect_timeout_seconds: float = 60.0
-    embedding_max_retries: int = 0
+    # SDK 对瞬时连接失败和请求超时自动重试两次。
+    embedding_max_retries: int = 2
     embedding_max_concurrent_requests: int = 20
     embedding_rate_limit_retries: int = 2
     embedding_rate_limit_backoff_seconds: float = 1.0
@@ -32,6 +33,9 @@ class AgentConfig:
     # 连续服务失败后短暂冷却，避免故障期间持续压垮上游。
     service_failure_threshold: int = 3
     service_cooldown_seconds: float = 30.0
+    # 前端调试面板保存完整生成请求；只保留临近 tick，避免常驻内存持续增长。
+    llm_debug_trace_enabled: bool = True
+    llm_debug_trace_retention_ticks: int = 3
 
     # World
     observation_radius: int = 5
@@ -41,6 +45,13 @@ class AgentConfig:
 
     # Agent needs
     max_history: int = 12
+    # 短期记忆按完整 tick 管理；达到上限后压缩较早记录并保留最近原始 tick。
+    short_term_memory_max_ticks: int = 10
+    short_term_memory_hot_ticks: int = 3
+    short_term_memory_summary_enabled: bool = True
+    short_term_memory_summary_max_chars: int = 1200
+    # 未单独设置时复用 memory_prompt_max_total_chars 作为单批总结输入上限。
+    short_term_memory_summary_chunk_max_chars: int | None = None
     memory_top_k: int = 5
     memory_focus_bonus_k: int = 2
     memory_max_top_k: int = 8

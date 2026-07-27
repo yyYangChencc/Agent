@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "dataset": "fourforums",
+  "discussion_id": "1613",
+  "expected_post_count": 1181,
+  "actual_post_count": 1181,
+  "expected_author_count": 105,
+  "actual_author_count": 105,
+  "quote_row_count": 1678,
+  "posts_with_quotes": 1021,
+  "unattached_quote_count": 0,
+  "unresolved_same_discussion_quote_source_count": 0,
+  "declared_missing_parent_count": 0,
+  "unexpected_missing_parent_count": 0,
+  "mturk_author_stance_row_count": 0,
+  "authors_with_mturk_stance": 0,
+  "mturk_author_stance_author_coverage": 0.0,
+  "complete_definition": "仅检查可观测帖子与作者数量、引用目标连接和未声明父帖缺失；不表示原平台关注、推荐、曝光或互动数据完整。",
+  "complete": true
+}

@@ -46,6 +46,26 @@ GENERATED_ANALYSIS_FILES = {
     "opinion_voting_agent_metrics.csv",
     "opinion_voting_skipped_records.csv",
     "opinion_distribution.csv",
+    "platform_exposure_metrics.csv",
+    "platform_exposure_agent_metrics.csv",
+    "platform_propagation_metrics.csv",
+}
+PLATFORM_POST_CREATED_EVENT_TYPES = {
+    "official_news_created",
+    "influencer_post_created",
+    "send_post",
+    "quote_post",
+    "repost_post",
+}
+PLATFORM_DERIVATIVE_EVENT_TYPES = {"quote_post", "repost_post"}
+PLATFORM_INTERACTION_EVENT_TYPES = {
+    "like_post",
+    "dislike_post",
+    "comment_post",
+    "reply_comment",
+    "follow_author",
+    "quote_post",
+    "repost_post",
 }
 
 
@@ -421,6 +441,14 @@ def analyze_history_run(
             options=opts,
         )
     )
+    generated_paths.extend(
+        write_platform_analysis_outputs(
+            run_dir=run_dir,
+            output_dir=out_dir,
+            config_snapshot=snapshot,
+            rows_by_agent=rows_by_agent,
+        )
+    )
 
     polarization_report_path = None
     if assessment_mode == "llm_voting":
@@ -523,6 +551,608 @@ def resolve_config_snapshot(run_dir: Path, config_snapshot: dict | None) -> dict
     if not isinstance(payload, dict):
         raise ValueError(f"配置快照根节点必须是对象：{path}")
     return payload
+
+
+def write_platform_analysis_outputs(
+    *,
+    run_dir: Path,
+    output_dir: Path,
+    config_snapshot: dict,
+    rows_by_agent: dict[str, list[dict]],
+) -> list[Path]:
+    """从统一事件账本生成曝光、互动和传播统计。"""
+
+    exposure_path = run_dir / "platform_exposure_events.jsonl"
+    event_path = run_dir / "platform_events.jsonl"
+    if not exposure_path.is_file() or not event_path.is_file():
+        # 旧历史目录没有平台账本时，继续保留原有分析能力。
+        return []
+
+    exposures = _read_platform_jsonl(exposure_path)
+    events = _read_platform_jsonl(event_path)
+    agent_ids = config_snapshot.get("scenario_agent_ids")
+    snapshot_agents = config_snapshot.get("agents")
+    if (
+        not isinstance(agent_ids, list)
+        or not agent_ids
+        or any(not isinstance(agent_id, str) or not agent_id for agent_id in agent_ids)
+    ):
+        raise ValueError("config_snapshot.json 的 scenario_agent_ids 必须是非空字符串数组。")
+    if not isinstance(snapshot_agents, dict) or set(snapshot_agents) != set(agent_ids):
+        raise ValueError("config_snapshot.json 的 agents 键集合必须与 scenario_agent_ids 完全一致。")
+
+    initial_opinions: dict[str, float] = {}
+    initial_roles: dict[str, str] = {}
+    for agent_id in agent_ids:
+        detail = snapshot_agents[agent_id]
+        if not isinstance(detail, dict):
+            raise ValueError(f"config_snapshot.json 的 agents.{agent_id} 必须是 JSON 对象。")
+        initial_opinions[agent_id] = _platform_number(
+            detail.get("opinion"),
+            f"config_snapshot.json agents.{agent_id}.opinion",
+        )
+        role = detail.get("initial_role")
+        initial_roles[agent_id] = role if isinstance(role, str) else ""
+
+    ticks = sorted({
+        _platform_csv_tick(row.get("tick"), agent_id)
+        for agent_id, rows in rows_by_agent.items()
+        for row in rows
+    })
+    if not ticks:
+        raise ValueError("智能体历史中没有可用于平台统计的 tick。")
+    tick_set = set(ticks)
+
+    posts = _build_platform_post_index(events, tick_set)
+    interaction_attempts = [
+        event
+        for event in events
+        if event.get("event_type") in PLATFORM_INTERACTION_EVENT_TYPES
+    ]
+    request_by_id: dict[str, dict] = {}
+    tick_data = {
+        tick: {
+            "feed_requests": set(),
+            "eligible_posts": set(),
+            "displayed_posts": set(),
+            "exposures_by_agent": Counter(),
+            "interactions_by_agent": Counter(),
+            "same": 0,
+            "cross": 0,
+            "neutral_agent": 0,
+            "neutral_post": 0,
+            "unclassified": 0,
+            "influencer": 0,
+            "exposure_count": 0,
+            "interaction_attempt_count": 0,
+            "interaction_count": 0,
+        }
+        for tick in ticks
+    }
+    agent_data = {
+        agent_id: {
+            "feed_requests": set(),
+            "eligible_posts": set(),
+            "displayed_posts": set(),
+            "interaction_requests": set(),
+            "same": 0,
+            "cross": 0,
+            "neutral_agent": 0,
+            "neutral_post": 0,
+            "unclassified": 0,
+            "influencer": 0,
+            "exposure_count": 0,
+            "interaction_attempt_count": 0,
+            "interaction_count": 0,
+        }
+        for agent_id in agent_ids
+    }
+    unindexed_displayed_posts = 0
+
+    for line_number, exposure in enumerate(exposures, start=1):
+        tick = _platform_int(exposure.get("tick"), f"{exposure_path.name} 第 {line_number} 行 tick")
+        receiver_id = exposure.get("receiver_id")
+        request_id = exposure.get("feed_request_id")
+        if tick not in tick_set:
+            raise ValueError(f"{exposure_path.name} 第 {line_number} 行 tick 不属于智能体历史。")
+        if not isinstance(receiver_id, str) or receiver_id not in initial_opinions:
+            raise ValueError(f"{exposure_path.name} 第 {line_number} 行 receiver_id 不属于场景智能体。")
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError(f"{exposure_path.name} 第 {line_number} 行 feed_request_id 必须是非空字符串。")
+        if request_id in request_by_id:
+            raise ValueError(f"{exposure_path.name} 存在重复 feed_request_id：{request_id}")
+        eligible = _platform_post_id_list(
+            exposure.get("eligible_post_ids"),
+            f"{exposure_path.name} 第 {line_number} 行 eligible_post_ids",
+        )
+        displayed = _platform_post_id_list(
+            exposure.get("displayed_post_ids"),
+            f"{exposure_path.name} 第 {line_number} 行 displayed_post_ids",
+        )
+        if not set(displayed).issubset(set(eligible)):
+            raise ValueError(f"{exposure_path.name} 第 {line_number} 行 displayed_post_ids 不是 eligible_post_ids 的子集。")
+        request_by_id[request_id] = {
+            "tick": tick,
+            "receiver_id": receiver_id,
+            "displayed_post_ids": set(displayed),
+        }
+        tick_item = tick_data[tick]
+        agent_item = agent_data[receiver_id]
+        tick_item["feed_requests"].add(request_id)
+        tick_item["eligible_posts"].update(eligible)
+        tick_item["displayed_posts"].update(displayed)
+        agent_item["feed_requests"].add(request_id)
+        agent_item["eligible_posts"].update(eligible)
+        agent_item["displayed_posts"].update(displayed)
+
+        for post_id in displayed:
+            tick_item["exposure_count"] += 1
+            tick_item["exposures_by_agent"][receiver_id] += 1
+            agent_item["exposure_count"] += 1
+            post = posts.get(post_id)
+            if post is None:
+                tick_item["unclassified"] += 1
+                agent_item["unclassified"] += 1
+                unindexed_displayed_posts += 1
+                continue
+            if post["source_type"] == "influencer":
+                tick_item["influencer"] += 1
+                agent_item["influencer"] += 1
+            receiver_opinion = initial_opinions[receiver_id]
+            post_opinion = post["opinion_index"]
+            if receiver_opinion == 0.0:
+                category = "neutral_agent"
+            elif post_opinion == 0.0:
+                category = "neutral_post"
+            elif receiver_opinion * post_opinion > 0.0:
+                category = "same"
+            else:
+                category = "cross"
+            tick_item[category] += 1
+            agent_item[category] += 1
+
+    unmatched_interaction_requests = 0
+    interaction_request_ids: set[str] = set()
+    effective_interactions = []
+    for index, event in enumerate(interaction_attempts, start=1):
+        tick = _platform_int(event.get("tick"), f"{event_path.name} 互动事件 {index} 的 tick")
+        actor_id = event.get("actor_id")
+        request_id = event.get("feed_request_id")
+        if tick not in tick_set:
+            raise ValueError(f"{event_path.name} 互动事件 {index} 的 tick 不属于智能体历史。")
+        if not isinstance(actor_id, str) or actor_id not in agent_data:
+            raise ValueError(f"{event_path.name} 互动事件 {index} 的 actor_id 不属于场景智能体。")
+        tick_data[tick]["interaction_attempt_count"] += 1
+        agent_data[actor_id]["interaction_attempt_count"] += 1
+        effective = _is_effective_platform_interaction(event, event_path.name, index)
+        if effective:
+            effective_interactions.append(event)
+            tick_data[tick]["interaction_count"] += 1
+            tick_data[tick]["interactions_by_agent"][actor_id] += 1
+            agent_data[actor_id]["interaction_count"] += 1
+        if not isinstance(request_id, str) or request_id not in request_by_id:
+            unmatched_interaction_requests += 1
+            continue
+        request = request_by_id[request_id]
+        if request["receiver_id"] != actor_id:
+            raise ValueError(f"{event_path.name} 互动事件 {index} 的 actor_id 与曝光 receiver_id 不一致。")
+        event_type = event.get("event_type")
+        if event_type != "follow_author":
+            target_post_id = event.get("post_id")
+            if event_type in PLATFORM_DERIVATIVE_EVENT_TYPES:
+                details = event.get("details")
+                target_post_id = details.get("source_post_id") if isinstance(details, dict) else None
+            target_post_id = _platform_int(
+                target_post_id,
+                f"{event_path.name} 互动事件 {index} 的目标帖子 ID",
+            )
+            if target_post_id not in request["displayed_post_ids"]:
+                raise ValueError(f"{event_path.name} 互动事件 {index} 的目标帖子不属于对应曝光结果。")
+        if effective:
+            interaction_request_ids.add(request_id)
+            agent_data[actor_id]["interaction_requests"].add(request_id)
+
+    tick_rows = []
+    for tick in ticks:
+        item = tick_data[tick]
+        classified = item["same"] + item["cross"]
+        feed_request_count = len(item["feed_requests"])
+        converted_requests = len(item["feed_requests"] & interaction_request_ids)
+        tick_rows.append({
+            "tick": tick,
+            "feed_request_count": feed_request_count,
+            "exposure_count": item["exposure_count"],
+            "classified_exposure_count": classified,
+            "same_side_exposure_count": item["same"],
+            "cross_side_exposure_count": item["cross"],
+            "neutral_agent_exposure_count": item["neutral_agent"],
+            "neutral_post_exposure_count": item["neutral_post"],
+            "unclassified_exposure_count": item["unclassified"],
+            "same_side_exposure_share": _ratio(item["same"], classified),
+            "cross_side_exposure_share": _ratio(item["cross"], classified),
+            "stance_exposure_entropy": _binary_entropy(item["same"], item["cross"]),
+            "influencer_exposure_count": item["influencer"],
+            "influencer_exposure_share": _ratio(item["influencer"], item["exposure_count"]),
+            "unique_eligible_post_count": len(item["eligible_posts"]),
+            "unique_displayed_post_count": len(item["displayed_posts"]),
+            "unique_post_coverage": _ratio(len(item["displayed_posts"]), len(item["eligible_posts"])),
+            "interaction_attempt_count": item["interaction_attempt_count"],
+            "interaction_count": item["interaction_count"],
+            "feed_requests_with_interaction": converted_requests,
+            "exposure_interaction_conversion_rate": _ratio(converted_requests, feed_request_count),
+            "exposure_gini": _gini([item["exposures_by_agent"].get(agent_id, 0) for agent_id in agent_ids]),
+            "interaction_gini": _gini([item["interactions_by_agent"].get(agent_id, 0) for agent_id in agent_ids]),
+        })
+
+    agent_rows = []
+    for agent_id in sorted(agent_ids):
+        item = agent_data[agent_id]
+        classified = item["same"] + item["cross"]
+        feed_request_count = len(item["feed_requests"])
+        converted_requests = len(item["feed_requests"] & interaction_request_ids)
+        agent_rows.append({
+            "agent_id": agent_id,
+            "initial_opinion": initial_opinions[agent_id],
+            "initial_role": initial_roles[agent_id],
+            "feed_request_count": feed_request_count,
+            "exposure_count": item["exposure_count"],
+            "classified_exposure_count": classified,
+            "same_side_exposure_count": item["same"],
+            "cross_side_exposure_count": item["cross"],
+            "neutral_agent_exposure_count": item["neutral_agent"],
+            "neutral_post_exposure_count": item["neutral_post"],
+            "unclassified_exposure_count": item["unclassified"],
+            "same_side_exposure_share": _ratio(item["same"], classified),
+            "cross_side_exposure_share": _ratio(item["cross"], classified),
+            "stance_exposure_entropy": _binary_entropy(item["same"], item["cross"]),
+            "influencer_exposure_count": item["influencer"],
+            "influencer_exposure_share": _ratio(item["influencer"], item["exposure_count"]),
+            "unique_eligible_post_count": len(item["eligible_posts"]),
+            "unique_displayed_post_count": len(item["displayed_posts"]),
+            "unique_post_coverage": _ratio(len(item["displayed_posts"]), len(item["eligible_posts"])),
+            "interaction_attempt_count": item["interaction_attempt_count"],
+            "interaction_count": item["interaction_count"],
+            "feed_requests_with_interaction": converted_requests,
+            "exposure_interaction_conversion_rate": _ratio(converted_requests, feed_request_count),
+        })
+
+    propagation_rows, missing_propagation_roots = _build_platform_propagation_rows(
+        posts=posts,
+        exposures=exposures,
+        interactions=effective_interactions,
+    )
+    tick_metrics_path = output_dir / "platform_exposure_metrics.csv"
+    agent_metrics_path = output_dir / "platform_exposure_agent_metrics.csv"
+    propagation_path = output_dir / "platform_propagation_metrics.csv"
+    report_path = output_dir / "platform_analysis_report.md"
+    _write_platform_rows(tick_metrics_path, tick_rows)
+    _write_platform_rows(agent_metrics_path, agent_rows)
+    _write_platform_rows(propagation_path, propagation_rows)
+
+    total_exposures = sum(row["exposure_count"] for row in agent_rows)
+    total_classified = sum(row["classified_exposure_count"] for row in agent_rows)
+    total_same = sum(row["same_side_exposure_count"] for row in agent_rows)
+    total_cross = sum(row["cross_side_exposure_count"] for row in agent_rows)
+    total_requests = len(request_by_id)
+    report_path.write_text(
+        _render_platform_analysis_report(
+            total_requests=total_requests,
+            total_exposures=total_exposures,
+            total_classified=total_classified,
+            total_same=total_same,
+            total_cross=total_cross,
+            total_interaction_attempts=len(interaction_attempts),
+            total_interactions=len(effective_interactions),
+            converted_requests=len(interaction_request_ids),
+            unindexed_displayed_posts=unindexed_displayed_posts,
+            unmatched_interaction_requests=unmatched_interaction_requests,
+            missing_propagation_roots=missing_propagation_roots,
+            agent_rows=agent_rows,
+        ),
+        encoding="utf-8",
+    )
+    return [tick_metrics_path, agent_metrics_path, propagation_path, report_path]
+
+
+def _read_platform_jsonl(path: Path) -> list[dict]:
+    """严格读取平台 JSONL，保留错误所在行。"""
+
+    rows = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{path.name} 第 {line_number} 行不是有效 JSON：{exc}") from exc
+        if not isinstance(item, dict):
+            raise ValueError(f"{path.name} 第 {line_number} 行必须是 JSON 对象。")
+        rows.append(item)
+    return rows
+
+
+def _build_platform_post_index(events: list[dict], tick_set: set[int]) -> dict[int, dict]:
+    """从精确的帖子创建事件建立帖子、来源和传播根索引。"""
+
+    posts: dict[int, dict] = {}
+    for index, event in enumerate(events, start=1):
+        event_type = event.get("event_type")
+        if event_type not in PLATFORM_POST_CREATED_EVENT_TYPES:
+            continue
+        post_id = _platform_int(event.get("post_id"), f"platform_events.jsonl 第 {index} 行 post_id")
+        tick = _platform_int(event.get("tick"), f"platform_events.jsonl 第 {index} 行 tick")
+        actor_id = event.get("actor_id")
+        details = event.get("details")
+        if tick not in tick_set:
+            raise ValueError(f"platform_events.jsonl 第 {index} 行 tick 不属于智能体历史。")
+        if post_id in posts:
+            raise ValueError(f"platform_events.jsonl 存在重复帖子创建事件：post_id={post_id}")
+        if not isinstance(actor_id, str) or not actor_id:
+            raise ValueError(f"platform_events.jsonl 第 {index} 行 actor_id 必须是非空字符串。")
+        if not isinstance(details, dict):
+            raise ValueError(f"platform_events.jsonl 第 {index} 行 details 必须是 JSON 对象。")
+        source_type = details.get("source_type")
+        if not isinstance(source_type, str) or not source_type:
+            raise ValueError(f"platform_events.jsonl 第 {index} 行 details.source_type 必须是非空字符串。")
+        source_post_id = None
+        root_post_id = post_id
+        if event_type in PLATFORM_DERIVATIVE_EVENT_TYPES:
+            source_post_id = _platform_int(
+                details.get("source_post_id"),
+                f"platform_events.jsonl 第 {index} 行 details.source_post_id",
+            )
+            root_post_id = _platform_int(
+                details.get("root_post_id"),
+                f"platform_events.jsonl 第 {index} 行 details.root_post_id",
+            )
+        posts[post_id] = {
+            "post_id": post_id,
+            "event_type": event_type,
+            "actor_id": actor_id,
+            "tick": tick,
+            "source_type": source_type,
+            "opinion_index": _platform_number(
+                details.get("opinion_index"),
+                f"platform_events.jsonl 第 {index} 行 details.opinion_index",
+            ),
+            "source_post_id": source_post_id,
+            "root_post_id": root_post_id,
+        }
+    return posts
+
+
+def _build_platform_propagation_rows(
+    *,
+    posts: dict[int, dict],
+    exposures: list[dict],
+    interactions: list[dict],
+) -> tuple[list[dict], int]:
+    """按 root_post_id 汇总转发、引用、曝光和互动传播链。"""
+
+    cascade_posts: dict[int, set[int]] = defaultdict(set)
+    derivative_events: dict[int, list[dict]] = defaultdict(list)
+    for post_id, post in posts.items():
+        root_post_id = post["root_post_id"]
+        cascade_posts[root_post_id].add(post_id)
+        if post["event_type"] in PLATFORM_DERIVATIVE_EVENT_TYPES:
+            derivative_events[root_post_id].append(post)
+
+    exposure_counts: Counter[int] = Counter()
+    exposed_agents: dict[int, set[str]] = defaultdict(set)
+    for exposure in exposures:
+        receiver_id = exposure.get("receiver_id")
+        displayed = exposure.get("displayed_post_ids")
+        if not isinstance(receiver_id, str) or not isinstance(displayed, list):
+            continue
+        for post_id_value in displayed:
+            if isinstance(post_id_value, bool) or not isinstance(post_id_value, int):
+                continue
+            post = posts.get(post_id_value)
+            if post is None:
+                continue
+            root_post_id = post["root_post_id"]
+            exposure_counts[root_post_id] += 1
+            exposed_agents[root_post_id].add(receiver_id)
+
+    cascade_interactions: Counter[int] = Counter()
+    for event in interactions:
+        event_type = event.get("event_type")
+        target_post_id = event.get("post_id")
+        if event_type in PLATFORM_DERIVATIVE_EVENT_TYPES:
+            details = event.get("details")
+            target_post_id = details.get("source_post_id") if isinstance(details, dict) else None
+        if isinstance(target_post_id, bool) or not isinstance(target_post_id, int):
+            continue
+        target_post = posts.get(target_post_id)
+        if target_post is not None:
+            cascade_interactions[target_post["root_post_id"]] += 1
+
+    depth_cache: dict[int, int] = {}
+
+    def post_depth(post_id: int, active: set[int]) -> int:
+        if post_id in depth_cache:
+            return depth_cache[post_id]
+        if post_id in active:
+            raise ValueError(f"平台传播链存在循环：post_id={post_id}")
+        post = posts.get(post_id)
+        if post is None or post["source_post_id"] is None:
+            depth_cache[post_id] = 0
+            return 0
+        depth = 1 + post_depth(post["source_post_id"], active | {post_id})
+        depth_cache[post_id] = depth
+        return depth
+
+    rows = []
+    missing_roots = 0
+    for root_post_id in sorted(cascade_posts):
+        root = posts.get(root_post_id)
+        if root is None:
+            missing_roots += 1
+        derivatives = derivative_events[root_post_id]
+        rows.append({
+            "root_post_id": root_post_id,
+            "root_author_id": root["actor_id"] if root is not None else "",
+            "root_created_tick": root["tick"] if root is not None else "",
+            "root_source_type": root["source_type"] if root is not None else "",
+            "root_opinion_index": root["opinion_index"] if root is not None else "",
+            "cascade_post_count": len(cascade_posts[root_post_id]),
+            "descendant_post_count": len(derivatives),
+            "repost_count": sum(post["event_type"] == "repost_post" for post in derivatives),
+            "quote_count": sum(post["event_type"] == "quote_post" for post in derivatives),
+            "propagation_depth": max((post_depth(post_id, set()) for post_id in cascade_posts[root_post_id]), default=0),
+            "spreading_participant_count": len({post["actor_id"] for post in derivatives}),
+            "total_exposure_count": exposure_counts[root_post_id],
+            "unique_exposed_agent_count": len(exposed_agents[root_post_id]),
+            "cascade_interaction_count": cascade_interactions[root_post_id],
+        })
+    return rows, missing_roots
+
+
+def _is_effective_platform_interaction(event: dict, event_path_name: str, index: int) -> bool:
+    """将带 changed 的操作与真正改变平台状态的互动分开。"""
+
+    event_type = event.get("event_type")
+    if event_type not in {"like_post", "dislike_post", "follow_author"}:
+        return True
+    details = event.get("details")
+    if not isinstance(details, dict) or not isinstance(details.get("changed"), bool):
+        raise ValueError(f"{event_path_name} 互动事件 {index} 的 details.changed 必须是布尔值。")
+    return details["changed"]
+
+
+def _write_platform_rows(path: Path, rows: list[dict]) -> None:
+    """按首行字段顺序写出平台统计 CSV。"""
+
+    if not rows:
+        raise ValueError(f"没有可写入 {path.name} 的平台统计行。")
+    fields = list(rows[0])
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: format_number(row[field]) for field in fields})
+
+
+def _render_platform_analysis_report(
+    *,
+    total_requests: int,
+    total_exposures: int,
+    total_classified: int,
+    total_same: int,
+    total_cross: int,
+    total_interaction_attempts: int,
+    total_interactions: int,
+    converted_requests: int,
+    unindexed_displayed_posts: int,
+    unmatched_interaction_requests: int,
+    missing_propagation_roots: int,
+    agent_rows: list[dict],
+) -> str:
+    """说明平台指标的精确定义和账本完整性。"""
+
+    lines = [
+        "# 社交平台曝光、互动与传播统计",
+        "",
+        "## 总体结果",
+        "",
+        markdown_table(
+            ["指标", "值"],
+            [
+                ["信息流请求数", total_requests],
+                ["帖子曝光次数", total_exposures],
+                ["可判定同侧或跨侧的曝光次数", total_classified],
+                ["同侧曝光占比", format_number(_ratio(total_same, total_classified))],
+                ["跨侧曝光占比", format_number(_ratio(total_cross, total_classified))],
+                ["平台互动尝试数", total_interaction_attempts],
+                ["平台互动事件数", total_interactions],
+                ["发生互动的信息流请求数", converted_requests],
+                ["曝光后互动转化率", format_number(_ratio(converted_requests, total_requests))],
+                ["总体曝光 Gini", format_number(_gini([row["exposure_count"] for row in agent_rows]))],
+                ["总体互动 Gini", format_number(_gini([row["interaction_count"] for row in agent_rows]))],
+            ],
+        ),
+        "",
+        "## 指标定义",
+        "",
+        "- 同侧曝光：智能体初始 `opinion` 与帖子 `details.opinion_index` 的乘积大于 0。",
+        "- 跨侧曝光：智能体初始 `opinion` 与帖子 `details.opinion_index` 的乘积小于 0。",
+        "- 初始观念为 0 和帖子观念为 0 的曝光分别单列，不进入同侧、跨侧分母。",
+        "- 立场曝光熵：同侧与跨侧曝光二元分布的以 2 为底 Shannon 熵，范围为 0 至 1。",
+        "- 投放账号曝光：帖子创建事件的 `details.source_type` 精确等于 `influencer`。",
+        "- 唯一帖子覆盖率：同一统计范围内唯一 `displayed_post_ids` 数量除以唯一 `eligible_post_ids` 数量。",
+        "- 曝光后互动：点赞、点踩、评论、回复评论、关注、引用或转发事件与曝光记录共享同一 `feed_request_id`；带 `details.changed` 的操作仅在其值为 `true` 时计为有效互动。",
+        "- 传播深度：沿引用或转发事件的 `details.source_post_id` 逐级回溯所得最大边数。",
+        "- 传播参与人数：创建引用帖或转发帖的不同 `actor_id` 数量，不包含原帖作者。",
+        "- Gini 使用所有场景智能体的曝光或互动次数计算；全为 0 时记为 0。",
+        "",
+        "## 数据完整性",
+        "",
+        markdown_table(
+            ["检查项", "数量"],
+            [
+                ["未找到帖子创建事件的 displayed_post_id", unindexed_displayed_posts],
+                ["无法连接曝光记录的互动事件", unmatched_interaction_requests],
+                ["未改变平台状态的互动尝试", total_interaction_attempts - total_interactions],
+                ["传播根帖缺少创建事件", missing_propagation_roots],
+            ],
+        ),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _platform_int(value: object, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{path} 必须是整数。")
+    return value
+
+
+def _platform_csv_tick(value: object, agent_id: str) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"智能体 {agent_id} 的历史 tick 不是整数：{value!r}") from exc
+
+
+def _platform_number(value: object, path: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{path} 必须是数值。")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{path} 必须是有限数值。")
+    return number
+
+
+def _platform_post_id_list(value: object, path: str) -> list[int]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path} 必须是 JSON 数组。")
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+        raise ValueError(f"{path} 的每一项都必须是整数。")
+    return value
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    return numerator / denominator if denominator else 0.0
+
+
+def _binary_entropy(left_count: int, right_count: int) -> float:
+    total = left_count + right_count
+    if total == 0:
+        return 0.0
+    probabilities = [count / total for count in (left_count, right_count) if count]
+    return -sum(probability * math.log2(probability) for probability in probabilities)
+
+
+def _gini(values: list[int]) -> float:
+    if not values or any(value < 0 for value in values):
+        raise ValueError("Gini 输入必须是非空非负整数数组。")
+    ordered = sorted(values)
+    total = sum(ordered)
+    if total == 0:
+        return 0.0
+    weighted = sum(index * value for index, value in enumerate(ordered, start=1))
+    count = len(ordered)
+    return (2.0 * weighted) / (count * total) - (count + 1.0) / count
 
 
 def read_posthoc_voting_rows(run_dir: Path) -> dict[str, list[dict]]:
@@ -984,6 +1614,56 @@ def build_opinion_distribution(
     ]
 
 
+def build_opinion_transition_analysis(
+    initial_opinions: dict[str, float],
+    final_opinions: dict[str, float],
+    categories: list[dict[str, str]],
+    options: AnalysisOptions,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """统计跨观念档位的用户明细及各档位流入流出情况。"""
+
+    category_by_key = {item["key"]: item for item in categories}
+    changed_agents: list[dict[str, object]] = []
+    all_transitions: list[tuple[str, str]] = []
+    for agent_id in sorted(initial_opinions):
+        initial_key = opinion_distribution_key(initial_opinions[agent_id], options)
+        final_key = opinion_distribution_key(final_opinions[agent_id], options)
+        all_transitions.append((initial_key, final_key))
+        if initial_key != final_key:
+            changed_agents.append({
+                "agent_id": agent_id,
+                "initial_opinion": initial_opinions[agent_id],
+                "initial_category": initial_key,
+                "initial_category_label": category_by_key[initial_key]["label"],
+                "final_opinion": final_opinions[agent_id],
+                "final_category": final_key,
+                "final_category_label": category_by_key[final_key]["label"],
+            })
+
+    category_summary = []
+    for category in categories:
+        key = category["key"]
+        initial_count = sum(1 for initial_key, _ in all_transitions if initial_key == key)
+        initial_changed_count = sum(
+            1 for initial_key, final_key in all_transitions if initial_key == key and final_key != key
+        )
+        final_count = sum(1 for _, final_key in all_transitions if final_key == key)
+        final_from_other_count = sum(
+            1 for initial_key, final_key in all_transitions if final_key == key and initial_key != key
+        )
+        category_summary.append({
+            "category": key,
+            "category_label": category["label"],
+            "initial_count": initial_count,
+            "initial_changed_count": initial_changed_count,
+            "initial_changed_share": initial_changed_count / initial_count if initial_count else 0.0,
+            "final_count": final_count,
+            "final_from_other_count": final_from_other_count,
+            "final_from_other_share": final_from_other_count / final_count if final_count else 0.0,
+        })
+    return changed_agents, category_summary
+
+
 def write_opinion_analysis_outputs(
     *,
     run_dir: Path,
@@ -1001,6 +1681,14 @@ def write_opinion_analysis_outputs(
     categories = opinion_distribution_categories(options)
     initial_tick = ticks[0]
     final_tick = ticks[-1]
+    initial_opinions = opinions_for_tick(series_by_agent, initial_tick, allow_incomplete=False)
+    final_opinions = opinions_for_tick(series_by_agent, final_tick, allow_incomplete=False)
+    changed_agents, transition_summary = build_opinion_transition_analysis(
+        initial_opinions,
+        final_opinions,
+        categories,
+        options,
+    )
     stages = []
     for key, label, tick in [
         ("initial", "初始时刻", initial_tick),
@@ -1034,16 +1722,32 @@ def write_opinion_analysis_outputs(
             for agent_id in sorted(series_by_agent)
         ],
         "stages": stages,
+        "opinion_transitions": {
+            "changed_agent_count": len(changed_agents),
+            "changed_agents": changed_agents,
+            "category_summary": transition_summary,
+        },
     }
     json_path = output_dir / "opinion_analysis.json"
     csv_path = output_dir / "opinion_distribution.csv"
     svg_path = output_dir / "opinion_distribution.svg"
     html_path = output_dir / "opinion_dashboard.html"
+    changed_agents_csv_path = output_dir / "opinion_changed_agents.csv"
+    transition_summary_csv_path = output_dir / "opinion_transition_summary.csv"
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     write_opinion_distribution_csv(csv_path, stages)
+    write_opinion_changed_agents_csv(changed_agents_csv_path, changed_agents)
+    write_opinion_transition_summary_csv(transition_summary_csv_path, transition_summary)
     write_opinion_distribution_svg(svg_path, stages)
     write_opinion_dashboard_html(html_path, payload)
-    return [json_path, csv_path, svg_path, html_path]
+    return [
+        json_path,
+        csv_path,
+        changed_agents_csv_path,
+        transition_summary_csv_path,
+        svg_path,
+        html_path,
+    ]
 
 
 def write_opinion_distribution_csv(path: Path, stages: list[dict]) -> None:
@@ -1065,6 +1769,34 @@ def write_opinion_distribution_csv(path: Path, stages: list[dict]) -> None:
                     "count": item["count"],
                     "share": format_number(item["share"]),
                 })
+
+
+def write_opinion_changed_agents_csv(path: Path, changed_agents: list[dict[str, object]]) -> None:
+    """写出初始与结束观念档位不一致的全部用户。"""
+
+    fields = [
+        "agent_id", "initial_opinion", "initial_category", "initial_category_label",
+        "final_opinion", "final_category", "final_category_label",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for item in changed_agents:
+            writer.writerow({field: format_number(item[field]) for field in fields})
+
+
+def write_opinion_transition_summary_csv(path: Path, category_summary: list[dict[str, object]]) -> None:
+    """写出各观念档位的初始改变比例和结束转入比例。"""
+
+    fields = [
+        "category", "category_label", "initial_count", "initial_changed_count",
+        "initial_changed_share", "final_count", "final_from_other_count", "final_from_other_share",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for item in category_summary:
+            writer.writerow({field: format_number(item[field]) for field in fields})
 
 
 def write_opinion_distribution_svg(path: Path, stages: list[dict]) -> Path:
@@ -1155,6 +1887,11 @@ def write_opinion_dashboard_html(path: Path, payload: dict) -> Path:
     .track { height: 14px; background: #e5e7eb; }
     .fill { height: 100%; min-width: 0; }
     .number { text-align: right; font-variant-numeric: tabular-nums; }
+    .table-wrap { overflow-x: auto; background: white; border: 1px solid #d1d5db; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid #e5e7eb; text-align: left; white-space: nowrap; }
+    th { background: #f3f4f6; font-weight: 600; }
+    td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
     @media (max-width: 760px) { body { padding: 14px; } .distribution { grid-template-columns: 1fr; } select { min-width: 0; width: 100%; } }
   </style>
 </head>
@@ -1169,6 +1906,11 @@ def write_opinion_dashboard_html(path: Path, payload: dict) -> Path:
   <svg id="opinion-chart" class="chart" viewBox="0 0 1000 460" role="img" aria-label="智能体观念变化曲线"></svg>
   <h2>初始与结束时刻观念分布</h2>
   <div id="distribution" class="distribution"></div>
+  <h2>各观念档位变化统计</h2>
+  <div class="table-wrap"><table id="transition-summary"></table></div>
+  <h2>初始与结束观念不一致的用户</h2>
+  <div class="meta" id="changed-agent-count"></div>
+  <div class="table-wrap"><table id="changed-agents"></table></div>
 </main>
 <script>
 const data = __PAYLOAD__;
@@ -1228,6 +1970,19 @@ document.getElementById('distribution').innerHTML = data.stages.map(stage => `
         <span class="number">${item.count} · ${(item.share * 100).toFixed(1)}%</span>
       </div>`).join('')}
   </section>`).join('');
+
+// 汇总表分别使用初始人数和结束人数作为两个比例的分母。
+document.getElementById('transition-summary').innerHTML = `
+  <thead><tr><th>观念</th><th class="numeric">初始人数</th><th class="numeric">发生改变</th><th class="numeric">初始改变比例</th><th class="numeric">结束人数</th><th class="numeric">由其他观念转入</th><th class="numeric">结束转入比例</th></tr></thead>
+  <tbody>${data.opinion_transitions.category_summary.map(item => `<tr>
+    <td>${escapeHtml(item.category_label)}</td><td class="numeric">${item.initial_count}</td><td class="numeric">${item.initial_changed_count}</td><td class="numeric">${(item.initial_changed_share * 100).toFixed(1)}%</td><td class="numeric">${item.final_count}</td><td class="numeric">${item.final_from_other_count}</td><td class="numeric">${(item.final_from_other_share * 100).toFixed(1)}%</td>
+  </tr>`).join('')}</tbody>`;
+
+const changedAgents = data.opinion_transitions.changed_agents;
+document.getElementById('changed-agent-count').textContent = `共 ${changedAgents.length} 个用户发生跨档变化`;
+document.getElementById('changed-agents').innerHTML = `
+  <thead><tr><th>用户</th><th class="numeric">初始值</th><th>初始观念</th><th class="numeric">结束值</th><th>结束观念</th></tr></thead>
+  <tbody>${changedAgents.map(item => `<tr><td>${escapeHtml(item.agent_id)}</td><td class="numeric">${item.initial_opinion.toFixed(3)}</td><td>${escapeHtml(item.initial_category_label)}</td><td class="numeric">${item.final_opinion.toFixed(3)}</td><td>${escapeHtml(item.final_category_label)}</td></tr>`).join('')}</tbody>`;
 drawChart();
 </script>
 </body>

@@ -4,6 +4,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 from persona.llm.interface import JSON_OBJECT_RESPONSE_FORMAT
+from persona.llm.debug_trace import annotate_current_llm_trace, trace_llm_call
 from persona.llm.json_utils import parse_json_object
 from persona.logger import get_logger
 
@@ -237,72 +238,119 @@ class Policy(ABC):
 class LLMPolicy(Policy):
     """普通行动决策 policy，要求 LLM 输出含 think/action 的 JSON 字符串。"""
 
-    def __init__(self, llm_client: "LLMClient", prompt_builder, parser):
+    def __init__(self, llm_client: "LLMClient", prompt_builder, parser, trace_stage: str = "decision"):
         self.llm = llm_client
         self.prompt_builder = prompt_builder
         self.parser = parser
         self.memory_parser = MemoryQueryPlanParser()
+        self.trace_stage = str(trace_stage)
 
     def decide_or_plan(self, agent: "Agent", observation: str, *, context: str) -> tuple[str, str]:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=f"{self.trace_stage}_initial",
+            metadata={"context": context},
+        ):
+            return self._decide_or_plan(agent, observation, context=context)
+
+    def _decide_or_plan(self, agent: "Agent", observation: str, *, context: str) -> tuple[str, str]:
         """第一次决策返回 action 或非空记忆查询计划。"""
 
         system, user = self.prompt_builder.build_initial_decision(agent, observation, context)
         raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         result_type, payload, error = self._parse_initial_decision(raw, context)
+        annotate_current_llm_trace(error)
         for attempt in range(MAX_RETRIES):
             if not error:
                 break
             retry_user = self._retry_prompt(user, raw, error, target="initial_decision")
             raw = self.llm.generate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             result_type, payload, error = self._parse_initial_decision(raw, context)
+            annotate_current_llm_trace(error)
         if error:
             logger.warning("[%s] 第一次决策重试%d次后仍无效，本轮不行动", agent.id, MAX_RETRIES)
             return "action", NO_ACTION_DECISION
         return result_type, payload
 
     async def adecide_or_plan(self, agent: "Agent", observation: str, *, context: str) -> tuple[str, str]:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=f"{self.trace_stage}_initial",
+            metadata={"context": context},
+        ):
+            return await self._adecide_or_plan(agent, observation, context=context)
+
+    async def _adecide_or_plan(self, agent: "Agent", observation: str, *, context: str) -> tuple[str, str]:
         """异步执行第一次行动或记忆查询决策。"""
 
         system, user = self.prompt_builder.build_initial_decision(agent, observation, context)
         raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         result_type, payload, error = self._parse_initial_decision(raw, context)
+        annotate_current_llm_trace(error)
         for attempt in range(MAX_RETRIES):
             if not error:
                 break
             retry_user = self._retry_prompt(user, raw, error, target="initial_decision")
             raw = await self.llm.agenerate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             result_type, payload, error = self._parse_initial_decision(raw, context)
+            annotate_current_llm_trace(error)
         if error:
             logger.warning("[%s] 异步第一次决策重试%d次后仍无效，本轮不行动", agent.id, MAX_RETRIES)
             return "action", NO_ACTION_DECISION
         return result_type, payload
 
     def decide_after_memory(self, agent: "Agent", observation: str, mem_info) -> str:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=f"{self.trace_stage}_after_memory",
+        ):
+            return self._decide_after_memory(agent, observation, mem_info)
+
+    def _decide_after_memory(self, agent: "Agent", observation: str, mem_info) -> str:
         """使用独立提示词执行查询后的行动决策。"""
 
         system, user = self.prompt_builder.build_after_memory_decision(agent, observation, mem_info)
         raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         action, error = self.parser.parse_action_only_with_error(raw)
+        annotate_current_llm_trace(error)
         for attempt in range(MAX_RETRIES):
             if not error:
                 break
             retry_user = self._retry_prompt(user, raw, error, target="action_after_memory")
             raw = self.llm.generate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             action, error = self.parser.parse_action_only_with_error(raw)
+            annotate_current_llm_trace(error)
         return NO_ACTION_DECISION if error else action
 
     async def adecide_after_memory(self, agent: "Agent", observation: str, mem_info) -> str:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=f"{self.trace_stage}_after_memory",
+        ):
+            return await self._adecide_after_memory(agent, observation, mem_info)
+
+    async def _adecide_after_memory(self, agent: "Agent", observation: str, mem_info) -> str:
         """异步执行查询后的行动决策。"""
 
         system, user = self.prompt_builder.build_after_memory_decision(agent, observation, mem_info)
         raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         action, error = self.parser.parse_action_only_with_error(raw)
+        annotate_current_llm_trace(error)
         for attempt in range(MAX_RETRIES):
             if not error:
                 break
             retry_user = self._retry_prompt(user, raw, error, target="action_after_memory")
             raw = await self.llm.agenerate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             action, error = self.parser.parse_action_only_with_error(raw)
+            annotate_current_llm_trace(error)
         return NO_ACTION_DECISION if error else action
 
     def _parse_initial_decision(self, raw: str, context: str) -> tuple[str, str, str]:
@@ -332,6 +380,15 @@ class LLMPolicy(Policy):
         return "memory", plan, ""
 
     def decide(self, agent: "Agent", observation: str, mem_info) -> str:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=self.trace_stage,
+        ):
+            return self._decide(agent, observation, mem_info)
+
+    def _decide(self, agent: "Agent", observation: str, mem_info) -> str:
         system, user = self.prompt_builder.build(agent, observation, mem_info)
         raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         if not raw.strip():
@@ -339,6 +396,7 @@ class LLMPolicy(Policy):
             return NO_ACTION_DECISION
         logger.debug("[%s] LLM 输出: %s", agent.id, raw)
         action, error = self.parser.parse_action_with_error(raw)
+        annotate_current_llm_trace(error)
 
         for attempt in range(MAX_RETRIES):
             if not error:
@@ -348,6 +406,7 @@ class LLMPolicy(Policy):
             raw = self.llm.generate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             logger.debug("[%s] 重试%d LLM 输出: %s", agent.id, attempt + 1, raw)
             action, error = self.parser.parse_action_with_error(raw)
+            annotate_current_llm_trace(error)
 
         if error:
             logger.warning("[%s] 重试%d次后仍解析失败，本轮跳过行动", agent.id, MAX_RETRIES)
@@ -355,6 +414,15 @@ class LLMPolicy(Policy):
         return action
 
     async def adecide(self, agent: "Agent", observation: str, mem_info) -> str:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=self.trace_stage,
+        ):
+            return await self._adecide(agent, observation, mem_info)
+
+    async def _adecide(self, agent: "Agent", observation: str, mem_info) -> str:
         system, user = self.prompt_builder.build(agent, observation, mem_info)
         raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
         if not raw.strip():
@@ -362,6 +430,7 @@ class LLMPolicy(Policy):
             return NO_ACTION_DECISION
         logger.debug("[%s] LLM 输出: %s", agent.id, raw)
         action, error = self.parser.parse_action_with_error(raw)
+        annotate_current_llm_trace(error)
 
         for attempt in range(MAX_RETRIES):
             if not error:
@@ -371,6 +440,7 @@ class LLMPolicy(Policy):
             raw = await self.llm.agenerate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             logger.debug("[%s] 重试%d LLM 输出: %s", agent.id, attempt + 1, raw)
             action, error = self.parser.parse_action_with_error(raw)
+            annotate_current_llm_trace(error)
 
         if error:
             logger.warning("[%s] 重试%d次后仍解析失败，本轮跳过行动", agent.id, MAX_RETRIES)
@@ -411,12 +481,29 @@ class LLMPolicy(Policy):
 class LLMMemoryPlannerPolicy:
     """行动前的 LLM 记忆查询规划器，输出受控 JSON 查询计划。"""
 
-    def __init__(self, llm_client: "LLMClient", prompt_builder, parser):
+    def __init__(self, llm_client: "LLMClient", prompt_builder, parser, trace_stage: str = "memory_planning"):
         self.llm = llm_client
         self.prompt_builder = prompt_builder
         self.parser = parser
+        self.trace_stage = str(trace_stage)
 
     def plan(
+        self,
+        agent: "Agent",
+        observation: str,
+        context: str = "world",
+        recalled_memories: list[str] | None = None,
+    ) -> str:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=self.trace_stage,
+            metadata={"context": context},
+        ):
+            return self._plan(agent, observation, context=context, recalled_memories=recalled_memories)
+
+    def _plan(
         self,
         agent: "Agent",
         observation: str,
@@ -437,6 +524,7 @@ class LLMMemoryPlannerPolicy:
             return self._fallback_plan(context)
         logger.debug("[%s] memory planner 输出: %s", agent.id, raw)
         plan, error = self.parser.parse_plan_with_error(raw)
+        annotate_current_llm_trace(error)
 
         for attempt in range(MAX_RETRIES):
             if not error:
@@ -446,6 +534,7 @@ class LLMMemoryPlannerPolicy:
             raw = self.llm.generate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             logger.debug("[%s] memory planner 重试%d 输出: %s", agent.id, attempt + 1, raw)
             plan, error = self.parser.parse_plan_with_error(raw)
+            annotate_current_llm_trace(error)
 
         if error:
             logger.warning("[%s] memory planner 重试%d次后仍解析失败，使用保守计划", agent.id, MAX_RETRIES)
@@ -453,6 +542,22 @@ class LLMMemoryPlannerPolicy:
         return plan
 
     async def aplan(
+        self,
+        agent: "Agent",
+        observation: str,
+        context: str = "world",
+        recalled_memories: list[str] | None = None,
+    ) -> str:
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=agent.world.time,
+            stage=self.trace_stage,
+            metadata={"context": context},
+        ):
+            return await self._aplan(agent, observation, context=context, recalled_memories=recalled_memories)
+
+    async def _aplan(
         self,
         agent: "Agent",
         observation: str,
@@ -473,6 +578,7 @@ class LLMMemoryPlannerPolicy:
             return self._fallback_plan(context)
         logger.debug("[%s] memory planner 输出: %s", agent.id, raw)
         plan, error = self.parser.parse_plan_with_error(raw)
+        annotate_current_llm_trace(error)
 
         for attempt in range(MAX_RETRIES):
             if not error:
@@ -482,6 +588,7 @@ class LLMMemoryPlannerPolicy:
             raw = await self.llm.agenerate(system, retry_user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
             logger.debug("[%s] memory planner 重试%d 输出: %s", agent.id, attempt + 1, raw)
             plan, error = self.parser.parse_plan_with_error(raw)
+            annotate_current_llm_trace(error)
 
         if error:
             logger.warning("[%s] memory planner 重试%d次后仍解析失败，使用保守计划", agent.id, MAX_RETRIES)

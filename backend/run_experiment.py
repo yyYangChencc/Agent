@@ -195,15 +195,25 @@ def _config_snapshot(runtime, args: argparse.Namespace) -> dict:
     agents = {}
     scenario_agent_ids = list(getattr(runtime, "scenario_agent_ids", [])) or list(runtime.world.agents.keys())
     scenario_spec = getattr(runtime, "scenario_spec", {}) or {}
+    spec_agents = {
+        str(item.get("id")): item
+        for item in (scenario_spec.get("agents") or [])
+        if isinstance(item, dict) and item.get("id") is not None
+    }
     for agent_id in scenario_agent_ids:
         agent = runtime.world.agents.get(agent_id)
         if agent is None:
             continue
+        spec_agent = spec_agents.get(agent_id, {})
         agents[agent_id] = {
             "position": list(agent.position),
             "opinion": agent.opinion,
             "satisfaction": dict(agent.satisfaction),
             "speaking_style": agent.speaking_style,
+            "initial_role": spec_agent.get("initial_role"),
+            "community_id": spec_agent.get("community_id"),
+            "personal_bed_id": spec_agent.get("personal_bed_id"),
+            "source_author_id": spec_agent.get("source_author_id"),
             "followers": list(agent.followers),
             "online_trust": dict(agent.online_trust),
             "offline_trust": dict(agent.offline_trust),
@@ -216,6 +226,22 @@ def _config_snapshot(runtime, args: argparse.Namespace) -> dict:
         "influencers": list(scenario_spec.get("influencers") or []),
         "official_news_schedule": scenario_spec.get("official_news_schedule") or {},
         "influencer_schedule": scenario_spec.get("influencer_schedule") or {},
+        "scenario_controls": {
+            "dataset": scenario_spec.get("dataset"),
+            "discussion_id": scenario_spec.get("discussion_id"),
+            "discussion_title": scenario_spec.get("discussion_title"),
+            "quarter_time": scenario_spec.get("quarter_time"),
+            "source_paths": scenario_spec.get("source_paths") or {},
+            "network_mode": scenario_spec.get("network_mode"),
+            "controlled_variable": scenario_spec.get("controlled_variable"),
+            "topology_rule": scenario_spec.get("topology_rule"),
+            "community_assignment_rule": scenario_spec.get("community_assignment_rule"),
+            "influencer_follow_rule": scenario_spec.get("influencer_follow_rule"),
+            "online_trust_rule": scenario_spec.get("online_trust_rule"),
+            "entity_follow_count": scenario_spec.get("entity_follow_count"),
+            "influencer_follow_count": scenario_spec.get("influencer_follow_count"),
+            "influencer_follow_randomization": scenario_spec.get("influencer_follow_randomization"),
+        },
         "llm": args.llm,
         "ticks": runtime.config.simulation_step_limit,
         "default_opinion_topic": runtime.config.default_opinion_topic,

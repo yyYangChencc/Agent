@@ -162,6 +162,28 @@ class BasePromptBuilder:
         lines = []
         if agent.speaking_style:
             lines.append(f"- 说话风格：{agent.speaking_style}")
+        profile = getattr(agent, "dataset_user_profile", {})
+        if isinstance(profile, dict) and profile:
+            argument_style = str(profile.get("argument_style") or "").strip()
+            social_style = str(profile.get("social_style") or "").strip()
+            if argument_style:
+                lines.append(f"- 论证方式：{argument_style}")
+            if social_style:
+                lines.append(f"- 社交表达：{social_style}")
+            raw_author = profile.get("raw_author")
+            if isinstance(raw_author, dict):
+                source_fields = [
+                    f"{key}={value}"
+                    for key, value in raw_author.items()
+                    if value not in {None, ""}
+                ]
+                if source_fields:
+                    lines.append(f"- 数据集原始资料：{'，'.join(source_fields)}")
+            notes = profile.get("initialization_notes")
+            if isinstance(notes, list):
+                clean_notes = [str(note).strip() for note in notes if str(note).strip()]
+                if clean_notes:
+                    lines.append(f"- 初始化约束：{'；'.join(clean_notes)}")
         lines.append(f"- 当前情绪：{agent.emotion}")
         return "[ROLE_TEMPLATE_ONLY]\n" + "\n".join(lines) + "\n[/ROLE_TEMPLATE_ONLY]"
 
@@ -278,10 +300,56 @@ class BasePromptBuilder:
         )
 
     def _history_block(self, agent: "Agent", max_n: int = 5) -> str:
-        recent = agent.history[-max_n:]
-        if not recent:
+        """兼容非行动 Prompt，使用最近完整 tick 的结构化投影。"""
+
+        entries = agent.short_term_memory.recent_entries(agent.config.short_term_memory_hot_ticks)
+        if not entries:
             return "（无历史记录）"
-        return "\n".join(f"  {i + 1}. {h}" for i, h in enumerate(recent))
+        values = [entry.render() for entry in entries]
+        return "\n".join(f"  {i + 1}. {value}" for i, value in enumerate(values[-max_n:]))
+
+    def _short_term_memory_block(self, agent: "Agent") -> str:
+        """渲染滚动总结和最近完整时间步。"""
+
+        parts = []
+        summaries = agent.short_term_memory.summaries()
+        if summaries:
+            summary = summaries[-1]
+            parts.append(
+                "### 较早经历的滚动总结\n"
+                + json.dumps(summary.content, ensure_ascii=False, sort_keys=True, default=str)
+            )
+        else:
+            parts.append("### 较早经历的滚动总结\n（暂无）")
+
+        recent = agent.short_term_memory.recent_entries(agent.config.short_term_memory_hot_ticks)
+        if not recent:
+            parts.append("### 最近完整时间步\n（暂无）")
+            return "\n\n".join(parts)
+        grouped: dict[int, list[str]] = {}
+        for entry in recent:
+            # 当前 observation 已在行动 Prompt 中单独注入，避免同一事实重复占用上下文。
+            if entry.record_type == "observation" and entry.world_time == int(agent.world.time):
+                continue
+            payload = entry.summary_payload()
+            grouped.setdefault(entry.world_time, []).append(
+                f"- {entry.record_type}: "
+                + json.dumps(payload["content"], ensure_ascii=False, sort_keys=True, default=str)
+            )
+        if not grouped:
+            parts.append("### 最近完整时间步\n（暂无额外历史记录）")
+            return "\n\n".join(parts)
+        tick_blocks = []
+        for tick in sorted(grouped):
+            tick_blocks.append(f"t={tick}\n" + "\n".join(grouped[tick]))
+        parts.append("### 最近完整时间步\n" + "\n\n".join(tick_blocks))
+        return "\n\n".join(parts)
+
+    def _task_working_memory_block(self, agent: "Agent") -> str:
+        progress = agent.task_working_memory()
+        if not progress:
+            return "（当前任务尚无轨迹）"
+        return json.dumps(progress, ensure_ascii=False, sort_keys=True, default=str)
 
     def _memory_block(self, agent: "Agent", mem_info: list | str | None) -> str:
         if not mem_info:
@@ -441,10 +509,11 @@ class MemoryPlannerPromptBuilder(BasePromptBuilder):
         """排除原始观察，只给 planner 少量有界行动与查询历史。"""
 
         values = []
-        for item in reversed(agent.history):
-            text = str(item or "")
-            if text.startswith("observation:") or text.startswith("conversation:"):
+        entries = agent.short_term_memory.recent_entries(agent.config.short_term_memory_hot_ticks)
+        for entry in reversed(entries):
+            if entry.record_type in {"observation", "conversation"}:
                 continue
+            text = entry.render()
             values.append(text[:300])
             if len(values) >= max_n:
                 break
@@ -513,8 +582,10 @@ class WorldPromptBuilder(BasePromptBuilder):
             f"{self._opinion_block(agent)}\n\n"
             "## 观测（半径5格）\n"
             f"{observation}\n\n"
-            "## 近期历史\n"
-            f"{self._history_block(agent)}\n\n"
+            "## 短期记忆\n"
+            f"{self._short_term_memory_block(agent)}\n\n"
+            "## 当前任务进展\n"
+            f"{self._task_working_memory_block(agent)}\n\n"
             "## 相关记忆\n"
             f"{self._memory_block(agent, mem_info)}\n\n"
             "## 可调用工具\n"
@@ -679,7 +750,7 @@ class ReflectPromptBuilder(BasePromptBuilder):
             f"{self._state_block(agent)}\n"
             f"{self._urgency_block(agent)}\n\n"
             "## 最近观测\n"
-            f"{agent.history[-1] if agent.history else '（无）'}\n\n"
+            f"{self._latest_observation_block(agent)}\n\n"
             "## 近期历史\n"
             f"{self._history_block(agent)}"
         )
@@ -696,6 +767,46 @@ class ReflectPromptBuilder(BasePromptBuilder):
         user = (
             f"刚刚完成的任务：{last_task}\n\n"
             f"行为轨迹：\n{trajectory}"
+        )
+        return system, user
+
+    def short_term_memory_summary(
+        self,
+        entries: list[dict],
+        *,
+        start_tick: int,
+        end_tick: int,
+        max_chars: int,
+    ) -> tuple[str, str]:
+        """构造只允许压缩既有事实的短期记忆总结提示词。"""
+
+        system = (
+            "你是短期记忆压缩器，只能压缩输入 JSON 中已经出现的事实。"
+            "禁止补造实体 ID、位置、动作、反馈、奖励、任务结果或因果关系。"
+            "历史位置和资源状态必须写成过去信息，不能描述为当前状态。"
+            "必须保留成功动作、失败动作及其原始原因，并指出尚未完成的目标。"
+            "referenced_entity_ids 只能逐字复制输入中已经出现的标识符。"
+            "只输出一个合法 JSON 对象，不要输出 Markdown 或额外解释。"
+        )
+        user = json.dumps(
+            {
+                "start_tick": int(start_tick),
+                "end_tick": int(end_tick),
+                "max_output_chars": int(max_chars),
+                "entries": entries,
+                "output_schema": {
+                    "start_tick": int(start_tick),
+                    "end_tick": int(end_tick),
+                    "chronology": "按时间顺序压缩的经历",
+                    "task_progress": "任务进展",
+                    "successful_actions": ["成功动作及结果"],
+                    "failed_actions": ["失败动作及原始原因"],
+                    "unresolved_goals": ["尚未完成的目标"],
+                    "referenced_entity_ids": ["输入中原样出现的实体 ID"],
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
         )
         return system, user
 
@@ -722,7 +833,11 @@ class ReflectPromptBuilder(BasePromptBuilder):
             f"当前任务：{agent.task}\n"
             f"当前需求值：{urgency_info}\n"
             f"当前焦点：{agent.current_focus or '（未设定）'}\n\n"
-            "近期行动历史：\n"
-            + "\n".join(agent.history[-6:])
+            "当前任务工作记忆：\n"
+            + self._task_working_memory_block(agent)
         )
         return system, user
+
+    def _latest_observation_block(self, agent: "Agent") -> str:
+        entry = agent.short_term_memory.latest({"observation"})
+        return entry.render() if entry is not None else "（无）"

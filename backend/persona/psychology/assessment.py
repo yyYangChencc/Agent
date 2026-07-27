@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from persona.llm.interface import JSON_OBJECT_RESPONSE_FORMAT
+from persona.llm.debug_trace import trace_llm_call
 from persona.llm.json_utils import parse_json_object
 from persona.logger import get_logger
 
@@ -522,8 +523,19 @@ class LLMTheoryCardNeedEvaluator:
         previous_result: dict | None,
     ) -> dict:
         system, user = self._build_prompt(agent, window, previous_result)
-        raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
-        return self._build_result_from_raw(agent, window, previous_result, raw)
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=window.end_tick or agent.world.time,
+            stage="psychological_assessment",
+            metadata={
+                "need_key": self.need_key,
+                "window_start_tick": window.start_tick,
+                "window_end_tick": window.end_tick,
+            },
+        ):
+            raw = self.llm.generate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            return self._build_result_from_raw(agent, window, previous_result, raw)
 
     async def _aassess_with_llm(
         self,
@@ -533,8 +545,19 @@ class LLMTheoryCardNeedEvaluator:
         previous_result: dict | None,
     ) -> dict:
         system, user = self._build_prompt(agent, window, previous_result)
-        raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
-        return self._build_result_from_raw(agent, window, previous_result, raw)
+        with trace_llm_call(
+            self.llm,
+            agent_id=agent.id,
+            tick=window.end_tick or agent.world.time,
+            stage="psychological_assessment",
+            metadata={
+                "need_key": self.need_key,
+                "window_start_tick": window.start_tick,
+                "window_end_tick": window.end_tick,
+            },
+        ):
+            raw = await self.llm.agenerate(system, user, response_format=JSON_OBJECT_RESPONSE_FORMAT)
+            return self._build_result_from_raw(agent, window, previous_result, raw)
 
     def _fallback_after_llm_error(
         self,
@@ -598,7 +621,12 @@ class LLMTheoryCardNeedEvaluator:
         # system 文本 + JSON user payload，然后调用 llm.generate/agenerate。
         pressure_snapshot = self._pressure_snapshot(window)
         need_change = window.need_changes().get(self.need_key, 0.0)
-        recent_history = list(getattr(agent, "history", []) or [])[-8:]
+        memory = getattr(agent, "short_term_memory", None)
+        if memory is None:
+            recent_history = list(getattr(agent, "history", []) or [])[-8:]
+        else:
+            entries = memory.recent_entries(agent.config.short_term_memory_hot_ticks)
+            recent_history = [entry.render() for entry in entries[-8:]]
         system = (
             "你是智能体心理评测器。请根据理论卡、评测窗口经历、需求变化、有效压力和上一轮评测结果，"
             "只评估该智能体当前由该需求缺口引发的心理中介变量。"
@@ -1208,8 +1236,12 @@ class PsychologicalAssessmentCoordinator:
         return AssessmentWindow(start_tick=start_tick)
 
     def _experience_summary(self, agent: "Agent", tick: int) -> str:
-        # 保持窗口紧凑：每个 tick 只追加最新一条 history。
+        # 保持窗口紧凑：每个 tick 只追加最新一条行动结果。
         # LLM prompt 会另外传入 recent_history。
-        if not agent.history:
-            return ""
-        return f"t={tick}: {agent.history[-1]}"
+        memory = getattr(agent, "short_term_memory", None)
+        if memory is None:
+            if not agent.history:
+                return ""
+            return f"t={tick}: {agent.history[-1]}"
+        entry = memory.latest({"action_result", "feedback", "reward", "action"})
+        return entry.render() if entry is not None else ""

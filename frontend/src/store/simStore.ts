@@ -22,6 +22,7 @@ export interface AgentState {
   last_opinion_assessment: Record<string, unknown> | null
   last_opinion_voting: Record<string, unknown> | null
   last_think: string          // 最近一次 <Think> 内容
+  llm_debug: AgentLLMDebugSummary // 当前快照只指向上一时间步的调试记录
   sleeping: boolean           // 是否处于睡眠状态
   sleep_ticks_remaining: number  // 剩余睡眠步数
   inside_building_id: string | null  // 当前所在建筑 ID，null 表示在室外
@@ -30,12 +31,20 @@ export interface AgentState {
 export interface ObjectState {
   id: string
   pos: [number, number]
+  footprint: MapPosition[]    // 对象占用的全部地图格
+  entrance: MapPosition | null // 场景声明的交互入口
+  sprite_key: string | null   // 前端素材裁切键
   type: string
   kind: string                // 物品种类标识，与 objects.py 中 self.kind 一致
   description: string         // 物品的人类可读描述，由后端 objects.get_desc() 动态生成
   num: number | null          // null 表示无数量属性；<=0 时隐藏渲染
   occupant_count: number      // 当前在建筑内的智能体数量
   occupants: string[]         // 当前占用者的智能体 ID 列表
+}
+
+export interface AgentLLMDebugSummary {
+  display_tick: number | null
+  call_count: number
 }
 
 export type MapBounds = [number, number, number, number]
@@ -74,6 +83,17 @@ export interface MapObjectRegionState {
   entrance: MapPosition
 }
 
+export interface MapDecorationState {
+  kind: 'tree' | 'shrub'
+  pos: MapPosition
+  sprite_key: string
+}
+
+export interface MapTileSpritesState {
+  grass: string
+  road: string
+}
+
 export interface MapDesignState {
   version: number
   map_size: [number, number]
@@ -83,6 +103,8 @@ export interface MapDesignState {
   regions: MapRegionState[]
   roads: MapRoadState[]
   object_regions: Record<string, MapObjectRegionState>
+  tile_sprites?: MapTileSpritesState
+  decorations?: MapDecorationState[]
 }
 
 export interface CommentState {

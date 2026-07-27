@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
+import time
 from threading import Lock
+
+from persona.llm.debug_trace import record_manual_llm_attempt
 
 
 class FlanT5OpinionScorer:
@@ -19,17 +22,37 @@ class FlanT5OpinionScorer:
     def score(self, *, topic_statement: str, honest_belief: str) -> int:
         """返回精确的五级观念评分；无效输出直接报错。"""
 
-        self._ensure_loaded()
         prompt = self._build_prompt(topic_statement, honest_belief)
-        with self._lock:
-            inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True)
-            inputs = {key: value.to(self._device) for key, value in inputs.items()}
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=4,
-                do_sample=False,
+        started_at = time.perf_counter()
+        try:
+            self._ensure_loaded()
+            with self._lock:
+                inputs = self._tokenizer(prompt, return_tensors="pt", truncation=True)
+                inputs = {key: value.to(self._device) for key, value in inputs.items()}
+                outputs = self._model.generate(
+                    **inputs,
+                    max_new_tokens=4,
+                    do_sample=False,
+                )
+            raw = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+        except Exception as exc:
+            record_manual_llm_attempt(
+                system_prompt="",
+                user_prompt=prompt,
+                response="",
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                status="failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
             )
-        raw = self._tokenizer.decode(outputs[0], skip_special_tokens=True)
+            raise
+        record_manual_llm_attempt(
+            system_prompt="",
+            user_prompt=prompt,
+            response=raw,
+            duration_ms=(time.perf_counter() - started_at) * 1000,
+            status="completed" if str(raw or "") else "empty_response",
+        )
         return self.parse_rating(raw)
 
     @classmethod
@@ -65,7 +88,7 @@ class FlanT5OpinionScorer:
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self._model = AutoModelForSeq2SeqLM.from_pretrained(
                 self.model_name,
-                dtype=torch.float32,
+                dtype=torch.float16,
             ).to(self._device)
             self._model.eval()
 

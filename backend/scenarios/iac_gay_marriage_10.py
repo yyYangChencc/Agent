@@ -75,30 +75,154 @@ def _subset_role(opinion: float) -> str:
 def _selected_objects() -> list[dict[str, Any]]:
     """为 10 人子场景保留独立的 25x25 紧凑设施布局。"""
 
-    beds = [
-        {"kind": "bed", "id": f"bed_{index + 1}", "position": [1 + index // 5, 1 + (index % 5) * 2]}
-        for index in range(10)
-    ]
+    beds = []
+    for index in range(10):
+        row = 1 if index < 5 else 4
+        col = 1 + (index % 5) * 2
+        beds.append(
+            {
+                "kind": "bed",
+                "id": f"bed_{index + 1}",
+                "position": [row, col],
+                "footprint": [[row, col], [row, col + 1]],
+                "sprite_key": f"home_{index % 6}",
+            }
+        )
     facilities = [
-        {"kind": "company", "id": "company_1", "position": [20, 3], "params": {"salary": 8, "relax_cost": 8}},
-        {"kind": "company", "id": "company_2", "position": [22, 6], "params": {"salary": 12, "relax_cost": 12}},
-        {"kind": "food_shop", "id": "shop_1", "position": [2, 18], "params": {"food_num": 160, "provide": 30, "price": 6}},
-        {"kind": "food_shop", "id": "shop_2", "position": [4, 21], "params": {"food_num": 160, "provide": 20, "price": 4}},
-        {"kind": "playground", "id": "playground_1", "position": [20, 20], "params": {"provide": 18, "price": 5}},
+        {
+            "kind": "company",
+            "id": "company_1",
+            "position": [17, 2],
+            "footprint": _square_footprint(17, 2),
+            "sprite_key": "company_0",
+            "params": {"salary": 8, "relax_cost": 8},
+        },
+        {
+            "kind": "company",
+            "id": "company_2",
+            "position": [22, 6],
+            "footprint": _square_footprint(22, 6),
+            "sprite_key": "company_1",
+            "params": {"salary": 12, "relax_cost": 12},
+        },
+        {
+            "kind": "food_shop",
+            "id": "shop_1",
+            "position": [2, 18],
+            "footprint": _square_footprint(2, 18),
+            "sprite_key": "shop_0",
+            "params": {"food_num": 160, "provide": 30, "price": 6},
+        },
+        {
+            "kind": "food_shop",
+            "id": "shop_2",
+            "position": [3, 21],
+            "footprint": _square_footprint(3, 21),
+            "sprite_key": "shop_1",
+            "params": {"food_num": 160, "provide": 20, "price": 4},
+        },
+        {
+            "kind": "playground",
+            "id": "playground_1",
+            "position": [17, 18],
+            "footprint": _square_footprint(17, 18),
+            "sprite_key": "playground_0",
+            "params": {"provide": 18, "price": 5},
+        },
+        {
+            "kind": "playground",
+            "id": "playground_2",
+            "position": [17, 22],
+            "footprint": _square_footprint(17, 22),
+            "sprite_key": "playground_1",
+            "params": {"provide": 18, "price": 5},
+        },
+        {
+            "kind": "playground",
+            "id": "playground_3",
+            "position": [22, 18],
+            "footprint": _square_footprint(22, 18),
+            "sprite_key": "playground_2",
+            "params": {"provide": 18, "price": 5},
+        },
+        {
+            "kind": "playground",
+            "id": "playground_4",
+            "position": [22, 22],
+            "footprint": _square_footprint(22, 22),
+            "sprite_key": "playground_3",
+            "params": {"provide": 18, "price": 5},
+        },
     ]
     return beds + facilities
+
+
+def _square_footprint(row: int, col: int) -> list[list[int]]:
+    """生成 2x2 建筑占地。"""
+
+    return [[row, col], [row, col + 1], [row + 1, col], [row + 1, col + 1]]
+
+
+COMPACT_OBJECT_REGIONS = {
+    **{
+        f"bed_{index + 1}": {
+            "region_id": "residential_area",
+            "entrance": [1 if index < 5 else 4, 1 + (index % 5) * 2],
+        }
+        for index in range(10)
+    },
+    "company_1": {"region_id": "work_area", "entrance": [18, 2]},
+    "company_2": {"region_id": "work_area", "entrance": [23, 6]},
+    "shop_1": {"region_id": "commercial_area", "entrance": [3, 18]},
+    "shop_2": {"region_id": "commercial_area", "entrance": [4, 21]},
+    "playground_1": {"region_id": "recreation_area", "entrance": [18, 18]},
+    "playground_2": {"region_id": "recreation_area", "entrance": [18, 22]},
+    "playground_3": {"region_id": "recreation_area", "entrance": [23, 18]},
+    "playground_4": {"region_id": "recreation_area", "entrance": [23, 22]},
+}
+
+
+# 固定随机种子测试页生成的植被坐标，保证实时画面与历史回放一致。
+COMPACT_DECORATIONS = [
+    {"kind": "tree", "pos": [11, 11], "sprite_key": "tree_1"},
+    {"kind": "shrub", "pos": [15, 23], "sprite_key": "shrub_0"},
+    {"kind": "shrub", "pos": [9, 21], "sprite_key": "shrub_0"},
+    {"kind": "tree", "pos": [13, 2], "sprite_key": "tree_0"},
+    {"kind": "shrub", "pos": [9, 20], "sprite_key": "shrub_1"},
+    {"kind": "shrub", "pos": [10, 1], "sprite_key": "shrub_0"},
+    {"kind": "tree", "pos": [11, 0], "sprite_key": "tree_3"},
+    {"kind": "shrub", "pos": [11, 4], "sprite_key": "shrub_1"},
+    {"kind": "shrub", "pos": [14, 11], "sprite_key": "shrub_0"},
+    {"kind": "tree", "pos": [21, 15], "sprite_key": "tree_3"},
+    {"kind": "shrub", "pos": [3, 6], "sprite_key": "shrub_1"},
+    {"kind": "shrub", "pos": [18, 15], "sprite_key": "shrub_1"},
+    {"kind": "tree", "pos": [3, 4], "sprite_key": "tree_1"},
+    {"kind": "shrub", "pos": [10, 19], "sprite_key": "shrub_0"},
+    {"kind": "shrub", "pos": [24, 15], "sprite_key": "shrub_0"},
+    {"kind": "tree", "pos": [13, 0], "sprite_key": "tree_1"},
+    {"kind": "shrub", "pos": [24, 13], "sprite_key": "shrub_1"},
+    {"kind": "shrub", "pos": [9, 2], "sprite_key": "shrub_1"},
+    {"kind": "tree", "pos": [9, 0], "sprite_key": "tree_1"},
+    {"kind": "shrub", "pos": [8, 13], "sprite_key": "shrub_0"},
+    {"kind": "shrub", "pos": [10, 14], "sprite_key": "shrub_1"},
+    {"kind": "tree", "pos": [19, 15], "sprite_key": "tree_3"},
+    {"kind": "shrub", "pos": [13, 10], "sprite_key": "shrub_1"},
+    {"kind": "shrub", "pos": [14, 10], "sprite_key": "shrub_1"},
+]
 
 
 def _map_design(objects: list[dict[str, Any]]) -> dict[str, Any]:
     """移除未使用对象和空食物区标注，保持地图与场景对象一致。"""
 
     design = polarization_map_design()
-    object_ids = {str(item.get("id") or "") for item in objects}
-    object_regions = design.get("object_regions")
-    if isinstance(object_regions, dict):
-        for object_id in list(object_regions.keys()):
-            if object_id not in object_ids:
-                object_regions.pop(object_id, None)
+    object_ids = {str(item["id"]) for item in objects}
+    design["version"] = 2
+    design["object_regions"] = {
+        object_id: deepcopy(COMPACT_OBJECT_REGIONS[object_id])
+        for object_id in sorted(object_ids)
+    }
+    design["tile_sprites"] = {"grass": "grass", "road": "stone_road"}
+    design["decorations"] = deepcopy(COMPACT_DECORATIONS)
     regions = design.get("regions")
     if isinstance(regions, list):
         design["regions"] = [

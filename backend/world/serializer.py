@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
+from persona.llm.debug_trace import LLMTraceStore
 from world.map import serialize_map_design
 
 if TYPE_CHECKING:
@@ -7,15 +8,16 @@ if TYPE_CHECKING:
     from social_sys.platform import SocialPlatform
 
 
-def _extract_last_think(history: list[str]) -> str:
-    """从智能体历史记录中反向搜索，返回最近一次 decision_think 内容。
+def _extract_last_think(agent) -> str:
+    """从结构化短期记忆中读取最近一次 decision_think 内容。
 
     未找到时返回空字符串，前端按空字符串判断是否渲染思考区域。
     """
-    for h in reversed(history):
-        prefix = "decision_think:"
-        if h.startswith(prefix):
-            return h[len(prefix):].strip()
+    memory = getattr(agent, "short_term_memory", None)
+    if memory is not None:
+        entry = memory.latest({"decision_think"})
+        if entry is not None:
+            return str(entry.content or "").strip()
     return ""
 
 
@@ -25,6 +27,12 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
     仅提取前端渲染所需字段，避免将 LLM prompt、ChromaDB 对象等不可序列化
     内容混入广播消息。pos 格式为 [x, y]，与地图坐标系一致。
     """
+    trace_store = getattr(world, "llm_trace_store", None)
+    display_tick = int(world.time) - 1 if int(world.time) > 0 else None
+    if isinstance(trace_store, LLMTraceStore):
+        # 快照是统一的安全清理点；完整调用内容仍由按需接口返回。
+        trace_store.prune(int(world.time))
+
     agents = [
         {
             "id": a.id,
@@ -45,7 +53,15 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
             "opinion_scores": dict(a.opinion_scores),
             "last_opinion_assessment": a.last_opinion_assessment,
             "last_opinion_voting": a.last_opinion_voting,
-            "last_think": _extract_last_think(a.history),
+            "last_think": _extract_last_think(a),
+            "llm_debug": {
+                "display_tick": display_tick,
+                "call_count": (
+                    trace_store.count_for(a.id, display_tick)
+                    if isinstance(trace_store, LLMTraceStore) and display_tick is not None
+                    else 0
+                ),
+            },
             "sleeping": a.sleeping,
             "sleep_ticks_remaining": a.sleep_ticks_remaining,
             "personal_bed_id": getattr(a, "personal_bed_id", None),
@@ -59,6 +75,9 @@ def snapshot(world: "World", platform: "SocialPlatform | None" = None) -> dict:
         {
             "id": o.id,
             "pos": o.position,
+            "footprint": [list(cell) for cell in getattr(o, "footprint", [o.position])],
+            "entrance": getattr(o, "entrance", None),
+            "sprite_key": getattr(o, "sprite_key", None),
             "type": type(o).__name__,
             "kind": getattr(o, "kind", "objects"),  # 物品种类标识，前端用于查找描述元数据
             "owner_agent_id": getattr(o, "owner_agent_id", None),

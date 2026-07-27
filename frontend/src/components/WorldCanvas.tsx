@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as PIXI from 'pixi.js'
 import { useSimStore } from '../store/simStore'
-import type { MapBounds, WorldState } from '../store/simStore'
+import type { MapBounds, MapPosition, ObjectState, WorldState } from '../store/simStore'
 
 // 每格像素大小，沿用 D:/2d 的 32px 像素瓦片风格，画布尺寸由后端 map_size 决定
 const CELL = 32
@@ -11,9 +11,11 @@ const AGENT_COLORS = [0xf6d365, 0xff8fa3, 0x76e4f7, 0xc3f584, 0xb69cff]
 const OBSERVATION_RADIUS = 5
 const MOVE_STEP_MS = 180
 const LAYER_Z = {
-  map: 0,
-  grid: 10,
+  mapTiles: 0,
+  map: 5,
+  roads: 10,
   mapLabels: 20,
+  decorations: 30,
   objects: 100,
   agents: 200,
   selection: 300,
@@ -31,12 +33,110 @@ const TILE_COLORS: Record<PixelTileKind, number> = {
 }
 
 const BUILDING_KINDS = new Set(['building', 'bed', 'food_shop', 'playground', 'company'])
-const BUILDING_LABELS: Record<string, string> = {
-  bed: '床',
-  company: '公',
-  food_shop: '店',
-  playground: '乐',
-  building: '筑',
+
+type SpriteCrop = { x: number; y: number; width: number; height: number }
+
+// 裁切框与已验收测试地图使用的素材有效像素范围完全一致。
+const WORLD_ASSET_URLS = {
+  homes: new URL('../assets/world/agent-homes.png', import.meta.url).href,
+  companies: new URL('../assets/world/company-buildings.png', import.meta.url).href,
+  shops: new URL('../assets/world/shop-buildings.png', import.meta.url).href,
+  playgrounds: new URL('../assets/world/recreation-facilities.png', import.meta.url).href,
+  terrain: new URL('../assets/world/terrain-and-nature.png', import.meta.url).href,
+}
+
+const HOUSE_SPRITES: SpriteCrop[] = [
+  { x: 171, y: 189, width: 364, height: 263 },
+  { x: 575, y: 189, width: 399, height: 264 },
+  { x: 1023, y: 203, width: 398, height: 251 },
+  { x: 147, y: 551, width: 422, height: 237 },
+  { x: 587, y: 537, width: 411, height: 251 },
+  { x: 1035, y: 539, width: 387, height: 249 },
+]
+
+const COMPANY_SPRITES: SpriteCrop[] = [
+  { x: 168, y: 92, width: 364, height: 302 },
+  { x: 586, y: 54, width: 392, height: 340 },
+  { x: 1031, y: 89, width: 396, height: 305 },
+  { x: 172, y: 464, width: 361, height: 280 },
+  { x: 591, y: 475, width: 399, height: 269 },
+  { x: 1042, y: 474, width: 382, height: 270 },
+]
+
+const SHOP_SPRITES: SpriteCrop[] = [
+  { x: 131, y: 114, width: 401, height: 318 },
+  { x: 576, y: 131, width: 403, height: 302 },
+  { x: 1029, y: 120, width: 398, height: 313 },
+  { x: 131, y: 563, width: 401, height: 285 },
+  { x: 577, y: 555, width: 403, height: 292 },
+  { x: 1027, y: 559, width: 401, height: 288 },
+]
+
+const PLAYGROUND_SPRITES: SpriteCrop[] = [
+  { x: 48, y: 48, width: 432, height: 394 },
+  { x: 537, y: 49, width: 424, height: 394 },
+  { x: 54, y: 559, width: 426, height: 337 },
+  { x: 536, y: 552, width: 425, height: 336 },
+]
+
+const TERRAIN_SPRITES = {
+  grass: { x: 84, y: 72, width: 167, height: 136 },
+  stone_road: { x: 304, y: 296, width: 176, height: 144 },
+  trees: [
+    { x: 54, y: 496, width: 234, height: 226 },
+    { x: 319, y: 487, width: 159, height: 234 },
+    { x: 504, y: 496, width: 224, height: 224 },
+    { x: 744, y: 496, width: 231, height: 224 },
+  ],
+  shrubs: [
+    { x: 72, y: 791, width: 188, height: 120 },
+    { x: 296, y: 768, width: 202, height: 144 },
+  ],
+}
+
+type WorldTextureMap = Map<string, PIXI.Texture>
+
+let worldTexturesPromise: Promise<WorldTextureMap> | null = null
+
+function croppedTexture(base: PIXI.Texture, crop: SpriteCrop): PIXI.Texture {
+  const texture = new PIXI.Texture({
+    source: base.source,
+    frame: new PIXI.Rectangle(crop.x, crop.y, crop.width, crop.height),
+  })
+  texture.source.scaleMode = 'nearest'
+  return texture
+}
+
+function registerTextureSeries(
+  target: WorldTextureMap,
+  prefix: string,
+  base: PIXI.Texture,
+  crops: SpriteCrop[],
+) {
+  crops.forEach((crop, index) => target.set(`${prefix}_${index}`, croppedTexture(base, crop)))
+}
+
+function loadWorldTextures(): Promise<WorldTextureMap> {
+  if (worldTexturesPromise) return worldTexturesPromise
+  worldTexturesPromise = Promise.all([
+    PIXI.Assets.load<PIXI.Texture>(WORLD_ASSET_URLS.homes),
+    PIXI.Assets.load<PIXI.Texture>(WORLD_ASSET_URLS.companies),
+    PIXI.Assets.load<PIXI.Texture>(WORLD_ASSET_URLS.shops),
+    PIXI.Assets.load<PIXI.Texture>(WORLD_ASSET_URLS.playgrounds),
+    PIXI.Assets.load<PIXI.Texture>(WORLD_ASSET_URLS.terrain),
+  ]).then(([homes, companies, shops, playgrounds, terrain]) => {
+    const textures: WorldTextureMap = new Map()
+    registerTextureSeries(textures, 'home', homes, HOUSE_SPRITES)
+    registerTextureSeries(textures, 'company', companies, COMPANY_SPRITES)
+    registerTextureSeries(textures, 'shop', shops, SHOP_SPRITES)
+    registerTextureSeries(textures, 'playground', playgrounds, PLAYGROUND_SPRITES)
+    textures.set('grass', croppedTexture(terrain, TERRAIN_SPRITES.grass))
+    textures.set('stone_road', croppedTexture(terrain, TERRAIN_SPRITES.stone_road))
+    registerTextureSeries(textures, 'tree', terrain, TERRAIN_SPRITES.trees)
+    registerTextureSeries(textures, 'shrub', terrain, TERRAIN_SPRITES.shrubs)
+    return textures
+  })
+  return worldTexturesPromise
 }
 
 type AgentGfx = {
@@ -45,6 +145,13 @@ type AgentGfx = {
   x: number
   y: number
   animationId: number
+}
+
+type ObjectGfx = {
+  container: PIXI.Container
+  shape: PIXI.Graphics
+  sprite: PIXI.Sprite
+  badge: PIXI.Text | null
 }
 
 let agentTexture: PIXI.Texture | null = null
@@ -88,12 +195,43 @@ function cellCenter(pos: [number, number]) {
   }
 }
 
-function inferTileKind(row: number, col: number, worldState: WorldState): PixelTileKind {
+function objectFootprint(obj: ObjectState): MapPosition[] {
+  return obj.footprint.length > 0 ? obj.footprint : [obj.pos]
+}
+
+function objectBounds(obj: ObjectState) {
+  const footprint = objectFootprint(obj)
+  const rows = footprint.map(([row]) => row)
+  const cols = footprint.map(([, col]) => col)
+  const rowStart = Math.min(...rows)
+  const rowEnd = Math.max(...rows)
+  const colStart = Math.min(...cols)
+  const colEnd = Math.max(...cols)
+  return {
+    rowStart,
+    rowEnd,
+    colStart,
+    colEnd,
+    width: (colEnd - colStart + 1) * CELL,
+    height: (rowEnd - rowStart + 1) * CELL,
+  }
+}
+
+function inferTileKind(
+  row: number,
+  col: number,
+  worldState: WorldState,
+  roadCells?: Set<string>,
+): PixelTileKind {
   const design = worldState.map_design
   if (design) {
-    for (const road of design.roads) {
-      if (road.cells.some(([roadRow, roadCol]) => roadRow === row && roadCol === col)) {
-        return 'path'
+    if (roadCells) {
+      if (roadCells.has(`${row},${col}`)) return 'path'
+    } else {
+      for (const road of design.roads) {
+        if (road.cells.some(([roadRow, roadCol]) => roadRow === row && roadCol === col)) {
+          return 'path'
+        }
       }
     }
 
@@ -119,12 +257,6 @@ function drawPixelTile(
   const y = row * CELL
   const color = TILE_COLORS[kind]
   gfx.rect(x, y, CELL, CELL).fill(color)
-  gfx.rect(x, y, CELL, 2).fill({ color: 0x000000, alpha: 0.08 })
-  gfx.rect(x, y, 2, CELL).fill({ color: 0x000000, alpha: 0.06 })
-
-  if (kind === 'grass' && (row * 7 + col * 13) % 5 === 0) {
-    gfx.rect(x + 20, y + 8, 4, 10).fill(0x5b8f4b)
-  }
   if (kind === 'garden') {
     gfx.rect(x + 6, y + 6, 20, 4).fill(0x4d7d45)
     gfx.rect(x + 6, y + 16, 20, 4).fill(0x4d7d45)
@@ -180,13 +312,57 @@ function mapSignature(worldState: WorldState, showMapRegions: boolean): string {
   })
 }
 
+function destroyContainerChildren(container: PIXI.Container) {
+  container.removeChildren().forEach((child) => child.destroy())
+}
+
+function addTileSprite(
+  layer: PIXI.Container,
+  texture: PIXI.Texture,
+  row: number,
+  col: number,
+) {
+  const sprite = new PIXI.Sprite(texture)
+  sprite.position.set(col * CELL, row * CELL)
+  sprite.width = CELL
+  sprite.height = CELL
+  layer.addChild(sprite)
+}
+
+function drawDecorations(
+  worldState: WorldState,
+  layer: PIXI.Container,
+  textures: WorldTextureMap,
+) {
+  for (const decoration of worldState.map_design?.decorations ?? []) {
+    const texture = textures.get(decoration.sprite_key)
+    if (!texture) continue
+    const sprite = new PIXI.Sprite(texture)
+    const maxWidth = decoration.kind === 'tree' ? 30 : 29
+    const maxHeight = decoration.kind === 'tree' ? 31 : 19
+    const scale = Math.min(maxWidth / texture.width, maxHeight / texture.height)
+    sprite.width = Math.round(texture.width * scale)
+    sprite.height = Math.round(texture.height * scale)
+    sprite.position.set(
+      decoration.pos[1] * CELL + Math.round((CELL - sprite.width) / 2),
+      decoration.pos[0] * CELL + CELL - sprite.height,
+    )
+    sprite.zIndex = decoration.pos[0]
+    layer.addChild(sprite)
+  }
+  layer.sortChildren()
+}
+
 function drawMapLayers(
   worldState: WorldState,
   showMapRegions: boolean,
   app: PIXI.Application,
   mapGfx: PIXI.Graphics,
-  grid: PIXI.Graphics,
+  tileLayer: PIXI.Container,
+  roadLayer: PIXI.Container,
   labels: PIXI.Container,
+  decorationLayer: PIXI.Container,
+  textures: WorldTextureMap,
 ) {
   const [mapCols, mapRows] = worldState.map_size
   const pixelWidth = mapCols * CELL
@@ -197,13 +373,48 @@ function drawMapLayers(
   }
 
   mapGfx.clear()
-  grid.clear()
-  labels.removeChildren().forEach((child) => child.destroy())
+  destroyContainerChildren(tileLayer)
+  destroyContainerChildren(roadLayer)
+  destroyContainerChildren(labels)
+  destroyContainerChildren(decorationLayer)
 
   if (worldState.map_design) {
+    const roadCells = new Set(
+      worldState.map_design.roads.flatMap((road) => (
+        road.cells.map(([row, col]) => `${row},${col}`)
+      )),
+    )
+    const grassSpriteKey = worldState.map_design.tile_sprites?.grass
+    const grassTexture = grassSpriteKey ? textures.get(grassSpriteKey) : undefined
+    if (grassTexture) {
+      // 大地图只创建一个草地重复纹理层，避免为每个草地格创建 Sprite。
+      const grassLayer = new PIXI.TilingSprite({
+        texture: grassTexture,
+        width: pixelWidth,
+        height: pixelHeight,
+        tileScale: {
+          x: CELL / grassTexture.width,
+          y: CELL / grassTexture.height,
+        },
+      })
+      tileLayer.addChild(grassLayer)
+    }
     for (let row = 0; row < mapRows; row++) {
       for (let col = 0; col < mapCols; col++) {
-        drawPixelTile(mapGfx, row, col, inferTileKind(row, col, worldState))
+        const kind = inferTileKind(row, col, worldState, roadCells)
+        const spriteKey = kind === 'grass'
+          ? worldState.map_design.tile_sprites?.grass
+          : kind === 'path'
+            ? worldState.map_design.tile_sprites?.road
+            : undefined
+        const texture = spriteKey ? textures.get(spriteKey) : undefined
+        if (kind === 'grass' && grassTexture) {
+          continue
+        } else if (texture) {
+          addTileSprite(kind === 'path' ? roadLayer : tileLayer, texture, row, col)
+        } else {
+          drawPixelTile(mapGfx, row, col, kind)
+        }
       }
     }
 
@@ -233,14 +444,7 @@ function drawMapLayers(
       }
     }
   }
-
-  for (let col = 0; col <= mapCols; col++) {
-    grid.moveTo(col * CELL, 0).lineTo(col * CELL, pixelHeight)
-  }
-  for (let row = 0; row <= mapRows; row++) {
-    grid.moveTo(0, row * CELL).lineTo(pixelWidth, row * CELL)
-  }
-  grid.stroke({ color: 0x25251c, width: 1, alpha: 0.18 })
+  drawDecorations(worldState, decorationLayer, textures)
 }
 
 function drawAgentAt(gfx: AgentGfx, x: number, y: number, color: number) {
@@ -304,6 +508,46 @@ function drawPixelObject(
 
   gfx.rect(x + 6, y + 8, 20, 18).fill(0x9b6b43)
   gfx.rect(x + 8, y + 10, 16, 4).fill(0xc28f5c)
+}
+
+function drawObject(
+  gfx: ObjectGfx,
+  obj: ObjectState,
+  textures: WorldTextureMap,
+) {
+  const bounds = objectBounds(obj)
+  const hidden = obj.num !== null && obj.num <= 0
+  gfx.container.position.set(bounds.colStart * CELL, bounds.rowStart * CELL)
+  gfx.container.zIndex = bounds.rowEnd
+  gfx.container.hitArea = new PIXI.Rectangle(0, 0, bounds.width, bounds.height)
+  gfx.container.visible = !hidden
+  gfx.shape.clear()
+
+  const texture = obj.sprite_key ? textures.get(obj.sprite_key) : undefined
+  if (texture && BUILDING_KINDS.has(obj.kind)) {
+    gfx.sprite.texture = texture
+    const maxWidth = Math.max(1, bounds.width - 4)
+    const scale = obj.kind === 'bed'
+      ? maxWidth / texture.width
+      : Math.min(maxWidth / texture.width, Math.max(1, bounds.height - 6) / texture.height)
+    gfx.sprite.width = Math.round(texture.width * scale)
+    gfx.sprite.height = Math.round(texture.height * scale)
+    gfx.sprite.position.set(
+      Math.round((bounds.width - gfx.sprite.width) / 2),
+      Math.round(bounds.height - gfx.sprite.height - (obj.kind === 'bed' ? 1 : 3)),
+    )
+    gfx.sprite.visible = true
+  } else {
+    gfx.sprite.visible = false
+    drawPixelObject(gfx.shape, obj.kind, 0, 0)
+  }
+
+  if (gfx.badge) {
+    const count = obj.occupant_count ?? 0
+    gfx.badge.text = String(count)
+    gfx.badge.position.set(bounds.width - 1, 1)
+    gfx.badge.visible = count > 0
+  }
 }
 
 function animateAgentAlongPath(
@@ -378,10 +622,13 @@ function drawSelection(
   if (selectedObjectId) {
     const obj = worldState.objects.find((o) => o.id === selectedObjectId)
     if (obj) {
-      const sx = obj.pos[1] * CELL
-      const sy = obj.pos[0] * CELL
+      const bounds = objectBounds(obj)
+      const sx = bounds.colStart * CELL
+      const sy = bounds.rowStart * CELL
       if (BUILDING_KINDS.has(obj.kind)) {
-        selGfx.rect(sx + 3, sy + 3, CELL - 6, CELL - 6).stroke({ color: 0xf8c86b, width: 2 })
+        selGfx
+          .rect(sx + 3, sy + 3, bounds.width - 6, bounds.height - 6)
+          .stroke({ color: 0xf8c86b, width: 2 })
       } else {
         selGfx.rect(sx + 7, sy + 7, 18, 18).stroke({ color: 0xf8c86b, width: 2 })
       }
@@ -403,11 +650,14 @@ export function WorldCanvas() {
   const appRef = useRef<PIXI.Application | null>(null)
   // 按智能体 ID 缓存 Graphics/Text 对象，tick 时只更新坐标，不重建
   const agentGfxRef = useRef<Map<string, AgentGfx>>(new Map())
-  // 按对象 ID 缓存场景物体的 Graphics 和可选的占用数量标签
-  const objectGfxRef = useRef<Map<string, { g: PIXI.Graphics; badge: PIXI.Text | null; kindLabel: PIXI.Text | null }>>(new Map())
+  // 按对象 ID 缓存素材容器和占用数量标签。
+  const objectGfxRef = useRef<Map<string, ObjectGfx>>(new Map())
+  const worldTexturesRef = useRef<WorldTextureMap>(new Map())
   const mapGfxRef = useRef<PIXI.Graphics | null>(null)
-  const gridGfxRef = useRef<PIXI.Graphics | null>(null)
+  const mapTileLayerRef = useRef<PIXI.Container | null>(null)
+  const roadLayerRef = useRef<PIXI.Container | null>(null)
   const mapLabelContainerRef = useRef<PIXI.Container | null>(null)
+  const decorationLayerRef = useRef<PIXI.Container | null>(null)
   const objectLayerRef = useRef<PIXI.Container | null>(null)
   const agentLayerRef = useRef<PIXI.Container | null>(null)
   const mapSignatureRef = useRef<string>('')
@@ -439,7 +689,14 @@ export function WorldCanvas() {
       background: 0x141714,
       antialias: false,
       resolution: window.devicePixelRatio || 1,
-    }).then(() => {
+    }).then(async () => {
+      let textures: WorldTextureMap = new Map()
+      try {
+        textures = await loadWorldTextures()
+      } catch (error) {
+        // 素材加载失败时保留原像素图形，避免画布整体不可用。
+        console.error('world_assets_load_failed', error)
+      }
       if (cancelled) {
         // cleanup 先于 init 完成时，在这里安全销毁
         app.destroy(true)
@@ -449,30 +706,51 @@ export function WorldCanvas() {
       el.appendChild(app.canvas)
 
       app.stage.sortableChildren = true
+      const mapTiles = new PIXI.Container()
       const mapGfx = new PIXI.Graphics()
-      const grid = new PIXI.Graphics()
+      const roads = new PIXI.Container()
       const mapLabels = new PIXI.Container()
+      const decorations = new PIXI.Container()
       const objectLayer = new PIXI.Container()
       const agentLayer = new PIXI.Container()
+      mapTiles.zIndex = LAYER_Z.mapTiles
       mapGfx.zIndex = LAYER_Z.map
-      grid.zIndex = LAYER_Z.grid
+      roads.zIndex = LAYER_Z.roads
       mapLabels.zIndex = LAYER_Z.mapLabels
+      decorations.zIndex = LAYER_Z.decorations
       objectLayer.zIndex = LAYER_Z.objects
       agentLayer.zIndex = LAYER_Z.agents
+      decorations.sortableChildren = true
+      objectLayer.sortableChildren = true
+      worldTexturesRef.current = textures
       mapGfxRef.current = mapGfx
-      gridGfxRef.current = grid
+      mapTileLayerRef.current = mapTiles
+      roadLayerRef.current = roads
       mapLabelContainerRef.current = mapLabels
+      decorationLayerRef.current = decorations
       objectLayerRef.current = objectLayer
       agentLayerRef.current = agentLayer
+      app.stage.addChild(mapTiles)
       app.stage.addChild(mapGfx)
-      app.stage.addChild(grid)
+      app.stage.addChild(roads)
       app.stage.addChild(mapLabels)
+      app.stage.addChild(decorations)
       app.stage.addChild(objectLayer)
       app.stage.addChild(agentLayer)
       const currentWorldState = useSimStore.getState().worldState
       if (currentWorldState) {
         const currentShowMapRegions = useSimStore.getState().showMapRegions
-        drawMapLayers(currentWorldState, currentShowMapRegions, app, mapGfx, grid, mapLabels)
+        drawMapLayers(
+          currentWorldState,
+          currentShowMapRegions,
+          app,
+          mapGfx,
+          mapTiles,
+          roads,
+          mapLabels,
+          decorations,
+          textures,
+        )
         mapSignatureRef.current = mapSignature(currentWorldState, currentShowMapRegions)
       }
 
@@ -494,8 +772,10 @@ export function WorldCanvas() {
       }
       appRef.current = null
       mapGfxRef.current = null
-      gridGfxRef.current = null
+      mapTileLayerRef.current = null
+      roadLayerRef.current = null
       mapLabelContainerRef.current = null
+      decorationLayerRef.current = null
       objectLayerRef.current = null
       agentLayerRef.current = null
       mapSignatureRef.current = ''
@@ -515,13 +795,25 @@ export function WorldCanvas() {
     const agentLayer = agentLayerRef.current
 
     const mapGfx = mapGfxRef.current
-    const gridGfx = gridGfxRef.current
+    const mapTiles = mapTileLayerRef.current
+    const roads = roadLayerRef.current
     const mapLabels = mapLabelContainerRef.current
-    if (!objectLayer || !agentLayer || !mapGfx || !gridGfx || !mapLabels) return
+    const decorations = decorationLayerRef.current
+    if (!objectLayer || !agentLayer || !mapGfx || !mapTiles || !roads || !mapLabels || !decorations) return
 
     const signature = mapSignature(worldState, showMapRegions)
     if (signature !== mapSignatureRef.current) {
-      drawMapLayers(worldState, showMapRegions, app, mapGfx, gridGfx, mapLabels)
+      drawMapLayers(
+        worldState,
+        showMapRegions,
+        app,
+        mapGfx,
+        mapTiles,
+        roads,
+        mapLabels,
+        decorations,
+        worldTexturesRef.current,
+      )
       mapSignatureRef.current = signature
     }
 
@@ -529,76 +821,42 @@ export function WorldCanvas() {
     const seenObjects = new Set<string>()
     for (const obj of worldState.objects) {
       seenObjects.add(obj.id)
-      const sx = obj.pos[1] * CELL
-      const sy = obj.pos[0] * CELL
 
-      // 首次出现时创建 Graphics（和可选的占用数量标签），后续只重绘
+      // 首次出现时创建一个可点击容器，后续只更新素材和位置。
       if (!objectGfx.has(obj.id)) {
-        const g = new PIXI.Graphics()
+        const container = new PIXI.Container()
+        const shape = new PIXI.Graphics()
+        const sprite = new PIXI.Sprite(PIXI.Texture.EMPTY)
         // 物品支持点击选中，与智能体圆圈行为一致
-        g.eventMode = 'static'
-        g.cursor = 'pointer'
-        g.on('pointerdown', () => {
+        container.eventMode = 'static'
+        container.cursor = 'pointer'
+        container.on('pointerdown', () => {
           const { selectedObjectId: curId, selectObject: sel } = useSimStore.getState()
           sel(obj.id === curId ? null : obj.id)
         })
-        objectLayer.addChild(g)
-        // 建筑才需要占用数量标签和种类标签
+        container.addChild(shape)
+        container.addChild(sprite)
+        // 建筑人数徽标与素材使用同一容器，跟随完整占地移动。
         let badge: PIXI.Text | null = null
-        let kindLabel: PIXI.Text | null = null
         if (BUILDING_KINDS.has(obj.kind)) {
           badge = new PIXI.Text({ text: '', style: BADGE_STYLE })
           badge.anchor.set(1, 0)
-          objectLayer.addChild(badge)
-          kindLabel = new PIXI.Text({
-            text: BUILDING_LABELS[obj.kind] ?? obj.kind,
-            style: BADGE_STYLE,
-          })
-          kindLabel.anchor.set(0.5, 0.5)
-          objectLayer.addChild(kindLabel)
+          container.addChild(badge)
         }
-        objectGfx.set(obj.id, { g, badge, kindLabel })
+        objectLayer.addChild(container)
+        objectGfx.set(obj.id, { container, shape, sprite, badge })
       }
-      const { g, badge, kindLabel } = objectGfx.get(obj.id)!
-      g.clear()
-      // num <= 0 表示物品已耗尽，隐藏方块而非移除，保留对象引用
-      const hidden = obj.num !== null && obj.num <= 0
-      if (!hidden) {
-        drawPixelObject(g, obj.kind, sx, sy)
-      }
-      // 更新种类标签（格子中央）
-      if (kindLabel) {
-        kindLabel.visible = !hidden
-        kindLabel.position.set(sx + CELL / 2, sy + CELL / 2)
-      }
-      // 更新占用数量标签（右上角）
-      if (badge) {
-        const count = obj.occupant_count ?? 0
-        if (count > 0 && !hidden) {
-          badge.text = String(count)
-          badge.position.set(sx + CELL - 1, sy + 1)
-          badge.visible = true
-        } else {
-          badge.visible = false
-        }
-      }
+      drawObject(objectGfx.get(obj.id)!, obj, worldTexturesRef.current)
     }
     // 清除服务端已不存在的物体
-    for (const [id, { g, badge, kindLabel }] of objectGfx) {
+    for (const [id, { container }] of objectGfx) {
       if (!seenObjects.has(id)) {
-        objectLayer.removeChild(g)
-        g.destroy()
-        if (badge) {
-          objectLayer.removeChild(badge)
-          badge.destroy()
-        }
-        if (kindLabel) {
-          objectLayer.removeChild(kindLabel)
-          kindLabel.destroy()
-        }
+        objectLayer.removeChild(container)
+        container.destroy({ children: true })
         objectGfx.delete(id)
       }
     }
+    objectLayer.sortChildren()
 
     // 更新智能体
     const seenAgents = new Set<string>()

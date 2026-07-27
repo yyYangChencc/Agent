@@ -11,6 +11,6 @@ AGENT_IDS = list(SPEC["agent_ids"])
 
 
 def build_runtime(**kwargs):
-    """构建异侧关注且保留原社区分配的 30 人场景。"""
+    """使用共享真实历史初始化构建异侧关注的 30 人场景。"""
 
     return build_runtime_from_spec(deepcopy(SPEC), **kwargs)

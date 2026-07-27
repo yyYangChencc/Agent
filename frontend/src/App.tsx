@@ -12,9 +12,11 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-[#20251f] text-[#243225]">
       <ControlBar />
-      {/* 画布固定 600px 宽，智能体面板和社交面板占剩余空间 */}
-      <div className="flex flex-1 overflow-hidden bg-[#141714]">
-        <WorldCanvas />
+      {/* 只让地图区域双向滚动，智能体与社交面板始终保留在视口内。 */}
+      <div className="flex flex-1 min-h-0 overflow-hidden bg-[#141714]">
+        <div className="flex-1 min-w-0 overflow-auto">
+          <WorldCanvas />
+        </div>
         <AgentPanel />
         <SocialPanel />
       </div>
