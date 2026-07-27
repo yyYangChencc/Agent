@@ -27,9 +27,19 @@ logs/
 CLAUDE.md
 frontend/node_modules/
 frontend/.vite/
+frontend/dist/
 *.tsbuildinfo
+
+# 本地前端工具缓存
+.npm-cache/
+.playwright-cli/
+
+# 本地测试与验收产物
+output/
+
 data/
 backend/history/
 backend/history_mock/
 backend/history_test/
 literature/
+tmp/
